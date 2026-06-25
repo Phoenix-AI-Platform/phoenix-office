@@ -79,6 +79,26 @@ print(fields.pricing_note)     # Price is based on normal pumping…
 `ProposalFields` is a plain dataclass whose string attributes can be
 injected directly into a DOCX template or passed to a PDF renderer.
 
+To render a finished Word document from a template:
+
+```python
+from phoenix_office.renderers import DocxProposalRenderer
+
+DocxProposalRenderer().render(
+    proposal,
+    template_path="templates/proposal.docx",
+    output_path="output/proposal.docx",
+)
+```
+
+Use ``{{customer_name}}``, ``{{street_address}}``, ``{{city_state_zip}}``,
+``{{proposal_date}}``, ``{{item_description}}``, ``{{scope_block}}``,
+``{{total_line}}``, ``{{pricing_note}}``, and ``{{notes}}`` placeholders in
+the DOCX template. The renderer replaces text while preserving the original
+template layout as much as possible. Place ``{{total_line}}`` on the line
+where the full TOTAL text should appear, since that field already includes the
+configured total label.
+
 ---
 
 ## Data Model
@@ -127,7 +147,7 @@ python -m ruff check src/ tests/
 
 ## Roadmap
 
-- [ ] DOCX template renderer (python-docx)
+- [x] DOCX template renderer (python-docx)
 - [ ] PDF export
 - [ ] Customer records / CRM
 - [ ] Job history
