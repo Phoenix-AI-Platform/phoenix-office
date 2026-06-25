@@ -90,12 +90,16 @@ class ProposalGenerator:
     # ------------------------------------------------------------------
 
     def render_date(self, d: object) -> str:  # accepts ``datetime.date``
-        """Format a date as ``Month D, YYYY`` (e.g. ``January 1, 2024``)."""
+        """Format a date as ``Month D, YYYY`` (e.g. ``January 1, 2024``).
+
+        Uses ``d.day`` directly to avoid the Linux-only ``%-d`` strftime
+        directive, making the output identical on Windows and Unix.
+        """
         from datetime import date as date_type
 
         if not isinstance(d, date_type):
             raise TypeError(f"Expected datetime.date, got {type(d)!r}")
-        return d.strftime("%B %-d, %Y")
+        return f"{d.strftime('%B')} {d.day}, {d.strftime('%Y')}"
 
     def render_scope_block(self, items: list[ScopeItem]) -> str:
         """Render all scope items as a numbered list joined by newlines.

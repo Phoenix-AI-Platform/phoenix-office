@@ -66,6 +66,9 @@ class TestRenderDate:
     def test_december(self, generator):
         assert generator.render_date(date(2023, 12, 31)) == "December 31, 2023"
 
+    def test_june_25_2026(self, generator):
+        assert generator.render_date(date(2026, 6, 25)) == "June 25, 2026"
+
     def test_invalid_type_raises(self, generator):
         with pytest.raises(TypeError):
             generator.render_date("2024-01-15")
