@@ -54,6 +54,10 @@ proposal = ProposalInput(
         company_name="A-1 Tank Removal",
         terms_and_conditions="Payment is due upon completion of work.",
     ),
+    notes=[
+        "Price is based on normal pumping, cleaning, and removal of the tank.",
+        "Additional charges may apply depending on the quantity and condition of the tank contents.",
+    ],
 )
 
 # 2. Generate rendered fields

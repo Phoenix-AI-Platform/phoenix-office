@@ -206,10 +206,10 @@ class TestProposalInput:
     def test_default_company_config(self, abby_hill_proposal):
         assert abby_hill_proposal.company_config.total_label == "TOTAL"
 
-    def test_optional_general_notes(self, abby_hill_proposal):
-        assert abby_hill_proposal.notes is None
+    def test_default_notes_is_empty_list(self, abby_hill_proposal):
+        assert abby_hill_proposal.notes == []
 
-    def test_general_notes_can_be_set(self):
+    def test_single_note_can_be_set(self):
         p = ProposalInput(
             customer_name="Test",
             street_address="123 Main",
@@ -218,6 +218,21 @@ class TestProposalInput:
             item_description="Some work",
             scope_items=[ScopeItem(number=1, description="Step 1")],
             pricing=PricingLine(amount=Decimal("1000.00")),
-            notes="Please call before arrival.",
+            notes=["Please call before arrival."],
         )
-        assert p.notes == "Please call before arrival."
+        assert p.notes == ["Please call before arrival."]
+
+    def test_multiple_notes_can_be_set(self):
+        p = ProposalInput(
+            customer_name="Test",
+            street_address="123 Main",
+            city_state_zip="Anytown, WI 53000",
+            proposal_date=date(2024, 1, 1),
+            item_description="Some work",
+            scope_items=[ScopeItem(number=1, description="Step 1")],
+            pricing=PricingLine(amount=Decimal("1000.00")),
+            notes=["Please call before arrival.", "Gate code is 1234."],
+        )
+        assert len(p.notes) == 2
+        assert p.notes[0] == "Please call before arrival."
+        assert p.notes[1] == "Gate code is 1234."

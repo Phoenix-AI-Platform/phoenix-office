@@ -11,7 +11,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ScopeItem(BaseModel):
@@ -56,16 +56,6 @@ class PricingLine(BaseModel):
         if v <= 0:
             raise ValueError("Pricing amount must be greater than zero.")
         return v
-
-    @model_validator(mode="after")
-    def pricing_note_placement(self) -> PricingLine:
-        """Warn at model level if a pricing_note is given without is_starting_at.
-
-        This is not an error — fixed-price proposals can still carry a note —
-        but the A-1 convention places the pricing_note below the total only
-        when is_starting_at is True.
-        """
-        return self
 
 
 class CompanyConfig(BaseModel):
@@ -136,8 +126,8 @@ class ProposalInput(BaseModel):
         description="Ordered list of numbered scope-of-work items.",
     )
     pricing: PricingLine = Field(..., description="Pricing total and related notes.")
-    notes: str | None = Field(
-        default=None,
+    notes: list[str] = Field(
+        default_factory=list,
         description="General proposal notes separate from the pricing note.",
     )
     company_config: CompanyConfig = Field(

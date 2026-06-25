@@ -210,3 +210,19 @@ class TestPrepareAbbyHill:
     def test_no_general_notes(self, generator, abby_hill_proposal):
         fields = generator.prepare(abby_hill_proposal)
         assert fields.notes == ""
+
+    def test_multiple_general_notes_joined(self, generator):
+        from phoenix_office.models.proposal import ProposalInput
+
+        proposal = ProposalInput(
+            customer_name="Test",
+            street_address="123 Main",
+            city_state_zip="Anytown, WI 53000",
+            proposal_date=date(2024, 1, 1),
+            item_description="Some work",
+            scope_items=[ScopeItem(number=1, description="Step 1")],
+            pricing=PricingLine(amount=Decimal("1000.00")),
+            notes=["Please call before arrival.", "Gate code is 1234."],
+        )
+        fields = generator.prepare(proposal)
+        assert fields.notes == "Please call before arrival.\nGate code is 1234."

@@ -82,7 +82,7 @@ class ProposalGenerator:
             scope_block=self.render_scope_block(proposal.scope_items),
             total_line=self.render_total_line(proposal.pricing, cfg),
             pricing_note=self.render_pricing_note(proposal.pricing),
-            notes=proposal.notes or "",
+            notes="\n".join(proposal.notes),
         )
 
     # ------------------------------------------------------------------
