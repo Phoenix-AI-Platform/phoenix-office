@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from phoenix_office.core.contracts import (
     ApprovalDecision,
@@ -39,7 +39,7 @@ from phoenix_office.core.contracts import (
     WorkerType,
 )
 
-FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
+FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
 
 
 def test_contract_enum_values_match_architecture_docs():
