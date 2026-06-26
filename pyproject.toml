@@ -12,6 +12,9 @@ dependencies = [
     "python-docx>=1.1",
 ]
 
+[project.scripts]
+phoenix-office = "phoenix_office.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
