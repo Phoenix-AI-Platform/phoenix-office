@@ -1,0 +1,50 @@
+name: Bug Report
+description: Report a defect in Phoenix Office behavior.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: Describe the actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what should have happened.
+    validations:
+      required: true
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide exact steps.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: relevant_command_output
+    attributes:
+      label: Relevant command/output
+      description: Include command output, stack traces, or logs.
+      render: shell
+  - type: textarea
+    id: files_or_area_affected
+    attributes:
+      label: Files or area affected
+      description: List impacted files, modules, or docs areas.
+  - type: textarea
+    id: verification_attempted
+    attributes:
+      label: Verification attempted
+      description: What checks did you run to verify/fail to verify a fix?
+      placeholder: |
+        python -m pytest
+        ruff check .

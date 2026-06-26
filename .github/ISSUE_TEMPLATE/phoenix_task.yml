@@ -1,0 +1,87 @@
+name: Phoenix Task
+description: Create a scoped implementation task for Codex/Copilot workers.
+title: "[Phoenix Task]: "
+labels:
+  - task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Phoenix Guardrails
+        - No orchestrator unless explicitly requested.
+        - No worker execution unless explicitly requested.
+        - No plugin runtime behavior unless explicitly requested.
+        - No proposal generation behavior changes unless explicitly requested.
+        - No CLI behavior changes unless explicitly requested.
+        - No DOCX rendering behavior changes unless explicitly requested.
+        - No unrelated code churn.
+  - type: input
+    id: task_title
+    attributes:
+      label: Task title
+      description: Short, implementation-ready task name.
+      placeholder: Add issue templates and workflow docs
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What outcome should this task deliver?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is in scope for this task?
+      placeholder: List exact files or areas to touch.
+    validations:
+      required: true
+  - type: textarea
+    id: forbidden_changes
+    attributes:
+      label: Explicitly forbidden changes
+      description: List what must not be changed.
+      value: |
+        - No orchestrator changes unless explicitly requested.
+        - No worker execution changes unless explicitly requested.
+        - No plugin runtime behavior changes unless explicitly requested.
+        - No proposal generation behavior changes unless explicitly requested.
+        - No CLI behavior changes unless explicitly requested.
+        - No DOCX rendering behavior changes unless explicitly requested.
+        - No unrelated code churn.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Define clear pass/fail outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification commands
+      description: Commands and checks required before merge.
+      placeholder: |
+        python -m pytest
+        ruff check .
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk level
+      options:
+        - Low
+        - Medium
+        - High
+    validations:
+      required: true
+  - type: textarea
+    id: ai_worker_notes
+    attributes:
+      label: Notes for AI worker
+      description: Extra implementation guidance or reviewer context.
