@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import Enum, StrEnum
 from typing import Any, Self
 
 
-class _StringEnum(str, Enum):
+class _StringEnum(StrEnum):
     """String enum base so serialized values are stable and readable."""
 
 
@@ -176,7 +176,7 @@ class FailureCode(_StringEnum):
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _serialize(value: Any) -> Any:
@@ -185,7 +185,10 @@ def _serialize(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if is_dataclass(value):
-        return {contract_field.name: _serialize(getattr(value, contract_field.name)) for contract_field in fields(value)}
+        return {
+            contract_field.name: _serialize(getattr(value, contract_field.name))
+            for contract_field in fields(value)
+        }
     if isinstance(value, list):
         return [_serialize(item) for item in value]
     if isinstance(value, dict):
