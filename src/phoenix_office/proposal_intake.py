@@ -104,10 +104,11 @@ def _prompt_choice(prompt: Prompt, message: str, choices: set[str]) -> str:
 
 
 def _prompt_tank_size(prompt: Prompt) -> str:
-    value = _prompt_required(
-        prompt,
-        f"Tank size (gallons) [{'/'.join(TANK_SIZE_PRESETS)} or custom]: ",
-    )
+    print("Tank size presets:")
+    for idx, preset in enumerate(TANK_SIZE_PRESETS, start=1):
+        print(f"  {idx}. {preset}")
+
+    value = _prompt_required(prompt, "Enter number for preset or type custom tank size: ")
     preset_by_number = {str(idx): preset for idx, preset in enumerate(TANK_SIZE_PRESETS, start=1)}
     return preset_by_number.get(value, value)
 

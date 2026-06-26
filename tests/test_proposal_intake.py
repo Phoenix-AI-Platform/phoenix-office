@@ -79,6 +79,34 @@ def test_blank_proposal_date_defaults_to_today():
     assert proposal.proposal_date == date(2026, 6, 26)
 
 
+def test_tank_size_preset_prompt_output_includes_numbered_mappings(capsys):
+    collect_proposal_input(
+        scripted_prompt(
+            [
+                "Jane Customer",
+                "123 Main St.",
+                "Milwaukee, WI 53202",
+                "2026-06-25",
+                "1",
+                "AST",
+                "known",
+                "fixed",
+                "1500",
+                "",
+                "",
+            ]
+        ),
+        today=date(2026, 6, 26),
+    )
+
+    captured = capsys.readouterr()
+    assert "Tank size presets:" in captured.out
+    assert "  1. 275" in captured.out
+    assert "  2. 500" in captured.out
+    assert "  3. 550" in captured.out
+    assert "  4. 1000" in captured.out
+
+
 def test_selecting_common_tank_size_preset_uses_preset_value():
     proposal = collect_proposal_input(
         scripted_prompt(
