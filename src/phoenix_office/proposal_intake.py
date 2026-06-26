@@ -13,7 +13,8 @@ Prompt = Callable[[str], str]
 TANK_SIZE_PRESETS = ("275", "500", "550", "1000")
 PRICING_NOTE_PRESETS = (
     "Additional charges may apply if contents are discovered in the tank.",
-    "Additional charges may apply if concrete, obstructions, or unusual access conditions are encountered.",
+    "Additional charges may apply if concrete, obstructions, or unusual access conditions "
+    "are encountered.",
     "Starting at price based on information provided prior to inspection.",
 )
 OPTIONAL_NOTE_PRESETS = (
