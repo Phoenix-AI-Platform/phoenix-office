@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from docx import Document
@@ -50,6 +51,62 @@ def test_cli_generates_abby_hill_docx_from_example_json(tmp_path, capsys):
     assert "June 25, 2026" in text
     assert "Removal of 1,000 Gallon Aboveground Storage Tank" in text
     assert "TOTAL: Starting at $3,000.00" in text
+
+
+def test_cli_intake_generates_docx_and_optional_json(tmp_path, capsys, monkeypatch):
+    output_path = tmp_path / "intake_proposal.docx"
+    json_output_path = tmp_path / "intake_proposal.json"
+    answers = iter(
+        [
+            "Jane Customer",
+            "123 Main St.",
+            "Milwaukee, WI 53202",
+            "2026-06-25",
+            "1,000",
+            "AST",
+            "unknown",
+            "starting-at",
+            "3000",
+            "Additional charges may apply after inspection.",
+            "Please call before arrival.",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _message: next(answers))
+
+    exit_code = main(
+        [
+            "proposal",
+            "intake",
+            "--template",
+            str(A1_TEMPLATE),
+            "--output",
+            str(output_path),
+            "--json-output",
+            str(json_output_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    text = read_docx_text(output_path)
+    proposal_json = json.loads(json_output_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert "Generated proposal DOCX" in captured.out
+    assert "Wrote proposal JSON" in captured.out
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert json_output_path.exists()
+    assert proposal_json["customer_name"] == "Jane Customer"
+    assert proposal_json["pricing"]["is_starting_at"] is True
+    assert proposal_json["pricing"]["pricing_note"] == (
+        "Additional charges may apply after inspection."
+    )
+    assert "Jane Customer" in text
+    assert "Remove one 1,000 gallon AST tank located at 123 Main St., " in text
+    assert "Milwaukee, WI 53202 (contents unknown)." in text
+    assert "TOTAL: Starting at $3,000.00" in text
+    assert "Additional charges may apply after inspection." in text
+    assert "Please call before arrival." in text
 
 
 def test_cli_creates_output_directory(tmp_path):
