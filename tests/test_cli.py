@@ -272,3 +272,38 @@ def test_cli_fails_cleanly_when_model_validation_fails(tmp_path, capsys):
     assert exit_code != 0
     assert "Invalid proposal input" in captured.err
     assert not output_path.exists()
+
+
+def test_cli_capabilities_list_outputs_registered_capabilities(capsys):
+    exit_code = main(["capabilities", "list"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "office.generate_proposal" in captured.out
+    assert "phoenix-office" in captured.out
+    assert "Generate Proposal" in captured.out
+    assert "office" in captured.out
+    assert "mutate" in captured.out
+    assert "medium" in captured.out
+
+
+def test_cli_capabilities_list_does_not_require_proposal_files(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(["capabilities", "list"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "office.generate_proposal" in captured.out
+
+
+def test_cli_capabilities_list_json_outputs_registered_capabilities(capsys):
+    exit_code = main(["capabilities", "list", "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert any(
+        capability["capability_id"] == "office.generate_proposal"
+        for capability in payload
+    )

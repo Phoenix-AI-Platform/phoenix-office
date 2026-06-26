@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from phoenix_office.models.proposal import ProposalInput
+from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.renderers import DocxProposalRenderer
 
@@ -59,6 +60,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     intake_parser.set_defaults(func=intake_proposal)
 
+    capabilities_parser = subparsers.add_parser(
+        "capabilities",
+        help="Inspect registered Phoenix plugin capabilities",
+    )
+    capabilities_subparsers = capabilities_parser.add_subparsers(
+        dest="capabilities_command"
+    )
+    list_parser = capabilities_subparsers.add_parser(
+        "list",
+        help="List registered Phoenix plugin capabilities",
+    )
+    list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output registered capabilities as JSON",
+    )
+    list_parser.set_defaults(func=list_capabilities)
+
     return parser
 
 
@@ -100,6 +119,26 @@ def generate_proposal(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Generated proposal DOCX: {result}")
+    return 0
+
+
+def list_capabilities(args: argparse.Namespace) -> int:
+    capabilities = get_registered_plugin_capabilities()
+
+    if args.json:
+        payload = [capability.to_dict() for capability in capabilities]
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    for index, capability in enumerate(capabilities):
+        if index:
+            print()
+        print(capability.capability_id)
+        print(f"plugin: {capability.plugin_id}")
+        print(f"name: {capability.name}")
+        print(f"category: {capability.category}")
+        print(f"operation: {capability.operation_type.value}")
+        print(f"risk: {capability.risk_level.value}")
     return 0
 
 
