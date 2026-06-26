@@ -2,6 +2,8 @@
 
 This roadmap turns the architecture manual into implementation phases. It is intentionally platform-level and not limited to Phoenix Office.
 
+The platform direction is anchored by [ADR 0001](decisions/0001-phoenix-as-ai-operations-platform.md). Draft contract shapes live in [Contracts](contracts.md) and should be refined before runtime schemas are implemented.
+
 ## Phase 0: Architecture Baseline
 
 Status: in progress
@@ -9,14 +11,17 @@ Status: in progress
 - Define Phoenix as an AI Operations Platform.
 - Document worker, plugin, memory, orchestrator, and security models.
 - Establish ChatGPT architect and Codex implementation workflow.
+- Add architecture decision records for foundational platform choices.
+- Draft concrete contract examples for task, worker, plugin, approval, and verification records.
 - Keep application feature work paused while the platform direction is clarified.
 
 ## Phase 1: Contracts And Skeletons
 
-- Define task envelope schema.
-- Define worker event schema.
-- Define plugin capability schema.
-- Define approval request and approval record schema.
+- Refine TaskEnvelope from the contract sketch into a versioned runtime schema.
+- Refine WorkerEvent from the contract sketch into a versioned runtime schema.
+- Refine PluginCapability from the contract sketch into a versioned runtime schema.
+- Refine ApprovalRequest and ApprovalRecord into versioned runtime schemas.
+- Refine VerificationEvidence into a versioned runtime schema.
 - Define memory event schema.
 - Add minimal Phoenix Core package boundaries.
 
