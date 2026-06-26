@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
-from typing import Any, Self
+from typing import Any
 
 
 class _StringEnum(StrEnum):
@@ -207,11 +207,6 @@ class SerializableContract:
     def to_json(self) -> str:
         """Return a JSON string representation."""
         return json.dumps(self.to_dict(), sort_keys=True)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Self:
-        """Construct a contract from a dictionary without runtime validation."""
-        return cls(**data)
 
 
 @dataclass(slots=True)
