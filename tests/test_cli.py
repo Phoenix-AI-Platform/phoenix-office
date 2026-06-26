@@ -109,6 +109,55 @@ def test_cli_intake_generates_docx_and_optional_json(tmp_path, capsys, monkeypat
     assert "Please call before arrival." in text
 
 
+def test_cli_intake_preset_flow_generates_expected_docx_text(tmp_path, capsys, monkeypatch):
+    output_path = tmp_path / "preset_intake_proposal.docx"
+    answers = iter(
+        [
+            "Jane Customer",
+            "123 Main St.",
+            "Milwaukee, WI 53202",
+            "2026-06-25",
+            "1",
+            "AST",
+            "unknown",
+            "starting-at",
+            "3000",
+            "3",
+            "1",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _message: next(answers))
+
+    exit_code = main(
+        [
+            "proposal",
+            "intake",
+            "--template",
+            str(A1_TEMPLATE),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    text = read_docx_text(output_path)
+
+    assert exit_code == 0
+    assert "Generated proposal DOCX" in captured.out
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert "Jane Customer" in text
+    assert "123 Main St." in text
+    assert "Milwaukee, WI 53202" in text
+    assert (
+        "Remove one 275 gallon AST tank located at 123 Main St., "
+        "Milwaukee, WI 53202 (contents unknown)."
+    ) in text
+    assert "TOTAL: Starting at $3,000.00" in text
+    assert "Starting at price based on information provided prior to inspection." in text
+    assert "Payment due upon completion." in text
+
+
 def test_cli_creates_output_directory(tmp_path):
     output_path = tmp_path / "nested" / "output" / "abby_hill_proposal.docx"
 
