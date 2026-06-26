@@ -1,0 +1,56 @@
+{
+  "acceptance_criteria": [
+    "The output DOCX artifact exists at output/abby_hill_proposal.docx.",
+    "The output DOCX artifact can be inspected."
+  ],
+  "allowed_resources": {
+    "capabilities": [
+      "office.generate_proposal"
+    ],
+    "paths": [
+      "examples/proposals/abby_hill.json",
+      "output/abby_hill_proposal.docx",
+      "tests/fixtures/templates/a1_proposal_template.docx"
+    ]
+  },
+  "approval_policy": {
+    "approvers": [],
+    "required_before": []
+  },
+  "context_refs": [
+    "examples/proposals/abby_hill.json",
+    "output/abby_hill_proposal.docx",
+    "tests/fixtures/templates/a1_proposal_template.docx"
+  ],
+  "constraints": [
+    "Do not execute proposal generation from this contract factory."
+  ],
+  "created_at": "2026-06-26T12:00:00+00:00",
+  "objective": "Generate a local proposal DOCX from proposal input and a DOCX template.",
+  "permissions": {
+    "destructive": false,
+    "execute": false,
+    "network": false,
+    "read": true,
+    "write": true
+  },
+  "priority": "normal",
+  "requester": {
+    "id": "human:matt",
+    "type": "human"
+  },
+  "source": {
+    "kind": "api",
+    "uri": null
+  },
+  "status": "requested",
+  "task_id": "task-proposal-abby-hill",
+  "title": "Generate proposal",
+  "updated_at": "2026-06-26T12:00:00+00:00",
+  "verification_plan": {
+    "commands": [],
+    "evidence_required": [
+      "artifact"
+    ]
+  }
+}
