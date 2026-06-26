@@ -10,6 +10,19 @@ from phoenix_office.models.proposal import PricingLine, ProposalInput, ScopeItem
 
 Prompt = Callable[[str], str]
 
+TANK_SIZE_PRESETS = ("275", "500", "550", "1000")
+PRICING_NOTE_PRESETS = (
+    "Additional charges may apply if contents are discovered in the tank.",
+    "Additional charges may apply if concrete, obstructions, or unusual access conditions "
+    "are encountered.",
+    "Starting at price based on information provided prior to inspection.",
+)
+OPTIONAL_NOTE_PRESETS = (
+    "Payment due upon completion.",
+    "Customer is responsible for access to the tank area.",
+    "Price assumes normal access and working conditions.",
+)
+
 
 def collect_proposal_input(
     prompt: Prompt | None = None,
@@ -28,7 +41,7 @@ def collect_proposal_input(
         f"Proposal date [{default_date.isoformat()}]: ",
         default_date,
     )
-    tank_size = _prompt_required(prompt, "Tank size (gallons): ")
+    tank_size = _prompt_tank_size(prompt)
     tank_type = _prompt_choice(prompt, "Tank type (AST/UST): ", {"AST", "UST"})
     contents_status = _prompt_choice(
         prompt,
@@ -41,8 +54,12 @@ def collect_proposal_input(
         {"fixed", "starting-at"},
     )
     price = _prompt_decimal(prompt, "Price: ")
-    pricing_note = _prompt_optional(prompt, "Pricing note (optional): ")
-    note = _prompt_optional(prompt, "Notes (optional): ")
+    pricing_note = _prompt_preset_or_custom(
+        prompt,
+        "Pricing note",
+        PRICING_NOTE_PRESETS,
+    )
+    note = _prompt_preset_or_custom(prompt, "Notes", OPTIONAL_NOTE_PRESETS)
 
     item_description = f"Removal of {tank_size} Gallon {_tank_type_description(tank_type)}"
     scope_description = _scope_description(
@@ -77,10 +94,6 @@ def _prompt_required(prompt: Prompt, message: str) -> str:
         print("Please enter a value.")
 
 
-def _prompt_optional(prompt: Prompt, message: str) -> str:
-    return prompt(message).strip()
-
-
 def _prompt_choice(prompt: Prompt, message: str, choices: set[str]) -> str:
     normalized_choices = {choice.lower(): choice for choice in choices}
     while True:
@@ -88,6 +101,28 @@ def _prompt_choice(prompt: Prompt, message: str, choices: set[str]) -> str:
         if value in normalized_choices:
             return normalized_choices[value]
         print(f"Please enter one of: {', '.join(sorted(choices))}.")
+
+
+def _prompt_tank_size(prompt: Prompt) -> str:
+    value = _prompt_required(
+        prompt,
+        f"Tank size (gallons) [{'/'.join(TANK_SIZE_PRESETS)} or custom]: ",
+    )
+    preset_by_number = {str(idx): preset for idx, preset in enumerate(TANK_SIZE_PRESETS, start=1)}
+    return preset_by_number.get(value, value)
+
+
+def _prompt_preset_or_custom(prompt: Prompt, label: str, presets: tuple[str, ...]) -> str:
+    print(f"{label}:")
+    for idx, preset in enumerate(presets, start=1):
+        print(f"  {idx}. {preset}")
+
+    value = prompt("Enter for none, number for preset, or type custom note: ").strip()
+    if not value:
+        return ""
+
+    preset_by_number = {str(idx): preset for idx, preset in enumerate(presets, start=1)}
+    return preset_by_number.get(value, value)
 
 
 def _prompt_date(prompt: Prompt, message: str, default: date) -> date:
