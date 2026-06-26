@@ -1,0 +1,24 @@
+{
+  "capability_id": "office.generate_proposal",
+  "category": "office",
+  "description": "Generate a local proposal DOCX from proposal input and a DOCX template.",
+  "failure_modes": [],
+  "input_schema_ref": "phoenix-office://schemas/proposal-input",
+  "name": "Generate Proposal",
+  "operation_type": "mutate",
+  "output_schema_ref": "phoenix-office://schemas/proposal-docx",
+  "plugin_id": "phoenix-office",
+  "required_permissions": [
+    "read",
+    "write"
+  ],
+  "required_secrets": [],
+  "requires_approval": false,
+  "risk_level": "medium",
+  "supports_dry_run": false,
+  "verification_methods": [
+    "artifact_inspection",
+    "test_command"
+  ],
+  "version": "0.1.0"
+}
