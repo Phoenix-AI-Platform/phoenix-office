@@ -23,11 +23,23 @@ def collect_proposal_input(
     customer_name = _prompt_required(prompt, "Customer name: ")
     street_address = _prompt_required(prompt, "Street address: ")
     city_state_zip = _prompt_required(prompt, "City/state/zip: ")
-    proposal_date = _prompt_date(prompt, f"Proposal date [{default_date.isoformat()}]: ", default_date)
+    proposal_date = _prompt_date(
+        prompt,
+        f"Proposal date [{default_date.isoformat()}]: ",
+        default_date,
+    )
     tank_size = _prompt_required(prompt, "Tank size (gallons): ")
     tank_type = _prompt_choice(prompt, "Tank type (AST/UST): ", {"AST", "UST"})
-    contents_status = _prompt_choice(prompt, "Contents known or unknown (known/unknown): ", {"known", "unknown"})
-    pricing_type = _prompt_choice(prompt, "Pricing type (fixed/starting-at): ", {"fixed", "starting-at"})
+    contents_status = _prompt_choice(
+        prompt,
+        "Contents known or unknown (known/unknown): ",
+        {"known", "unknown"},
+    )
+    pricing_type = _prompt_choice(
+        prompt,
+        "Pricing type (fixed/starting-at): ",
+        {"fixed", "starting-at"},
+    )
     price = _prompt_decimal(prompt, "Price: ")
     pricing_note = _prompt_optional(prompt, "Pricing note (optional): ")
     note = _prompt_optional(prompt, "Notes (optional): ")
