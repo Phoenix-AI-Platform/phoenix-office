@@ -1,0 +1,14 @@
+{
+  "contents_known": false,
+  "customer_id": "customer-abby-hill",
+  "internal_notes": [],
+  "job_id": "job-abby-hill",
+  "job_name": "Abby Hill tank removal proposal",
+  "scope_notes": [],
+  "site_city_state_zip": "Menomonee Falls, WI 53051",
+  "site_street_address": "123 Main St.",
+  "status": "draft",
+  "tank_contents": null,
+  "tank_location_type": "unknown",
+  "tank_size_gallons": null
+}
