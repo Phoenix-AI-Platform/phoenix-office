@@ -99,6 +99,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     show_parser.set_defaults(func=show_task)
 
+    validate_parser = tasks_subparsers.add_parser(
+        "validate",
+        help="Validate a serialized Phoenix TaskEnvelope JSON file",
+    )
+    validate_parser.add_argument(
+        "task_json",
+        type=Path,
+        help="Path to serialized TaskEnvelope JSON",
+    )
+    validate_parser.set_defaults(func=validate_task)
+
     return parser
 
 
@@ -201,6 +212,32 @@ def show_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def validate_task(args: argparse.Namespace) -> int:
+    task_path = args.task_json
+
+    if not task_path.exists():
+        print(f"Error: TaskEnvelope JSON file does not exist: {task_path}", file=sys.stderr)
+        return 1
+    if not task_path.is_file():
+        print(f"Error: TaskEnvelope JSON path is not a file: {task_path}", file=sys.stderr)
+        return 1
+
+    try:
+        task = _load_task_json(task_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    issues = _validate_task_envelope(task)
+    if issues:
+        for issue in issues:
+            print(f"Validation error: {issue}", file=sys.stderr)
+        return 1
+
+    print(f"TaskEnvelope validation passed: {task.get('task_id', '')}")
+    return 0
+
+
 def intake_proposal(args: argparse.Namespace) -> int:
     template_path = args.template
     output_path = args.output
@@ -237,6 +274,68 @@ def _load_task_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"TaskEnvelope JSON must be an object: {path}")
     return data
+
+
+def _validate_task_envelope(task: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    required_fields = [
+        "task_id",
+        "title",
+        "status",
+        "priority",
+        "requester",
+        "source",
+        "context_refs",
+        "allowed_resources",
+        "verification_plan",
+    ]
+    for field_name in required_fields:
+        if field_name not in task:
+            issues.append(f"Missing required field: {field_name}")
+
+    requester = task.get("requester")
+    if "requester" in task:
+        if not isinstance(requester, dict):
+            issues.append("requester must be an object")
+        else:
+            for field_name in ["type", "id"]:
+                if field_name not in requester:
+                    issues.append(f"Missing requester field: {field_name}")
+
+    allowed_resources = task.get("allowed_resources")
+    if "allowed_resources" in task:
+        if not isinstance(allowed_resources, dict):
+            issues.append("allowed_resources must be an object")
+        else:
+            capabilities = allowed_resources.get("capabilities")
+            if "capabilities" not in allowed_resources:
+                issues.append("Missing allowed_resources field: capabilities")
+            elif not isinstance(capabilities, list):
+                issues.append("allowed_resources.capabilities must be a list")
+            else:
+                registered_capability_ids = {
+                    capability.capability_id
+                    for capability in get_registered_plugin_capabilities()
+                }
+                for capability_id in capabilities:
+                    if capability_id not in registered_capability_ids:
+                        issues.append(f"Unknown capability id: {capability_id}")
+
+    if "context_refs" in task and not isinstance(task.get("context_refs"), list):
+        issues.append("context_refs must be a list")
+
+    verification_plan = task.get("verification_plan")
+    if "verification_plan" in task:
+        if not isinstance(verification_plan, dict):
+            issues.append("verification_plan must be an object")
+        else:
+            evidence_required = verification_plan.get("evidence_required")
+            if "evidence_required" not in verification_plan:
+                issues.append("Missing verification_plan field: evidence_required")
+            elif not isinstance(evidence_required, list):
+                issues.append("verification_plan.evidence_required must be a list")
+
+    return issues
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
