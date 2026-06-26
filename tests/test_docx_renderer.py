@@ -118,7 +118,11 @@ def test_render_creates_docx_file_from_simple_template(tmp_path):
     output_path = tmp_path / "output" / "proposal.docx"
     build_simple_template(template_path)
 
-    result = DocxProposalRenderer().render(build_generic_proposal(), template_path, output_path)
+    result = DocxProposalRenderer().render(
+    build_abby_hill_proposal(),
+    A1_TEMPLATE_PATH,
+    output_path,
+)
 
     assert result == output_path
     assert output_path.exists()
