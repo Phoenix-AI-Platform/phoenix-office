@@ -78,6 +78,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.set_defaults(func=list_capabilities)
 
+    tasks_parser = subparsers.add_parser(
+        "tasks",
+        help="Inspect serialized Phoenix task envelopes",
+    )
+    tasks_subparsers = tasks_parser.add_subparsers(dest="tasks_command")
+    show_parser = tasks_subparsers.add_parser(
+        "show",
+        help="Show a serialized Phoenix TaskEnvelope JSON file",
+    )
+    show_parser.add_argument(
+        "task_json",
+        type=Path,
+        help="Path to serialized TaskEnvelope JSON",
+    )
+    show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the loaded TaskEnvelope JSON with sorted keys",
+    )
+    show_parser.set_defaults(func=show_task)
+
     return parser
 
 
@@ -142,6 +163,44 @@ def list_capabilities(args: argparse.Namespace) -> int:
     return 0
 
 
+def show_task(args: argparse.Namespace) -> int:
+    task_path = args.task_json
+
+    if not task_path.exists():
+        print(f"Error: TaskEnvelope JSON file does not exist: {task_path}", file=sys.stderr)
+        return 1
+    if not task_path.is_file():
+        print(f"Error: TaskEnvelope JSON path is not a file: {task_path}", file=sys.stderr)
+        return 1
+
+    try:
+        task = _load_task_json(task_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(task, indent=2, sort_keys=True))
+        return 0
+
+    requester = _as_dict(task.get("requester"))
+    allowed_resources = _as_dict(task.get("allowed_resources"))
+    verification_plan = _as_dict(task.get("verification_plan"))
+
+    print(f"task_id: {task.get('task_id', '')}")
+    print(f"title: {task.get('title', '')}")
+    print(f"status: {task.get('status', '')}")
+    print(f"priority: {task.get('priority', '')}")
+    print(f"requester: {requester.get('type', '')} {requester.get('id', '')}")
+    _print_list("allowed capabilities", _as_list(allowed_resources.get("capabilities")))
+    _print_list("context refs", _as_list(task.get("context_refs")))
+    _print_list(
+        "verification evidence required",
+        _as_list(verification_plan.get("evidence_required")),
+    )
+    return 0
+
+
 def intake_proposal(args: argparse.Namespace) -> int:
     template_path = args.template
     output_path = args.output
@@ -166,6 +225,39 @@ def intake_proposal(args: argparse.Namespace) -> int:
         print(f"Wrote proposal JSON: {json_output_path}")
     print(f"Generated proposal DOCX: {result}")
     return 0
+
+
+def _load_task_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"TaskEnvelope JSON must be an object: {path}")
+    return data
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _print_list(label: str, values: list[Any]) -> None:
+    print(f"{label}:")
+    if not values:
+        print("  - (none)")
+        return
+    for value in values:
+        print(f"  - {value}")
 
 
 def _template_is_valid(template_path: Path) -> bool:
