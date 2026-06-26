@@ -14,7 +14,7 @@ from docx.text.paragraph import Paragraph
 from phoenix_office.generators.proposal import ProposalFields, ProposalGenerator
 from phoenix_office.models.proposal import ProposalInput
 
-type PathLike = str | Path
+PathLike = str | Path
 
 
 class DocxProposalRenderer:

@@ -79,7 +79,10 @@ print(fields.pricing_note)     # Price is based on normal pumping…
 `ProposalFields` is a plain dataclass whose string attributes can be
 injected directly into a DOCX template or passed to a PDF renderer.
 
-To render a finished Word document from a template:
+### DOCX Rendering
+
+To render a finished Word document from a template with
+`DocxProposalRenderer`:
 
 ```python
 from phoenix_office.renderers import DocxProposalRenderer

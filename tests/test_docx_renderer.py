@@ -21,6 +21,8 @@ def build_proposal() -> ProposalInput:
         scope_items=[
             ScopeItem(number=1, description="Pump contents of tank (contents unknown)"),
             ScopeItem(number=2, description="Open and clean tank"),
+            ScopeItem(number=3, description="Remove 1,000 gallon AST"),
+            ScopeItem(number=4, description="Remove and dispose of tank and residual contents"),
         ],
         pricing=PricingLine(
             amount=Decimal("3000.00"),
@@ -86,6 +88,8 @@ def test_rendered_text_appears_in_output_docx(tmp_path):
     assert "Item: Removal of 1,000 Gallon Aboveground Storage Tank" in text
     assert "1. Pump contents of tank (contents unknown)" in text
     assert "2. Open and clean tank" in text
+    assert "3. Remove 1,000 gallon AST" in text
+    assert "4. Remove and dispose of tank and residual contents" in text
     assert "TOTAL: Starting at $3,000.00" in text
     assert "Additional charges may apply depending on tank contents." in text
     assert "Please call before arrival.\nGate code will be provided before service." in text
