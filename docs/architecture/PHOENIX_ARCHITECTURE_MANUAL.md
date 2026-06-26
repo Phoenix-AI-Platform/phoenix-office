@@ -4,6 +4,8 @@ Phoenix is an AI Operations Platform: an operating system for coordinating AI wo
 
 Phoenix is not a monolithic AI model. It is not only a UniFi optimizer. It is not only an office automation app. Phoenix is the coordination layer that lets many AI and automation capabilities work safely across many operational domains.
 
+The platform direction is recorded in [ADR 0001: Phoenix As An AI Operations Platform](decisions/0001-phoenix-as-ai-operations-platform.md). Draft platform contract sketches are collected in [Contracts](contracts.md).
+
 ## Mission
 
 Phoenix turns human intent into governed work. It accepts tasks, routes them to workers and plugins, preserves context, asks for approval before risky execution, verifies outcomes, and records what happened.
@@ -206,4 +208,6 @@ Near-term changes should favor:
 - [Orchestrator Model](orchestrator_model.md)
 - [Security Model](security_model.md)
 - [Development Process](development_process.md)
+- [Contracts](contracts.md)
+- [Architecture Decisions](decisions/README.md)
 - [Roadmap](roadmap.md)
