@@ -1,12 +1,12 @@
 """Early Phoenix Core contract skeletons."""
 
 from phoenix_office.core.contracts import (
+    ApprovalDecision,
     ApprovalPolicy,
     ApprovalPreview,
     ApprovalRecord,
     ApprovalRequest,
     ApprovalStatus,
-    ApprovalDecision,
     ApprovedScope,
     EventSeverity,
     EvidenceResult,
