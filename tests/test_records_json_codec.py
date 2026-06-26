@@ -147,20 +147,31 @@ def test_job_optional_fields_and_notes_round_trip() -> None:
 
 @pytest.mark.parametrize(
     "loader",
-    [customer_record_from_json, job_record_from_json, customer_records_from_json, job_records_from_json],
+    [
+        customer_record_from_json,
+        job_record_from_json,
+        customer_records_from_json,
+        job_records_from_json,
+    ],
 )
 def test_invalid_json_raises_value_error(loader) -> None:
     with pytest.raises(ValueError, match="Invalid record JSON"):
         loader("{not valid json")
 
 
-@pytest.mark.parametrize("loader", [customer_record_from_json, job_record_from_json])
+@pytest.mark.parametrize(
+    "loader",
+    [customer_record_from_json, job_record_from_json],
+)
 def test_non_object_json_for_single_record_raises_value_error(loader) -> None:
     with pytest.raises(ValueError, match="must be an object"):
         loader("[]")
 
 
-@pytest.mark.parametrize("loader", [customer_records_from_json, job_records_from_json])
+@pytest.mark.parametrize(
+    "loader",
+    [customer_records_from_json, job_records_from_json],
+)
 def test_non_list_json_for_list_helpers_raises_value_error(loader) -> None:
     with pytest.raises(ValueError, match="must be a list"):
         loader("{}")
