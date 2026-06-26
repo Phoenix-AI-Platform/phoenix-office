@@ -1,0 +1,31 @@
+{
+  "customer_name": "Abby Hill",
+  "street_address": "W3064 Piper Rd.",
+  "city_state_zip": "Whitewater, WI",
+  "proposal_date": "2026-06-25",
+  "item_description": "Removal of 1,000 Gallon Aboveground Storage Tank",
+  "scope_items": [
+    {
+      "number": 1,
+      "description": "Pump contents of tank (contents unknown)"
+    },
+    {
+      "number": 2,
+      "description": "Open and clean tank"
+    },
+    {
+      "number": 3,
+      "description": "Remove 1,000 gallon AST"
+    },
+    {
+      "number": 4,
+      "description": "Remove and dispose of tank and residual contents"
+    }
+  ],
+  "pricing": {
+    "amount": "3000.00",
+    "is_starting_at": true,
+    "pricing_note": "Price is based on normal pumping, cleaning, and removal of the tank. Additional charges may apply depending on the quantity and condition of the tank contents or if hazardous materials are encountered."
+  },
+  "notes": []
+}
