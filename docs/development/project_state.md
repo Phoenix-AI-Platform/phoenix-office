@@ -12,6 +12,8 @@ For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardr
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
 
+For focused repair prompts after CI fails, see [failed CI repair prompt guide](failed_ci_repair_prompt_guide.md).
+
 ## Current Verified Spine
 
 ```text
@@ -149,7 +151,6 @@ These are safe future lanes to consider, without implementing them here:
 - dry-run plan display/inspection helpers
 - approval review display/inspection helpers
 - read-only CLI commands for showing plans/reviews
-- failed-CI repair prompt generator docs
 - next-brick planning docs
 
 Execution remains out of scope until explicitly approved in a later task.
