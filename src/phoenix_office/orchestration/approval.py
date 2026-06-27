@@ -8,6 +8,7 @@ read records, compose proposal input, or render DOCX files.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -35,7 +36,7 @@ class WorkflowPlanReview(BaseModel):
     )
 
     @model_validator(mode="after")
-    def approved_for_execution_only_when_approved(self) -> "WorkflowPlanReview":
+    def approved_for_execution_only_when_approved(self) -> Self:
         """Ensure only approved decisions can cross the execution boundary."""
         expected = self.decision == WorkflowPlanApprovalDecision.APPROVED
         if self.approved_for_execution != expected:
