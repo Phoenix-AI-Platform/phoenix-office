@@ -61,6 +61,8 @@ For every PR, review should confirm:
 
 The reviewer should inspect whether the PR did exactly what the prompt asked and avoided adjacent runtime behavior.
 
+See [PR review guardrails](pr_review_guardrails.md) for the advisory machine-readable checklist.
+
 ## Failed CI Repair Loop
 
 When CI fails:
@@ -120,6 +122,7 @@ No autonomous development loop exists yet.
 
 ## Links
 
+- [PR review guardrails](pr_review_guardrails.md)
 - [Project state](project_state.md)
 - [Phoenix development workflow](workflow.md)
 - [Orchestration plan model](orchestration_plan_model.md)
