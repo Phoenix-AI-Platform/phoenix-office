@@ -52,6 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate_parser.set_defaults(func=generate_proposal)
 
+    validate_proposal_parser = proposal_subparsers.add_parser(
+        "validate",
+        help="Validate a proposal JSON input file",
+    )
+    validate_proposal_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to proposal JSON input",
+    )
+    validate_proposal_parser.set_defaults(func=validate_proposal)
+
     intake_parser = proposal_subparsers.add_parser(
         "intake",
         help="Collect proposal details interactively and generate a DOCX",
@@ -432,6 +443,29 @@ def generate_proposal(args: argparse.Namespace) -> int:
         return 1
 
     print(f"Generated proposal DOCX: {result}")
+    return 0
+
+
+def validate_proposal(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(f"Error: JSON input file does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(f"Error: JSON input path is not a file: {input_path}", file=sys.stderr)
+        return 1
+
+    try:
+        load_proposal(input_path)
+    except ValueError as exc:
+        print(f"Error: invalid proposal input: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to validate proposal input: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"ProposalInput validation passed: {input_path}")
     return 0
 
 
