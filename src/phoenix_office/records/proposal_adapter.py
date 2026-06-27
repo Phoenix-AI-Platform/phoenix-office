@@ -9,6 +9,7 @@ from phoenix_office.models.proposal import (
     ScopeItem,
 )
 from phoenix_office.models.records import CustomerRecord, JobRecord
+from phoenix_office.records.proposal_details import RecordProposalDetails
 
 
 def create_proposal_input_from_records(
@@ -43,4 +44,23 @@ def create_proposal_input_from_records(
         pricing=pricing,
         notes=notes or [],
         company_config=company_config or CompanyConfig(),
+    )
+
+
+def create_proposal_input_from_record_details(
+    *,
+    customer: CustomerRecord,
+    job: JobRecord,
+    details: RecordProposalDetails,
+) -> ProposalInput:
+    """Create proposal input from records and explicit proposal details."""
+    return create_proposal_input_from_records(
+        customer=customer,
+        job=job,
+        proposal_date=details.proposal_date,
+        item_description=details.item_description,
+        scope_items=details.scope_items,
+        pricing=details.pricing,
+        notes=details.notes,
+        company_config=details.company_config,
     )
