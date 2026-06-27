@@ -15,11 +15,13 @@ from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.records import (
     create_sqlite_record_store,
+    customer_record_to_json,
     customer_records_to_json,
     import_customer_record_file,
     import_customer_records_file,
     import_job_record_file,
     import_job_records_file,
+    job_record_to_json,
     job_records_to_json,
 )
 from phoenix_office.renderers import DocxProposalRenderer
@@ -240,6 +242,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     jobs_list_parser.set_defaults(func=list_records, records_list_kind="jobs")
 
+    records_show_parser = records_subparsers.add_parser(
+        "show",
+        help="Show one record from a SQLite database",
+    )
+    records_show_subparsers = records_show_parser.add_subparsers(dest="records_show_kind")
+
+    customer_show_parser = records_show_subparsers.add_parser(
+        "customer",
+        help="Show one CustomerRecord row",
+    )
+    customer_show_parser.add_argument(
+        "customer_id",
+        help="Customer ID to show",
+    )
+    customer_show_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    customer_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output customer as JSON",
+    )
+    customer_show_parser.set_defaults(func=show_record, records_show_kind="customer")
+
+    job_show_parser = records_show_subparsers.add_parser(
+        "job",
+        help="Show one JobRecord row",
+    )
+    job_show_parser.add_argument(
+        "job_id",
+        help="Job ID to show",
+    )
+    job_show_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    job_show_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output job as JSON",
+    )
+    job_show_parser.set_defaults(func=show_record, records_show_kind="job")
+
     return parser
 
 
@@ -440,6 +490,58 @@ def list_records(args: argparse.Namespace) -> int:
     return 1
 
 
+def show_record(args: argparse.Namespace) -> int:
+    store = create_sqlite_record_store(args.db)
+
+    if args.records_show_kind == "customer":
+        customer = store.customers.get_customer(args.customer_id)
+        if customer is None:
+            print(f"Customer not found: {args.customer_id}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(customer_record_to_json(customer))
+        else:
+            print(f"customer_id: {customer.customer_id}")
+            print(f"display_name: {customer.display_name}")
+            _print_optional_value("phone", customer.phone)
+            _print_optional_value("email", customer.email)
+            _print_optional_value(
+                "billing_street_address",
+                customer.billing_street_address,
+            )
+            _print_optional_value(
+                "billing_city_state_zip",
+                customer.billing_city_state_zip,
+            )
+            _print_list_if_present("notes", customer.notes)
+        return 0
+
+    if args.records_show_kind == "job":
+        job = store.jobs.get_job(args.job_id)
+        if job is None:
+            print(f"Job not found: {args.job_id}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(job_record_to_json(job))
+        else:
+            print(f"job_id: {job.job_id}")
+            print(f"customer_id: {job.customer_id}")
+            print(f"job_name: {job.job_name}")
+            print(f"site_street_address: {job.site_street_address}")
+            print(f"site_city_state_zip: {job.site_city_state_zip}")
+            print(f"status: {job.status.value}")
+            print(f"tank_location_type: {job.tank_location_type.value}")
+            _print_optional_value("tank_size_gallons", job.tank_size_gallons)
+            _print_optional_value("tank_contents", job.tank_contents)
+            print(f"contents_known: {job.contents_known}")
+            _print_list_if_present("scope_notes", job.scope_notes)
+            _print_list_if_present("internal_notes", job.internal_notes)
+        return 0
+
+    print(f"Error: unsupported records show kind: {args.records_show_kind}", file=sys.stderr)
+    return 1
+
+
 def intake_proposal(args: argparse.Namespace) -> int:
     template_path = args.template
     output_path = args.output
@@ -559,6 +661,16 @@ def _print_list(label: str, values: list[Any]) -> None:
         return
     for value in values:
         print(f"  - {value}")
+
+
+def _print_optional_value(label: str, value: object | None) -> None:
+    if value is not None:
+        print(f"{label}: {value}")
+
+
+def _print_list_if_present(label: str, values: list[str]) -> None:
+    if values:
+        _print_list(label, values)
 
 
 def _template_is_valid(template_path: Path) -> bool:
