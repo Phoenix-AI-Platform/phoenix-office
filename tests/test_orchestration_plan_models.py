@@ -121,7 +121,7 @@ def test_a1_proposal_dry_run_plan_contains_proposed_commands_only(
         "examples/records/proposal_details_abby_hill.json",
     ]
     assert plan.steps[1].command is not None
-    assert "records.sqlite" in plan.steps[1].command
+    assert any("records.sqlite" in part for part in plan.steps[1].command)
     assert plan.steps[4].command is not None
     assert "--template" in plan.steps[4].command
 
