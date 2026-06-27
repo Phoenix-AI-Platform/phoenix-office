@@ -96,6 +96,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #81 Next-brick planning guide
 #82 Project state update through PR #81
 #83 Orchestration CLI non-execution surface tests
+#85 Orchestration execution readiness checklist
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -188,6 +189,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- orchestration execution readiness checklist from PR #85
 - orchestration CLI non-execution surface tests from PR #83
 - project state update through PR #82
 - next-brick planning guide from PR #81
