@@ -51,7 +51,14 @@ def test_cli_records_show_customer_outputs_text(tmp_path: Path, capsys) -> None:
     store.customers.save_customer(_customer())
 
     exit_code = main(
-        ["records", "show", "customer", "customer-abby-hill", "--db", str(db_path)]
+        [
+            "records",
+            "show",
+            "customer",
+            "customer-abby-hill",
+            "--db",
+            str(db_path),
+        ]
     )
 
     captured = capsys.readouterr()
@@ -68,7 +75,9 @@ def test_cli_records_show_job_outputs_text(tmp_path: Path, capsys) -> None:
     store = create_sqlite_record_store(db_path)
     store.jobs.save_job(_job())
 
-    exit_code = main(["records", "show", "job", "job-abby-hill", "--db", str(db_path)])
+    exit_code = main(
+        ["records", "show", "job", "job-abby-hill", "--db", str(db_path)]
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -146,7 +155,9 @@ def test_cli_records_show_missing_job_returns_error(tmp_path: Path, capsys) -> N
     store = create_sqlite_record_store(db_path)
     store.jobs.save_job(_job())
 
-    exit_code = main(["records", "show", "job", "missing-job", "--db", str(db_path)])
+    exit_code = main(
+        ["records", "show", "job", "missing-job", "--db", str(db_path)]
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 1
@@ -160,7 +171,14 @@ def test_cli_records_show_customer_empty_database_behaves_as_missing(
     db_path = tmp_path / "records.sqlite"
 
     exit_code = main(
-        ["records", "show", "customer", "customer-abby-hill", "--db", str(db_path)]
+        [
+            "records",
+            "show",
+            "customer",
+            "customer-abby-hill",
+            "--db",
+            str(db_path),
+        ]
     )
 
     captured = capsys.readouterr()
@@ -174,7 +192,9 @@ def test_cli_records_show_job_empty_database_behaves_as_missing(
 ) -> None:
     db_path = tmp_path / "records.sqlite"
 
-    exit_code = main(["records", "show", "job", "job-abby-hill", "--db", str(db_path)])
+    exit_code = main(
+        ["records", "show", "job", "job-abby-hill", "--db", str(db_path)]
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 1
