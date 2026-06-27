@@ -60,6 +60,8 @@ python -m phoenix_office.cli records export customers output/records_customers.j
 python -m phoenix_office.cli records export jobs output/records_jobs.json --db output/records.sqlite
 ```
 
+`examples/records/proposal_details_abby_hill.json` is a preparation artifact for future record-backed proposal input workflows. It is not currently accepted by a records CLI proposal command.
+
 ## Current Non-Goals
 
 The records CLI does not currently provide:
