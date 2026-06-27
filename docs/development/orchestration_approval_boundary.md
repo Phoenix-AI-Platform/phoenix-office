@@ -18,6 +18,18 @@ Only `approved` means `approved_for_execution` is true.
 
 `rejected` and `needs_changes` must not be executable.
 
+## Review JSON Examples
+
+Sanitized review examples are available at:
+
+- `examples/orchestration/a1_proposal_review_approved.json`
+- `examples/orchestration/a1_proposal_review_rejected.json`
+- `examples/orchestration/a1_proposal_review_needs_changes.json`
+
+These are reviewable examples only. They do not approve or execute anything by themselves.
+
+Rejected and `needs_changes` reviews must not be executable.
+
 ## Current Behavior
 
 The current system still does not execute anything. The approval boundary only records a human review decision for a proposed dry-run plan.

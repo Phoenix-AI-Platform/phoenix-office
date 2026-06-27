@@ -1,0 +1,7 @@
+{
+  "workflow_name": "a1_proposal_manual_workflow",
+  "decision": "rejected",
+  "reviewed_by": "human:sample-operator",
+  "review_notes": "Human rejected the dry-run plan. Do not execute.",
+  "approved_for_execution": false
+}
