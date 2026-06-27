@@ -339,6 +339,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     jobs_export_parser.set_defaults(func=export_records, records_export_kind="jobs")
 
+    records_proposal_details_parser = records_subparsers.add_parser(
+        "proposal-details",
+        help="Inspect RecordProposalDetails JSON files",
+    )
+    records_proposal_details_subparsers = records_proposal_details_parser.add_subparsers(
+        dest="records_proposal_details_command"
+    )
+    records_proposal_details_validate_parser = (
+        records_proposal_details_subparsers.add_parser(
+            "validate",
+            help="Validate a RecordProposalDetails JSON file",
+        )
+    )
+    records_proposal_details_validate_parser.add_argument(
+        "details_json",
+        type=Path,
+        help="Path to RecordProposalDetails JSON",
+    )
+    records_proposal_details_validate_parser.set_defaults(
+        func=validate_record_proposal_details
+    )
+
     records_proposal_input_parser = records_subparsers.add_parser(
         "proposal-input",
         help="Compose ProposalInput JSON from records and proposal details",
@@ -642,6 +664,35 @@ def export_records(args: argparse.Namespace) -> int:
         print(f"Error: failed to export records: {exc}", file=sys.stderr)
         return 1
 
+    return 0
+
+
+def validate_record_proposal_details(args: argparse.Namespace) -> int:
+    details_path = args.details_json
+
+    if not details_path.exists():
+        print(
+            f"Error: RecordProposalDetails JSON file does not exist: {details_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not details_path.is_file():
+        print(
+            f"Error: RecordProposalDetails JSON path is not a file: {details_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        record_proposal_details_from_file(details_path)
+    except (ValueError, ValidationError) as exc:
+        print(f"Error: invalid RecordProposalDetails JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to validate RecordProposalDetails JSON: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"RecordProposalDetails validation passed: {details_path}")
     return 0
 
 

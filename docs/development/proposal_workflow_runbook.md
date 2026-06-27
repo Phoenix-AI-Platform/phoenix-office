@@ -13,6 +13,7 @@ The current workflow is:
 ```text
 CustomerRecord / JobRecord JSON
   -> import into SQLite RecordStore
+  -> optionally validate explicit RecordProposalDetails JSON
   -> compose ProposalInput JSON using explicit RecordProposalDetails
   -> render DOCX using proposal generate
 ```
@@ -22,11 +23,12 @@ The supported command chain is:
 ```bash
 python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
 python -m phoenix_office.cli records import job examples/records/job_abby_hill.json --db output/records.sqlite
+python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-`records proposal-input` writes `ProposalInput` JSON only. `proposal generate` remains responsible for DOCX generation.
+`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal generate` remains responsible for DOCX generation.
 
 ## Required Input Files
 
@@ -91,6 +93,16 @@ examples/records/proposal_details_abby_hill.json
 ```
 
 Pricing is not inferred from records. Scope is not inferred from records. The operator is responsible for supplying the intended pricing and scope in `RecordProposalDetails`.
+
+## Validating RecordProposalDetails JSON
+
+Optionally validate the explicit proposal details file before composing `ProposalInput` JSON:
+
+```bash
+python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
+```
+
+This command validates `RecordProposalDetails` JSON only. It does not compose `ProposalInput`, read customer records, read job records, open SQLite, generate DOCX, or infer pricing or scope.
 
 ## Importing Records Into SQLite
 
@@ -193,10 +205,10 @@ Confirm the selected job belongs to the selected customer.
 Invalid proposal details JSON:
 
 ```text
-Error: failed to compose proposal input: Invalid record proposal details JSON
+Error: invalid RecordProposalDetails JSON: Invalid record proposal details JSON
 ```
 
-Confirm the details file is valid JSON and matches the `RecordProposalDetails` shape.
+Confirm the details file is valid JSON and matches the `RecordProposalDetails` shape. Use `records proposal-details validate` as an optional preflight before `records proposal-input`.
 
 Missing template:
 
