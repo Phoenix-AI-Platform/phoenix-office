@@ -91,6 +91,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #77 Orchestration inspection CLI help tests
 #78 WorkflowPlanReview inspect fixture coverage
 #79 Orchestration inspection path error tests
+#81 Next-brick planning guide
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -179,6 +180,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- next-brick planning guide from PR #81
 - orchestration inspection CLI guide from PR #76
 - orchestration inspection CLI help tests from PR #77
 - WorkflowPlanReview inspect fixture coverage from PR #78
