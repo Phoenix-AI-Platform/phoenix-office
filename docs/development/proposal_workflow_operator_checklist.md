@@ -18,6 +18,8 @@ Prepare or choose these files and paths before running the workflow:
 - output `ProposalInput` JSON path
 - output DOCX path
 
+See [output artifact conventions](output_artifact_conventions.md) for recommended generated file locations and commit policy.
+
 Operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file for a new job. Replace all placeholder values before sending a proposal.
 
 Example paths used by the current Abby Hill workflow:
@@ -91,3 +93,4 @@ python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.j
 
 - [Proposal workflow runbook](proposal_workflow_runbook.md)
 - [Records CLI workflow](records_cli.md)
+- [Output artifact conventions](output_artifact_conventions.md)
