@@ -1,0 +1,49 @@
+{
+  "name": "Phoenix Office PR Review Guardrails",
+  "version": 1,
+  "purpose": "Machine-readable checklist for reviewing Phoenix Office PR scope.",
+  "required_review_steps": [
+    "confirm_pr_title_branch_base",
+    "confirm_changed_files",
+    "inspect_diff",
+    "verify_ci",
+    "check_scope_guardrails",
+    "confirm_no_generated_outputs",
+    "confirm_no_private_customer_data",
+    "give_merge_or_no_merge_call"
+  ],
+  "global_forbidden_changes": [
+    "workflow_execution",
+    "worker_execution",
+    "plugin_runtime_execution",
+    "subprocess_calls",
+    "cli_main_calls_from_orchestration",
+    "sqlite_access_from_orchestration",
+    "record_reads_or_writes_from_orchestration",
+    "proposal_input_composition_from_orchestration",
+    "docx_generation_from_orchestration",
+    "docx_renderer_changes_without_dedicated_pr",
+    "docx_template_changes_without_dedicated_pr",
+    "pricing_scope_or_notes_inference",
+    "generated_output_artifacts",
+    "private_customer_data",
+    "unrelated_refactors"
+  ],
+  "docs_only_pr_requirements": [
+    "no_code_files_changed",
+    "no_test_files_changed",
+    "no_behavior_changes"
+  ],
+  "code_pr_requirements": [
+    "tests_added_or_updated_when_behavior_changes",
+    "docs_updated_when_operator_behavior_changes",
+    "scope_remains_narrow"
+  ],
+  "parallel_pr_guardrails": [
+    "no_overlapping_files",
+    "no_shared_model_changes",
+    "no_cli_changes",
+    "no_execution_changes",
+    "only_one_active_pr_may_touch_core_orchestration_models"
+  ]
+}
