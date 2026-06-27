@@ -15,6 +15,15 @@ from phoenix_office.records.json_codec import (
     job_records_to_json,
 )
 from phoenix_office.records.proposal_adapter import create_proposal_input_from_records
+from phoenix_office.records.proposal_details import (
+    RecordProposalDetails,
+    record_proposal_details_from_dict,
+    record_proposal_details_from_file,
+    record_proposal_details_from_json,
+    record_proposal_details_to_dict,
+    record_proposal_details_to_file,
+    record_proposal_details_to_json,
+)
 from phoenix_office.records.repository import (
     CustomerRepository,
     InMemoryCustomerRepository,
@@ -53,6 +62,7 @@ __all__ = [
     "InMemoryCustomerRepository",
     "InMemoryJobRepository",
     "JobRepository",
+    "RecordProposalDetails",
     "RecordStore",
     "SQLiteCustomerRepository",
     "SQLiteJobRepository",
@@ -84,4 +94,10 @@ __all__ = [
     "job_record_to_json",
     "job_records_from_json",
     "job_records_to_json",
+    "record_proposal_details_from_dict",
+    "record_proposal_details_from_file",
+    "record_proposal_details_from_json",
+    "record_proposal_details_to_dict",
+    "record_proposal_details_to_file",
+    "record_proposal_details_to_json",
 ]
