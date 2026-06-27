@@ -1,0 +1,14 @@
+{
+  "contents_known": false,
+  "customer_id": "customer-sample-north-prairie",
+  "internal_notes": [],
+  "job_id": "job-sample-north-prairie",
+  "job_name": "Sample North Prairie two-tank removal proposal",
+  "scope_notes": [],
+  "site_city_state_zip": "North Prairie, WI 53153",
+  "site_street_address": "100 Sample Site Rd.",
+  "status": "draft",
+  "tank_contents": null,
+  "tank_location_type": "aboveground",
+  "tank_size_gallons": 550
+}
