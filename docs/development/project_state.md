@@ -14,6 +14,8 @@ For reusable project-state-aware Codex prompt templates, see [Codex prompt patte
 
 For focused repair prompts after CI fails, see [failed CI repair prompt guide](failed_ci_repair_prompt_guide.md).
 
+For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem-informed PRD](../prd/ecosystem-informed-prd.md).
+
 ## Current Verified Spine
 
 ```text
@@ -77,6 +79,8 @@ For focused repair prompts after CI fails, see [failed CI repair prompt guide](f
 #65 Phoenix development loop runbook
 #66 PR review guardrails JSON
 #67 Codex prompt patterns documentation
+#69 Failed CI repair prompt guide
+#70 Ecosystem-informed Phoenix AI Platform PRD
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -113,8 +117,15 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a development loop runbook
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
+- a failed CI repair prompt guide
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
+
+## Current Product Direction
+
+The ecosystem-informed Phoenix AI Platform PRD exists at [docs/prd/ecosystem-informed-prd.md](../prd/ecosystem-informed-prd.md).
+
+The current product direction is deterministic-core-first: Phoenix should not become a general AI agent framework. Phoenix should keep a deterministic, testable core and add API/MCP/AI layers only after plugin boundaries, approval gates, and audit/security controls are clear.
 
 ## Explicit Non-Capabilities
 
@@ -133,6 +144,8 @@ These process docs are guidance for human-controlled development and review. The
 
 Do not recreate these as new work:
 
+- ecosystem-informed Phoenix AI Platform PRD from PR #70
+- failed CI repair prompt guide from PR #69
 - project-state verified spine doc from PR #64
 - development loop runbook from PR #65
 - PR review guardrails JSON/docs from PR #66
