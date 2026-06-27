@@ -6,6 +6,8 @@ This is the current manual operator checklist for generating an A-1 proposal fro
 
 Use it before generating a DOCX proposal to confirm the record data, proposal business details, command inputs, and final proposal review steps are intentional.
 
+For workflow readiness criteria, see [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md).
+
 ## Required Files
 
 Prepare or choose these files and paths before running the workflow:
@@ -91,6 +93,7 @@ python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.j
 
 ## Links
 
+- [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md)
 - [Proposal workflow runbook](proposal_workflow_runbook.md)
 - [Records CLI workflow](records_cli.md)
 - [Output artifact conventions](output_artifact_conventions.md)
