@@ -33,6 +33,10 @@ architecture docs
 
 `TaskEnvelope` and `PluginCapability` should remain the stable contract boundary for workflow and review alignment.
 
+## Developer Workflows
+
+- [Records CLI workflow](records_cli.md) documents the current SQLite-backed customer/job record import, list, show, and export commands.
+
 ## Scope Guardrail
 
 Runtime/orchestrator/worker execution should not be introduced unless the task explicitly asks for it.
