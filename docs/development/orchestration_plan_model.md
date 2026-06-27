@@ -6,6 +6,8 @@ This document describes the first orchestration groundwork in Phoenix Office: a 
 
 The model defines proposed workflow plans before human approval. It is a contract-only representation that future orchestration code may produce and present for review.
 
+For the current verified project spine and non-capabilities, see [project state](project_state.md).
+
 ## Dry-Run Planning Only
 
 A workflow plan describes what would happen. It does not perform the work.
@@ -74,6 +76,7 @@ The orchestration plan model does not:
 
 Use this document for the dry-run plan contract. Use the existing proposal workflow docs for actual manual operation:
 
+- [Project state](project_state.md)
 - [Orchestration approval boundary](orchestration_approval_boundary.md)
 - [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md)
 - [Proposal workflow operator checklist](proposal_workflow_operator_checklist.md)
