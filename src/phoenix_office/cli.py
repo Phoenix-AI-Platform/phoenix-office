@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from phoenix_office.models.proposal import ProposalInput
+from phoenix_office.orchestration import WorkflowPlan
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.records import (
@@ -146,6 +147,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to serialized TaskEnvelope JSON",
     )
     validate_parser.set_defaults(func=validate_task)
+
+    orchestration_parser = subparsers.add_parser(
+        "orchestration",
+        help="Inspect orchestration contracts",
+    )
+    orchestration_subparsers = orchestration_parser.add_subparsers(
+        dest="orchestration_command"
+    )
+    orchestration_plan_parser = orchestration_subparsers.add_parser(
+        "plan",
+        help="Inspect workflow plan contracts",
+    )
+    orchestration_plan_subparsers = orchestration_plan_parser.add_subparsers(
+        dest="orchestration_plan_command"
+    )
+    orchestration_plan_inspect_parser = orchestration_plan_subparsers.add_parser(
+        "inspect",
+        help="Inspect a WorkflowPlan JSON file without executing it",
+    )
+    orchestration_plan_inspect_parser.add_argument(
+        "plan_json",
+        type=Path,
+        help="Path to serialized WorkflowPlan JSON",
+    )
+    orchestration_plan_inspect_parser.set_defaults(func=inspect_workflow_plan)
 
     records_parser = subparsers.add_parser(
         "records",
@@ -587,6 +613,26 @@ def validate_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def inspect_workflow_plan(args: argparse.Namespace) -> int:
+    plan_path = args.plan_json
+
+    if not plan_path.exists():
+        print(f"Error: WorkflowPlan JSON file does not exist: {plan_path}", file=sys.stderr)
+        return 1
+    if not plan_path.is_file():
+        print(f"Error: WorkflowPlan JSON path is not a file: {plan_path}", file=sys.stderr)
+        return 1
+
+    try:
+        plan = _load_workflow_plan(plan_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    _print_workflow_plan_summary(plan)
+    return 0
+
+
 def import_records(args: argparse.Namespace) -> int:
     input_path = args.json_path
 
@@ -833,6 +879,19 @@ def _load_task_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def _load_workflow_plan(path: Path) -> WorkflowPlan:
+    try:
+        with path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
+
+    try:
+        return WorkflowPlan.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"Invalid WorkflowPlan in {path}: {exc}") from exc
+
+
 def _validate_task_envelope(task: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     required_fields = [
@@ -907,6 +966,10 @@ def _as_list(value: Any) -> list[Any]:
     return []
 
 
+def _format_yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
 def _print_list(label: str, values: list[Any]) -> None:
     print(f"{label}:")
     if not values:
@@ -936,6 +999,25 @@ def _print_proposal_summary(proposal: ProposalInput) -> None:
     print(f"Notes: {'present' if proposal.notes else 'none'}")
     if proposal.company_config.company_name:
         print(f"Company: {proposal.company_config.company_name}")
+
+
+def _print_workflow_plan_summary(plan: WorkflowPlan) -> None:
+    print(f"Workflow plan: {plan.workflow_name}")
+    print(f"Status: {plan.status.value}")
+    if plan.description:
+        print(f"Description: {plan.description}")
+    print(f"Approval required: {_format_yes_no(plan.approval_required)}")
+    print(f"Approval approved: {_format_yes_no(plan.approval.approved)}")
+    print(f"Steps: {len(plan.steps)}")
+    print(
+        "Steps requiring human review: "
+        f"{sum(1 for step in plan.steps if step.requires_human_review)}"
+    )
+    print(f"Artifact-writing steps: {sum(1 for step in plan.steps if step.writes_artifact)}")
+    print("Step names:")
+    for step in plan.steps:
+        print(f"  {step.step_number}. {step.name}")
+    print("Execution: not supported")
 
 
 def _format_proposal_total(proposal: ProposalInput) -> str:
