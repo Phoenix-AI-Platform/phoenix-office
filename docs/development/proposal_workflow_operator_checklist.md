@@ -30,6 +30,8 @@ Example paths used by the current Abby Hill workflow:
 - `output/abby_hill_proposal_input.json`
 - `output/abby_hill_proposal.docx`
 
+Additional sanitized sample proposal details are available at `examples/records/proposal_details_sample_north_prairie.json`.
+
 ## Preflight Checklist
 
 - [ ] Customer information reviewed
