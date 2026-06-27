@@ -108,6 +108,7 @@ For the current manual A-1 proposal workflow, see:
 
 - [Project state](docs/development/project_state.md)
 - [Development loop runbook](docs/development/development_loop_runbook.md)
+- [PR review guardrails](docs/development/pr_review_guardrails.md)
 - [A-1 proposal MVP acceptance](docs/development/a1_proposal_mvp_acceptance.md)
 - [Operator checklist](docs/development/proposal_workflow_operator_checklist.md)
 - [Proposal workflow runbook](docs/development/proposal_workflow_runbook.md)
