@@ -1,0 +1,24 @@
+{
+  "company_config": {
+    "company_name": "A-1 Tank Removal LLC",
+    "starting_at_label": "Starting at",
+    "terms_and_conditions": null,
+    "total_label": "TOTAL"
+  },
+  "item_description": "Describe the tank removal work here",
+  "notes": [
+    "Add proposal note here"
+  ],
+  "pricing": {
+    "amount": "1.00",
+    "is_starting_at": true,
+    "pricing_note": "Add pricing note here"
+  },
+  "proposal_date": "2026-01-01",
+  "scope_items": [
+    {
+      "description": "Add scope item here",
+      "number": 1
+    }
+  ]
+}
