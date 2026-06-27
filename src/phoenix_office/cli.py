@@ -13,6 +13,13 @@ from pydantic import ValidationError
 from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
+from phoenix_office.records import (
+    create_sqlite_record_store,
+    import_customer_record_file,
+    import_customer_records_file,
+    import_job_record_file,
+    import_job_records_file,
+)
 from phoenix_office.renderers import DocxProposalRenderer
 
 
@@ -109,6 +116,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to serialized TaskEnvelope JSON",
     )
     validate_parser.set_defaults(func=validate_task)
+
+    records_parser = subparsers.add_parser(
+        "records",
+        help="Record commands",
+    )
+    records_subparsers = records_parser.add_subparsers(dest="records_command")
+    records_import_parser = records_subparsers.add_parser(
+        "import",
+        help="Import record JSON files into a SQLite database",
+    )
+    records_import_subparsers = records_import_parser.add_subparsers(
+        dest="records_import_kind"
+    )
+
+    customer_import_parser = records_import_subparsers.add_parser(
+        "customer",
+        help="Import one CustomerRecord JSON file",
+    )
+    customer_import_parser.add_argument("json_path", type=Path, help="Path to CustomerRecord JSON")
+    customer_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    customer_import_parser.set_defaults(func=import_records, records_import_kind="customer")
+
+    job_import_parser = records_import_subparsers.add_parser(
+        "job",
+        help="Import one JobRecord JSON file",
+    )
+    job_import_parser.add_argument("json_path", type=Path, help="Path to JobRecord JSON")
+    job_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    job_import_parser.set_defaults(func=import_records, records_import_kind="job")
+
+    customers_import_parser = records_import_subparsers.add_parser(
+        "customers",
+        help="Import a CustomerRecord JSON array file",
+    )
+    customers_import_parser.add_argument("json_path", type=Path, help="Path to CustomerRecord JSON array")
+    customers_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    customers_import_parser.set_defaults(func=import_records, records_import_kind="customers")
+
+    jobs_import_parser = records_import_subparsers.add_parser(
+        "jobs",
+        help="Import a JobRecord JSON array file",
+    )
+    jobs_import_parser.add_argument("json_path", type=Path, help="Path to JobRecord JSON array")
+    jobs_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    jobs_import_parser.set_defaults(func=import_records, records_import_kind="jobs")
 
     return parser
 
@@ -235,6 +287,43 @@ def validate_task(args: argparse.Namespace) -> int:
         return 1
 
     print(f"TaskEnvelope validation passed: {task.get('task_id', '')}")
+    return 0
+
+
+def import_records(args: argparse.Namespace) -> int:
+    input_path = args.json_path
+
+    if not input_path.exists():
+        print(f"Error: record JSON file does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(f"Error: record JSON path is not a file: {input_path}", file=sys.stderr)
+        return 1
+
+    try:
+        store = create_sqlite_record_store(args.db)
+        if args.records_import_kind == "customer":
+            customer = import_customer_record_file(store, input_path)
+            print(f"Imported customer: {customer.customer_id}")
+        elif args.records_import_kind == "job":
+            job = import_job_record_file(store, input_path)
+            print(f"Imported job: {job.job_id}")
+        elif args.records_import_kind == "customers":
+            customers = import_customer_records_file(store, input_path)
+            print(f"Imported customers: {len(customers)}")
+        elif args.records_import_kind == "jobs":
+            jobs = import_job_records_file(store, input_path)
+            print(f"Imported jobs: {len(jobs)}")
+        else:
+            print(f"Error: unsupported records import kind: {args.records_import_kind}", file=sys.stderr)
+            return 1
+    except (ValueError, ValidationError) as exc:
+        print(f"Error: failed to import records: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to import records: {exc}", file=sys.stderr)
+        return 1
+
     return 0
 
 
