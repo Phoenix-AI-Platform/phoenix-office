@@ -88,6 +88,26 @@ def test_create_proposal_input_from_records_preserves_explicit_details() -> None
     assert proposal.company_config == company_config
 
 
+def test_create_proposal_input_from_records_uses_default_config_without_mutation() -> None:
+    customer = _customer()
+    job = _job()
+    original_customer = customer.model_copy(deep=True)
+    original_job = job.model_copy(deep=True)
+
+    proposal = create_proposal_input_from_records(
+        customer=customer,
+        job=job,
+        proposal_date=date(2026, 6, 26),
+        item_description="Tank removal",
+        scope_items=_scope_items(),
+        pricing=_pricing(),
+    )
+
+    assert proposal.company_config == CompanyConfig()
+    assert customer == original_customer
+    assert job == original_job
+
+
 def test_create_proposal_input_from_records_rejects_mismatched_customer_ids() -> None:
     with pytest.raises(ValueError, match="customer_id must match"):
         create_proposal_input_from_records(
