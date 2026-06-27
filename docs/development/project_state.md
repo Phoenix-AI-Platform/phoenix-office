@@ -6,6 +6,8 @@ This document is a project-state handoff for Phoenix Office. It is intended to r
 
 Use it as a repo-native source of truth for future development prompts, reviews, and planning.
 
+For the recommended human-controlled development process, see [development loop runbook](development_loop_runbook.md).
+
 ## Current Verified Spine
 
 ```text
