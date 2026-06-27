@@ -18,6 +18,7 @@ CustomerRecord / JobRecord JSON
   -> optionally validate explicit RecordProposalDetails JSON
   -> compose ProposalInput JSON using explicit RecordProposalDetails
   -> optionally validate composed ProposalInput JSON
+  -> optionally inspect composed ProposalInput JSON
   -> render DOCX using proposal generate
 ```
 
@@ -29,10 +30,11 @@ python -m phoenix_office.cli records import job examples/records/job_abby_hill.j
 python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
 python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
+python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal generate` remains responsible for DOCX generation.
+`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal inspect` is an optional review step that validates and loads `ProposalInput` JSON, then prints a human-readable summary without generating a DOCX. `proposal generate` remains responsible for DOCX generation.
 
 ## Required Input Files
 
@@ -152,6 +154,16 @@ python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.j
 
 This command validates `ProposalInput` JSON only. It does not generate DOCX, load a DOCX template, read customer records, read job records, open SQLite, or infer pricing or scope.
 
+## Inspecting ProposalInput JSON
+
+Optionally inspect the composed `ProposalInput` JSON before generating the DOCX proposal:
+
+```bash
+python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
+```
+
+This command validates and loads `ProposalInput` JSON, then prints a short human-readable summary. It does not generate DOCX, load a DOCX template, read customer records, read job records, open SQLite, or infer pricing or scope.
+
 ## Generating The DOCX Proposal
 
 Generate the DOCX proposal from the composed `ProposalInput` JSON and the A-1 DOCX template:
@@ -230,7 +242,7 @@ Invalid proposal input JSON:
 Error: invalid proposal input: Invalid proposal input
 ```
 
-Confirm the proposal input file is valid JSON and matches the `ProposalInput` shape. Use `proposal validate` as an optional preflight before `proposal generate`.
+Confirm the proposal input file is valid JSON and matches the `ProposalInput` shape. Use `proposal validate` as an optional preflight before `proposal generate`, or `proposal inspect` to validate and print a review summary.
 
 Missing template:
 
@@ -246,7 +258,7 @@ Missing proposal input JSON:
 Error: JSON input file does not exist: output/abby_hill_proposal_input.json
 ```
 
-Run `records proposal-input` before `proposal generate`, and confirm the output path matches.
+Run `records proposal-input` before `proposal validate`, `proposal inspect`, or `proposal generate`, and confirm the output path matches.
 
 ## Current Limitations / Future Work
 
