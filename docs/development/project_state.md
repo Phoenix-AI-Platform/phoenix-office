@@ -92,6 +92,8 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #78 WorkflowPlanReview inspect fixture coverage
 #79 Orchestration inspection path error tests
 #81 Next-brick planning guide
+#82 Project state update through PR #81
+#83 Orchestration CLI non-execution surface tests
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -122,6 +124,7 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 - Help/discoverability tests protect the read-only orchestration inspection command surface.
 - `WorkflowPlanReview` inspect is covered for approved, rejected, and `needs_changes` review fixtures.
 - `WorkflowPlan` and `WorkflowPlanReview` inspect path error handling is covered for missing files and directory paths.
+- Unsupported orchestration execution/mutation command shapes are tested and rejected, including `orchestration execute/run/apply`, `orchestration plan execute/run`, and `orchestration review approve/reject/apply`.
 - Planning and approval contracts are non-executing.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
@@ -180,6 +183,8 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- orchestration CLI non-execution surface tests from PR #83
+- project state update through PR #82
 - next-brick planning guide from PR #81
 - orchestration inspection CLI guide from PR #76
 - orchestration inspection CLI help tests from PR #77
