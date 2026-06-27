@@ -8,6 +8,8 @@ Use it as a repo-native source of truth for future development prompts, reviews,
 
 For the recommended human-controlled development process, see [development loop runbook](development_loop_runbook.md).
 
+For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
+
 ## Current Verified Spine
 
 ```text
