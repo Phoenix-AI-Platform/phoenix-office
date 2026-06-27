@@ -69,7 +69,7 @@ python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.j
 
 The current record-backed proposal workflow is an explicit-details-driven command chain. Records provide customer and job site fields, while `RecordProposalDetails` provides proposal date, item description, scope, pricing, notes, and company configuration.
 
-For the full operator/developer walkthrough, see the [proposal workflow runbook](proposal_workflow_runbook.md).
+For the full operator/developer walkthrough, see the [proposal workflow runbook](proposal_workflow_runbook.md). For a condensed before-generation checklist, see the [proposal workflow operator checklist](proposal_workflow_operator_checklist.md).
 
 ```bash
 python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
