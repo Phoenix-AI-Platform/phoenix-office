@@ -54,6 +54,8 @@ python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-
 
 python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
 
+python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
+
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
@@ -73,6 +75,7 @@ python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.j
 
 - This checklist does not describe automation or orchestration.
 - The workflow is manual CLI operation only.
+- `proposal inspect` validates and summarizes `ProposalInput` JSON only.
 - Pricing is not inferred from records.
 - Scope is not inferred from records.
 - Proposal notes are not inferred from records.
