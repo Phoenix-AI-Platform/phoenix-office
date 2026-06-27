@@ -49,6 +49,19 @@ DOCX generation remains the existing separate proposal command, using the genera
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
+## Record-backed Proposal Workflow
+
+The current record-backed proposal workflow is an explicit-details-driven command chain. Records provide customer and job site fields, while `RecordProposalDetails` provides proposal date, item description, scope, pricing, notes, and company configuration.
+
+```bash
+python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
+python -m phoenix_office.cli records import job examples/records/job_abby_hill.json --db output/records.sqlite
+python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
+python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+`records proposal-input` writes `ProposalInput` JSON only. `proposal generate` remains the command that renders the DOCX artifact. This workflow is not natural-language intake, and pricing or scope are not inferred from records.
+
 ## Abby Hill Example
 
 The repository includes example records that can be imported into a local development database:
