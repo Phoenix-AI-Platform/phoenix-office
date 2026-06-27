@@ -30,6 +30,14 @@ from phoenix_office.records.store import (
     create_in_memory_record_store,
     create_sqlite_record_store,
 )
+from phoenix_office.records.store_files import (
+    export_customer_records_file,
+    export_job_records_file,
+    import_customer_record_file,
+    import_customer_records_file,
+    import_job_record_file,
+    import_job_records_file,
+)
 from phoenix_office.records.store_json import (
     export_customer_records_json,
     export_job_records_json,
@@ -55,11 +63,17 @@ __all__ = [
     "customer_record_to_json",
     "customer_records_from_json",
     "customer_records_to_json",
+    "export_customer_records_file",
     "export_customer_records_json",
+    "export_job_records_file",
     "export_job_records_json",
+    "import_customer_record_file",
     "import_customer_record_json",
+    "import_customer_records_file",
     "import_customer_records_json",
+    "import_job_record_file",
     "import_job_record_json",
+    "import_job_records_file",
     "import_job_records_json",
     "initialize_records_database",
     "job_record_from_dict",
