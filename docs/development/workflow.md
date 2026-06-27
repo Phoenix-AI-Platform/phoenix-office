@@ -37,6 +37,7 @@ architecture docs
 
 - [Project state](project_state.md) records the verified Phoenix Office implementation spine, current capabilities, non-capabilities, and guardrails for future PRs.
 - [Development loop runbook](development_loop_runbook.md) documents the human-controlled branch, PR, CI, review, and merge loop for future Phoenix Office work.
+- [Next-brick planning guide](next_brick_planning_guide.md) helps choose the next narrow PR without crossing execution, mutation, persistence, or automation boundaries.
 - [PR review guardrails](pr_review_guardrails.md) documents the advisory machine-readable checklist for evaluating PR scope.
 - [Codex prompt patterns](codex_prompt_patterns.md) documents reusable project-state-aware prompt templates for future Codex tasks.
 - [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md) documents how to create narrow repair prompts after CI fails without expanding PR scope.
