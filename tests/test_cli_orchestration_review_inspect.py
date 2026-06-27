@@ -4,24 +4,56 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from phoenix_office.cli import main
 
 ROOT = Path(__file__).parents[1]
-REVIEW_FIXTURE = (
-    ROOT / "examples" / "orchestration" / "a1_proposal_review_approved.json"
+ORCHESTRATION_EXAMPLES = ROOT / "examples" / "orchestration"
+REVIEW_FIXTURES = [
+    (
+        "a1_proposal_review_approved.json",
+        "approved",
+        "yes",
+        "Human reviewed the dry-run plan",
+    ),
+    (
+        "a1_proposal_review_rejected.json",
+        "rejected",
+        "no",
+        "Human rejected the dry-run plan",
+    ),
+    (
+        "a1_proposal_review_needs_changes.json",
+        "needs_changes",
+        "no",
+        "Human requested changes before approval",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "decision", "approved_for_execution", "review_note"),
+    REVIEW_FIXTURES,
 )
+def test_cli_orchestration_review_inspect_outputs_fixture_summary(
+    fixture_name: str,
+    decision: str,
+    approved_for_execution: str,
+    review_note: str,
+    capsys,
+) -> None:
+    review_fixture = ORCHESTRATION_EXAMPLES / fixture_name
 
-
-def test_cli_orchestration_review_inspect_outputs_summary(capsys) -> None:
-    exit_code = main(["orchestration", "review", "inspect", str(REVIEW_FIXTURE)])
+    exit_code = main(["orchestration", "review", "inspect", str(review_fixture)])
 
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Workflow review: a1_proposal_manual_workflow" in captured.out
-    assert "Review decision: approved" in captured.out
-    assert "Approved for execution: yes" in captured.out
+    assert f"Review decision: {decision}" in captured.out
+    assert f"Approved for execution: {approved_for_execution}" in captured.out
     assert "Reviewer: human:sample-operator" in captured.out
-    assert "Human reviewed the dry-run plan" in captured.out
+    assert review_note in captured.out
     assert "Execution: not supported" in captured.out
     assert "Approval mutation: not supported" in captured.out
 
