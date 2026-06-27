@@ -63,6 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_proposal_parser.set_defaults(func=validate_proposal)
 
+    inspect_proposal_parser = proposal_subparsers.add_parser(
+        "inspect",
+        help="Inspect a proposal JSON input file",
+    )
+    inspect_proposal_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to proposal JSON input",
+    )
+    inspect_proposal_parser.set_defaults(func=inspect_proposal)
+
     intake_parser = proposal_subparsers.add_parser(
         "intake",
         help="Collect proposal details interactively and generate a DOCX",
@@ -466,6 +477,29 @@ def validate_proposal(args: argparse.Namespace) -> int:
         return 1
 
     print(f"ProposalInput validation passed: {input_path}")
+    return 0
+
+
+def inspect_proposal(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(f"Error: JSON input file does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(f"Error: JSON input path is not a file: {input_path}", file=sys.stderr)
+        return 1
+
+    try:
+        proposal = load_proposal(input_path)
+    except ValueError as exc:
+        print(f"Error: invalid proposal input: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to inspect proposal input: {exc}", file=sys.stderr)
+        return 1
+
+    _print_proposal_summary(proposal)
     return 0
 
 
@@ -890,6 +924,25 @@ def _print_optional_value(label: str, value: object | None) -> None:
 def _print_list_if_present(label: str, values: list[str]) -> None:
     if values:
         _print_list(label, values)
+
+
+def _print_proposal_summary(proposal: ProposalInput) -> None:
+    print(f"Customer: {proposal.customer_name}")
+    print(f"Site Address: {proposal.street_address}, {proposal.city_state_zip}")
+    print(f"Item Description: {proposal.item_description}")
+    print(f"Scope Items: {len(proposal.scope_items)}")
+    print("Pricing Lines: 1")
+    print(f"Total: {_format_proposal_total(proposal)}")
+    print(f"Notes: {'present' if proposal.notes else 'none'}")
+    if proposal.company_config.company_name:
+        print(f"Company: {proposal.company_config.company_name}")
+
+
+def _format_proposal_total(proposal: ProposalInput) -> str:
+    amount = f"${proposal.pricing.amount:,.2f}"
+    if proposal.pricing.is_starting_at:
+        return f"{proposal.company_config.starting_at_label} {amount}"
+    return amount
 
 
 def _template_is_valid(template_path: Path) -> bool:
