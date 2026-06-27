@@ -95,6 +95,7 @@ Not ready for:
 
 ## Links
 
+- [Project state](project_state.md)
 - [Orchestration plan model](orchestration_plan_model.md)
 - [Orchestration approval boundary](orchestration_approval_boundary.md)
 - [Proposal workflow operator checklist](proposal_workflow_operator_checklist.md)
