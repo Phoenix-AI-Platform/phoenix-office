@@ -6,6 +6,8 @@ This document describes the contract-only human approval boundary for dry-run wo
 
 Human approval is the boundary between dry-run planning and any future execution layer. A plan may be reviewed before anything is allowed to run.
 
+For the current verified project spine and non-capabilities, see [project state](project_state.md).
+
 ## Review Decisions
 
 A workflow plan review can be:
@@ -57,5 +59,7 @@ Approval does not:
 ## Relationship To Planning
 
 Use [orchestration plan model](orchestration_plan_model.md) for the dry-run plan contract and JSON example.
+
+Use [project state](project_state.md) for the verified implementation spine, current capabilities, and non-capabilities.
 
 Use this document for the human approval/rejection/needs-changes boundary that must be satisfied before any future execution layer can be considered.

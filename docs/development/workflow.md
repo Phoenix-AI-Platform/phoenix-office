@@ -35,6 +35,7 @@ architecture docs
 
 ## Developer Workflows
 
+- [Project state](project_state.md) records the verified Phoenix Office implementation spine, current capabilities, non-capabilities, and guardrails for future PRs.
 - [Records CLI workflow](records_cli.md) documents the current SQLite-backed customer/job record import, list, show, and export commands.
 - [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md) defines readiness criteria for the current internal manual A-1 proposal workflow.
 - [Orchestration plan model](orchestration_plan_model.md) documents the dry-run planning contract for proposed workflow steps before human approval; see `examples/orchestration/a1_proposal_dry_run_plan.json` for a sanitized reviewable JSON example.
