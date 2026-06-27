@@ -15,6 +15,7 @@ CustomerRecord / JobRecord JSON
   -> import into SQLite RecordStore
   -> optionally validate explicit RecordProposalDetails JSON
   -> compose ProposalInput JSON using explicit RecordProposalDetails
+  -> optionally validate composed ProposalInput JSON
   -> render DOCX using proposal generate
 ```
 
@@ -25,10 +26,11 @@ python -m phoenix_office.cli records import customer examples/records/customer_a
 python -m phoenix_office.cli records import job examples/records/job_abby_hill.json --db output/records.sqlite
 python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
+python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal generate` remains responsible for DOCX generation.
+`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal generate` remains responsible for DOCX generation.
 
 ## Required Input Files
 
@@ -138,6 +140,16 @@ This command:
 
 This command does not generate a DOCX file.
 
+## Validating ProposalInput JSON
+
+Optionally validate the composed `ProposalInput` JSON before generating the DOCX proposal:
+
+```bash
+python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
+```
+
+This command validates `ProposalInput` JSON only. It does not generate DOCX, load a DOCX template, read customer records, read job records, open SQLite, or infer pricing or scope.
+
 ## Generating The DOCX Proposal
 
 Generate the DOCX proposal from the composed `ProposalInput` JSON and the A-1 DOCX template:
@@ -209,6 +221,14 @@ Error: invalid RecordProposalDetails JSON: Invalid record proposal details JSON
 ```
 
 Confirm the details file is valid JSON and matches the `RecordProposalDetails` shape. Use `records proposal-details validate` as an optional preflight before `records proposal-input`.
+
+Invalid proposal input JSON:
+
+```text
+Error: invalid proposal input: Invalid proposal input
+```
+
+Confirm the proposal input file is valid JSON and matches the `ProposalInput` shape. Use `proposal validate` as an optional preflight before `proposal generate`.
 
 Missing template:
 
