@@ -23,6 +23,12 @@ The current model can represent:
 
 Command arrays in a plan are proposed commands only. They are not executed by the plan model.
 
+## JSON Example
+
+A sanitized reviewable example is available at `examples/orchestration/a1_proposal_dry_run_plan.json`.
+
+The example represents the proposed A-1 dry-run plan as JSON for review, storage, or future display. It still does not execute commands or create artifacts.
+
 ## A-1 Proposal Workflow Use Case
 
 The first planned use case is the current manual A-1 proposal workflow. A dry-run plan can describe these intended steps:
