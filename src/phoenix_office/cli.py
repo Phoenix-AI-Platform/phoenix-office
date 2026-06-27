@@ -134,32 +134,68 @@ def build_parser() -> argparse.ArgumentParser:
         "customer",
         help="Import one CustomerRecord JSON file",
     )
-    customer_import_parser.add_argument("json_path", type=Path, help="Path to CustomerRecord JSON")
-    customer_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    customer_import_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path to CustomerRecord JSON",
+    )
+    customer_import_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
     customer_import_parser.set_defaults(func=import_records, records_import_kind="customer")
 
     job_import_parser = records_import_subparsers.add_parser(
         "job",
         help="Import one JobRecord JSON file",
     )
-    job_import_parser.add_argument("json_path", type=Path, help="Path to JobRecord JSON")
-    job_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    job_import_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path to JobRecord JSON",
+    )
+    job_import_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
     job_import_parser.set_defaults(func=import_records, records_import_kind="job")
 
     customers_import_parser = records_import_subparsers.add_parser(
         "customers",
         help="Import a CustomerRecord JSON array file",
     )
-    customers_import_parser.add_argument("json_path", type=Path, help="Path to CustomerRecord JSON array")
-    customers_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    customers_import_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path to CustomerRecord JSON array",
+    )
+    customers_import_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
     customers_import_parser.set_defaults(func=import_records, records_import_kind="customers")
 
     jobs_import_parser = records_import_subparsers.add_parser(
         "jobs",
         help="Import a JobRecord JSON array file",
     )
-    jobs_import_parser.add_argument("json_path", type=Path, help="Path to JobRecord JSON array")
-    jobs_import_parser.add_argument("--db", type=Path, required=True, help="SQLite database path")
+    jobs_import_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path to JobRecord JSON array",
+    )
+    jobs_import_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
     jobs_import_parser.set_defaults(func=import_records, records_import_kind="jobs")
 
     return parser
@@ -315,7 +351,10 @@ def import_records(args: argparse.Namespace) -> int:
             jobs = import_job_records_file(store, input_path)
             print(f"Imported jobs: {len(jobs)}")
         else:
-            print(f"Error: unsupported records import kind: {args.records_import_kind}", file=sys.stderr)
+            print(
+                f"Error: unsupported records import kind: {args.records_import_kind}",
+                file=sys.stderr,
+            )
             return 1
     except (ValueError, ValidationError) as exc:
         print(f"Error: failed to import records: {exc}", file=sys.stderr)
