@@ -15,7 +15,10 @@ def _customer(customer_id: str = "customer-abby-hill") -> CustomerRecord:
     )
 
 
-def _job(job_id: str = "job-abby-hill", customer_id: str = "customer-abby-hill") -> JobRecord:
+def _job(
+    job_id: str = "job-abby-hill",
+    customer_id: str = "customer-abby-hill",
+) -> JobRecord:
     return JobRecord(
         job_id=job_id,
         customer_id=customer_id,
