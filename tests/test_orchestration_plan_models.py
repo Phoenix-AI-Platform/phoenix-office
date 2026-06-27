@@ -20,7 +20,13 @@ def test_workflow_plan_can_be_constructed() -> None:
             WorkflowPlanStep(
                 step_number=1,
                 name="inspect input",
-                command=["python", "-m", "phoenix_office.cli", "proposal", "inspect"],
+                command=[
+                    "python",
+                    "-m",
+                    "phoenix_office.cli",
+                    "proposal",
+                    "inspect",
+                ],
                 requires_human_review=True,
             )
         ],
@@ -92,7 +98,9 @@ def test_a1_proposal_dry_run_plan_marks_artifact_steps(tmp_path: Path) -> None:
     assert generate_step.artifact_path == str(docx_output_path)
 
 
-def test_a1_proposal_dry_run_plan_contains_proposed_commands_only(tmp_path: Path) -> None:
+def test_a1_proposal_dry_run_plan_contains_proposed_commands_only(
+    tmp_path: Path,
+) -> None:
     plan = create_a1_proposal_dry_run_plan(
         customer_id="customer-abby-hill",
         job_id="job-abby-hill",
