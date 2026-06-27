@@ -64,7 +64,8 @@ def record_proposal_details_from_json(value: str) -> RecordProposalDetails:
 
 def record_proposal_details_to_json(details: RecordProposalDetails) -> str:
     """Serialize proposal details to deterministic, human-readable JSON."""
-    return f"{json.dumps(record_proposal_details_to_dict(details), indent=2, sort_keys=True)}\n"
+    payload = record_proposal_details_to_dict(details)
+    return f"{json.dumps(payload, indent=2, sort_keys=True)}\n"
 
 
 def record_proposal_details_from_file(path: Path) -> RecordProposalDetails:
