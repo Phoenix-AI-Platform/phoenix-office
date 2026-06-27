@@ -17,6 +17,8 @@ from phoenix_office.records import (
     create_sqlite_record_store,
     customer_record_to_json,
     customer_records_to_json,
+    export_customer_records_file,
+    export_job_records_file,
     import_customer_record_file,
     import_customer_records_file,
     import_job_record_file,
@@ -290,6 +292,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     job_show_parser.set_defaults(func=show_record, records_show_kind="job")
 
+    records_export_parser = records_subparsers.add_parser(
+        "export",
+        help="Export records from a SQLite database",
+    )
+    records_export_subparsers = records_export_parser.add_subparsers(
+        dest="records_export_kind"
+    )
+
+    customers_export_parser = records_export_subparsers.add_parser(
+        "customers",
+        help="Export CustomerRecord rows to JSON",
+    )
+    customers_export_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path for exported CustomerRecord JSON array",
+    )
+    customers_export_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    customers_export_parser.set_defaults(
+        func=export_records,
+        records_export_kind="customers",
+    )
+
+    jobs_export_parser = records_export_subparsers.add_parser(
+        "jobs",
+        help="Export JobRecord rows to JSON",
+    )
+    jobs_export_parser.add_argument(
+        "json_path",
+        type=Path,
+        help="Path for exported JobRecord JSON array",
+    )
+    jobs_export_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    jobs_export_parser.set_defaults(func=export_records, records_export_kind="jobs")
+
     return parser
 
 
@@ -540,6 +587,30 @@ def show_record(args: argparse.Namespace) -> int:
 
     print(f"Error: unsupported records show kind: {args.records_show_kind}", file=sys.stderr)
     return 1
+
+
+def export_records(args: argparse.Namespace) -> int:
+    try:
+        store = create_sqlite_record_store(args.db)
+        if args.records_export_kind == "customers":
+            count = len(store.customers.list_customers())
+            output_path = export_customer_records_file(store, args.json_path)
+            print(f"Exported customers: {count} -> {output_path}")
+        elif args.records_export_kind == "jobs":
+            count = len(store.jobs.list_jobs())
+            output_path = export_job_records_file(store, args.json_path)
+            print(f"Exported jobs: {count} -> {output_path}")
+        else:
+            print(
+                f"Error: unsupported records export kind: {args.records_export_kind}",
+                file=sys.stderr,
+            )
+            return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to export records: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 def intake_proposal(args: argparse.Namespace) -> int:
