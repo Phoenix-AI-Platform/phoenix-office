@@ -82,6 +82,8 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #69 Failed CI repair prompt guide
 #70 Ecosystem-informed Phoenix AI Platform PRD
 #72 Read-only WorkflowPlan inspect CLI
+#73 Project state update through PR #72
+#74 Read-only WorkflowPlanReview inspect CLI
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -103,10 +105,11 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 ## Current Orchestration State
 
 - `WorkflowPlan` model exists.
-- `WorkflowPlan` JSON fixture exists.
+- `WorkflowPlan` dry-run JSON fixture exists.
 - `WorkflowPlanReview` approval boundary exists.
 - Approved, rejected, and `needs_changes` review JSON fixtures exist.
 - Read-only `WorkflowPlan` inspect CLI exists.
+- Read-only `WorkflowPlanReview` inspect CLI exists.
 - Planning and approval contracts are non-executing.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
@@ -118,6 +121,14 @@ python -m phoenix_office.cli orchestration plan inspect examples/orchestration/a
 ```
 
 This command parses an existing `WorkflowPlan` JSON file and prints a human-readable summary. It does not execute, approve, reject, mutate, persist, enqueue, schedule, retry, or generate artifacts.
+
+Current read-only review inspection command:
+
+```bash
+python -m phoenix_office.cli orchestration review inspect examples/orchestration/a1_proposal_review_approved.json
+```
+
+This command parses an existing `WorkflowPlanReview` JSON file and prints a human-readable summary. It is read-only and non-executing. It does not approve, reject, or mutate reviews, and it does not execute, persist, enqueue, schedule, retry, or generate artifacts.
 
 ## Current Development-Process State
 
@@ -155,6 +166,8 @@ The current product direction is deterministic-core-first: Phoenix should not be
 Do not recreate these as new work:
 
 - read-only WorkflowPlan inspect CLI from PR #72
+- project state update through PR #73
+- read-only WorkflowPlanReview inspect CLI from PR #74
 - ecosystem-informed Phoenix AI Platform PRD from PR #70
 - failed CI repair prompt guide from PR #69
 - project-state verified spine doc from PR #64
@@ -173,7 +186,7 @@ Do not recreate these as new work:
 These are safe future lanes to consider, without implementing them here:
 
 - approval review display/inspection helpers
-- read-only CLI commands for showing approval reviews
+- approval review docs and examples polish
 - next-brick planning docs
 
 Execution remains out of scope until explicitly approved in a later task.
