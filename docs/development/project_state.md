@@ -81,6 +81,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #67 Codex prompt patterns documentation
 #69 Failed CI repair prompt guide
 #70 Ecosystem-informed Phoenix AI Platform PRD
+#72 Read-only WorkflowPlan inspect CLI
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -105,9 +106,18 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 - `WorkflowPlan` JSON fixture exists.
 - `WorkflowPlanReview` approval boundary exists.
 - Approved, rejected, and `needs_changes` review JSON fixtures exist.
+- Read-only `WorkflowPlan` inspect CLI exists.
 - Planning and approval contracts are non-executing.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
+
+Current read-only plan inspection command:
+
+```bash
+python -m phoenix_office.cli orchestration plan inspect examples/orchestration/a1_proposal_dry_run_plan.json
+```
+
+This command parses an existing `WorkflowPlan` JSON file and prints a human-readable summary. It does not execute, approve, reject, mutate, persist, enqueue, schedule, retry, or generate artifacts.
 
 ## Current Development-Process State
 
@@ -130,7 +140,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 ## Explicit Non-Capabilities
 
 - No orchestration execution exists.
-- No CLI workflow plan command exists.
+- No CLI workflow execution command exists.
 - No CLI approval command exists.
 - No natural-language intake exists.
 - No worker execution exists.
@@ -144,6 +154,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- read-only WorkflowPlan inspect CLI from PR #72
 - ecosystem-informed Phoenix AI Platform PRD from PR #70
 - failed CI repair prompt guide from PR #69
 - project-state verified spine doc from PR #64
@@ -161,9 +172,8 @@ Do not recreate these as new work:
 
 These are safe future lanes to consider, without implementing them here:
 
-- dry-run plan display/inspection helpers
 - approval review display/inspection helpers
-- read-only CLI commands for showing plans/reviews
+- read-only CLI commands for showing approval reviews
 - next-brick planning docs
 
 Execution remains out of scope until explicitly approved in a later task.
