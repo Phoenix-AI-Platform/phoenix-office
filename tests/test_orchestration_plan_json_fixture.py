@@ -53,14 +53,17 @@ def test_a1_proposal_dry_run_plan_fixture_round_trips_json() -> None:
     assert round_tripped.approval_required is True
 
 
-def test_a1_proposal_dry_run_plan_fixture_does_not_create_artifacts() -> None:
+def test_a1_proposal_dry_run_plan_fixture_parsing_has_no_artifact_side_effects() -> None:
     plan = WorkflowPlan.model_validate_json(PLAN_FIXTURE.read_text(encoding="utf-8"))
-
     artifact_paths = [
         Path(step.artifact_path)
         for step in plan.steps
         if step.artifact_path is not None
     ]
+    before = {artifact_path: artifact_path.exists() for artifact_path in artifact_paths}
 
+    WorkflowPlan.model_validate_json(PLAN_FIXTURE.read_text(encoding="utf-8"))
+
+    after = {artifact_path: artifact_path.exists() for artifact_path in artifact_paths}
     assert artifact_paths
-    assert all(not artifact_path.exists() for artifact_path in artifact_paths)
+    assert after == before
