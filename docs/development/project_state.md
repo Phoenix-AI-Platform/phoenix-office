@@ -71,6 +71,10 @@ For reusable project-state-aware Codex prompt templates, see [Codex prompt patte
 #61 Dry-run orchestration plan JSON fixture
 #62 Orchestration approval boundary contract
 #63 Approval review JSON fixtures
+#64 Project state verified spine doc
+#65 Phoenix development loop runbook
+#66 PR review guardrails JSON
+#67 Codex prompt patterns documentation
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -99,6 +103,17 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
 
+## Current Development-Process State
+
+Phoenix Office now has repo-native process documentation for keeping future work narrow and project-state-aware:
+
+- a project-state handoff
+- a development loop runbook
+- advisory PR review guardrails JSON/docs
+- Codex prompt patterns for project-state-aware tasks
+
+These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
+
 ## Explicit Non-Capabilities
 
 - No orchestration execution exists.
@@ -116,6 +131,10 @@ Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and repres
 
 Do not recreate these as new work:
 
+- project-state verified spine doc from PR #64
+- development loop runbook from PR #65
+- PR review guardrails JSON/docs from PR #66
+- Codex prompt patterns doc from PR #67
 - approval boundary contract from PR #62
 - approval review JSON fixtures from PR #63
 - dry-run plan model from PR #60
@@ -127,11 +146,11 @@ Do not recreate these as new work:
 
 These are safe future lanes to consider, without implementing them here:
 
-- development-loop documentation
-- project-state-aware Codex prompt patterns
 - dry-run plan display/inspection helpers
 - approval review display/inspection helpers
-- eventually, read-only CLI commands for showing plans/reviews
+- read-only CLI commands for showing plans/reviews
+- failed-CI repair prompt generator docs
+- next-brick planning docs
 
 Execution remains out of scope until explicitly approved in a later task.
 
