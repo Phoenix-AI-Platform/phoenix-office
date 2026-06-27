@@ -8,6 +8,8 @@ The loop is human-controlled. It is meant to help future Codex tasks and human r
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
 
+For focused repair prompts after CI fails, see [failed CI repair prompt guide](failed_ci_repair_prompt_guide.md).
+
 ## Current Loop
 
 ```text
@@ -78,6 +80,8 @@ When CI fails:
 
 A CI repair should not expand scope. Do not bundle cleanup, refactors, new behavior, or extra features into the repair unless the failure requires it.
 
+For the dedicated repair prompt template and stop/ask criteria, see [failed CI repair prompt guide](failed_ci_repair_prompt_guide.md).
+
 ## Controlled Parallelism
 
 Parallel PRs are usually safe when they are:
@@ -127,6 +131,7 @@ No autonomous development loop exists yet.
 - [PR review guardrails](pr_review_guardrails.md)
 - [Project state](project_state.md)
 - [Codex prompt patterns](codex_prompt_patterns.md)
+- [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md)
 - [Phoenix development workflow](workflow.md)
 - [Orchestration plan model](orchestration_plan_model.md)
 - [Orchestration approval boundary](orchestration_approval_boundary.md)
