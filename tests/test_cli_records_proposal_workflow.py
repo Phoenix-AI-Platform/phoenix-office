@@ -57,7 +57,10 @@ def test_records_cli_proposal_input_to_docx_workflow(
         json.loads(proposal_input_path.read_text(encoding="utf-8"))
     )
     assert proposal.customer_name == "Abby Hill"
-    assert proposal.item_description == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    assert (
+        proposal.item_description
+        == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    )
 
     assert main(
         [
