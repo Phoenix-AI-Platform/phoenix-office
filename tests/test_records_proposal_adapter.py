@@ -7,7 +7,11 @@ import pytest
 
 from phoenix_office.models.proposal import CompanyConfig, PricingLine, ScopeItem
 from phoenix_office.models.records import CustomerRecord, JobRecord
-from phoenix_office.records import create_proposal_input_from_records
+from phoenix_office.records import (
+    RecordProposalDetails,
+    create_proposal_input_from_record_details,
+    create_proposal_input_from_records,
+)
 
 
 def _customer(customer_id: str = "customer-abby-hill") -> CustomerRecord:
@@ -39,6 +43,24 @@ def _scope_items() -> list[ScopeItem]:
 
 def _pricing() -> PricingLine:
     return PricingLine(amount=Decimal("1250.00"))
+
+
+def _details() -> RecordProposalDetails:
+    return RecordProposalDetails(
+        proposal_date=date(2026, 6, 26),
+        item_description="Removal of aboveground tank",
+        scope_items=_scope_items(),
+        pricing=PricingLine(
+            amount=Decimal("1500.00"),
+            is_starting_at=True,
+            pricing_note="Price may change if contents are discovered.",
+        ),
+        notes=["Customer requested morning scheduling."],
+        company_config=CompanyConfig(
+            company_name="A-1 Tank Removal",
+            terms_and_conditions="Standard terms apply.",
+        ),
+    )
 
 
 def test_create_proposal_input_from_records_maps_customer_and_job_fields() -> None:
@@ -136,3 +158,66 @@ def test_create_proposal_input_from_records_does_not_copy_internal_notes() -> No
 
 def test_create_proposal_input_from_records_is_exported_from_records_package() -> None:
     assert callable(create_proposal_input_from_records)
+
+
+def test_create_proposal_input_from_record_details_maps_records_and_details() -> None:
+    details = _details()
+
+    proposal = create_proposal_input_from_record_details(
+        customer=_customer(),
+        job=_job(),
+        details=details,
+    )
+
+    assert proposal.customer_name == "Abby Hill"
+    assert proposal.street_address == "123 Main St."
+    assert proposal.city_state_zip == "Menomonee Falls, WI 53051"
+    assert proposal.proposal_date == details.proposal_date
+    assert proposal.item_description == details.item_description
+    assert proposal.scope_items == details.scope_items
+    assert proposal.pricing == details.pricing
+
+
+def test_create_proposal_input_from_record_details_preserves_notes_and_config() -> None:
+    details = _details()
+
+    proposal = create_proposal_input_from_record_details(
+        customer=_customer(),
+        job=_job(),
+        details=details,
+    )
+
+    assert proposal.notes == details.notes
+    assert proposal.company_config == details.company_config
+
+
+def test_create_proposal_input_from_record_details_reuses_id_validation() -> None:
+    with pytest.raises(ValueError, match="customer_id must match"):
+        create_proposal_input_from_record_details(
+            customer=_customer("customer-1"),
+            job=_job("customer-2"),
+            details=_details(),
+        )
+
+
+def test_create_proposal_input_from_record_details_does_not_mutate_inputs() -> None:
+    customer = _customer()
+    job = _job()
+    details = _details()
+    original_customer = customer.model_copy(deep=True)
+    original_job = job.model_copy(deep=True)
+    original_details = details.model_copy(deep=True)
+
+    create_proposal_input_from_record_details(
+        customer=customer,
+        job=job,
+        details=details,
+    )
+
+    assert customer == original_customer
+    assert job == original_job
+    assert details == original_details
+
+
+def test_create_proposal_input_from_record_details_is_exported_from_records_package() -> None:
+    assert callable(create_proposal_input_from_record_details)
