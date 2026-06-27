@@ -37,6 +37,8 @@ Current proposal details validation command:
 python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 ```
 
+For new jobs, operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file. Replace all placeholder values before sending a proposal; scope, pricing, and notes remain operator-authored and are not inferred from records.
+
 Current proposal input composition command:
 
 ```bash
