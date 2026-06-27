@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from phoenix_office.models.proposal import ProposalInput
-from phoenix_office.orchestration import WorkflowPlan
+from phoenix_office.orchestration import WorkflowPlan, WorkflowPlanReview
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.records import (
@@ -172,6 +172,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to serialized WorkflowPlan JSON",
     )
     orchestration_plan_inspect_parser.set_defaults(func=inspect_workflow_plan)
+
+    orchestration_review_parser = orchestration_subparsers.add_parser(
+        "review",
+        help="Inspect workflow plan review contracts",
+    )
+    orchestration_review_subparsers = orchestration_review_parser.add_subparsers(
+        dest="orchestration_review_command"
+    )
+    orchestration_review_inspect_parser = orchestration_review_subparsers.add_parser(
+        "inspect",
+        help="Inspect a WorkflowPlanReview JSON file without mutating it",
+    )
+    orchestration_review_inspect_parser.add_argument(
+        "review_json",
+        type=Path,
+        help="Path to serialized WorkflowPlanReview JSON",
+    )
+    orchestration_review_inspect_parser.set_defaults(func=inspect_workflow_plan_review)
 
     records_parser = subparsers.add_parser(
         "records",
@@ -633,6 +651,32 @@ def inspect_workflow_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def inspect_workflow_plan_review(args: argparse.Namespace) -> int:
+    review_path = args.review_json
+
+    if not review_path.exists():
+        print(
+            f"Error: WorkflowPlanReview JSON file does not exist: {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not review_path.is_file():
+        print(
+            f"Error: WorkflowPlanReview JSON path is not a file: {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        review = _load_workflow_plan_review(review_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    _print_workflow_plan_review_summary(review)
+    return 0
+
+
 def import_records(args: argparse.Namespace) -> int:
     input_path = args.json_path
 
@@ -892,6 +936,19 @@ def _load_workflow_plan(path: Path) -> WorkflowPlan:
         raise ValueError(f"Invalid WorkflowPlan in {path}: {exc}") from exc
 
 
+def _load_workflow_plan_review(path: Path) -> WorkflowPlanReview:
+    try:
+        with path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
+
+    try:
+        return WorkflowPlanReview.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(f"Invalid WorkflowPlanReview in {path}: {exc}") from exc
+
+
 def _validate_task_envelope(task: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     required_fields = [
@@ -1018,6 +1075,19 @@ def _print_workflow_plan_summary(plan: WorkflowPlan) -> None:
     for step in plan.steps:
         print(f"  {step.step_number}. {step.name}")
     print("Execution: not supported")
+
+
+def _print_workflow_plan_review_summary(review: WorkflowPlanReview) -> None:
+    print(f"Workflow review: {review.workflow_name}")
+    print(f"Review decision: {review.decision.value}")
+    print(f"Approved for execution: {_format_yes_no(review.approved_for_execution)}")
+    print(f"Reviewer: {review.reviewed_by}")
+    if review.review_notes:
+        print(f"Review notes: {review.review_notes}")
+    else:
+        print("Review notes: none")
+    print("Execution: not supported")
+    print("Approval mutation: not supported")
 
 
 def _format_proposal_total(proposal: ProposalInput) -> str:
