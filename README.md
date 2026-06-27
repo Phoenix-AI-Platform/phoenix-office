@@ -102,6 +102,14 @@ template layout as much as possible. Place ``{{total_line}}`` on the line
 where the full TOTAL text should appear, since that field already includes the
 configured total label.
 
+### Manual A-1 Proposal Workflow
+
+For the current manual A-1 proposal workflow, see:
+
+- [Operator checklist](docs/development/proposal_workflow_operator_checklist.md)
+- [Proposal workflow runbook](docs/development/proposal_workflow_runbook.md)
+- [Records CLI workflow](docs/development/records_cli.md)
+
 ---
 
 ## Data Model
