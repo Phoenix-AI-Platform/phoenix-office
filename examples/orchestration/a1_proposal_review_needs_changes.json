@@ -1,0 +1,7 @@
+{
+  "workflow_name": "a1_proposal_manual_workflow",
+  "decision": "needs_changes",
+  "reviewed_by": "human:sample-operator",
+  "review_notes": "Human requested changes before approval.",
+  "approved_for_execution": false
+}
