@@ -4,7 +4,7 @@
 
 This runbook explains how to manually operate the current record-backed A-1 proposal workflow in Phoenix Office. It is intended for developers and operators who need to import stored record data, compose a `ProposalInput` JSON file, and generate a DOCX proposal through the existing CLI.
 
-For a shorter step-by-step operator aid, see the [proposal workflow operator checklist](proposal_workflow_operator_checklist.md). For the records command reference, see the [records CLI workflow](records_cli.md).
+For a shorter step-by-step operator aid, see the [proposal workflow operator checklist](proposal_workflow_operator_checklist.md). For the records command reference, see the [records CLI workflow](records_cli.md). For generated local file handling, see [output artifact conventions](output_artifact_conventions.md).
 
 This is a manual CLI workflow. It does not describe an orchestrator, worker execution, natural-language intake, plugin runtime behavior, or automated proposal pipeline.
 
@@ -50,6 +50,8 @@ The workflow also uses local output paths:
 - `output/records.sqlite`
 - `output/abby_hill_proposal_input.json`
 - `output/abby_hill_proposal.docx`
+
+See [output artifact conventions](output_artifact_conventions.md) for recommended generated file layout and commit policy.
 
 The SQLite database file is created automatically when the records store is opened.
 
