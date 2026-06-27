@@ -95,6 +95,7 @@ Not ready for:
 
 ## Links
 
+- [Orchestration plan model](orchestration_plan_model.md)
 - [Proposal workflow operator checklist](proposal_workflow_operator_checklist.md)
 - [Proposal workflow runbook](proposal_workflow_runbook.md)
 - [Records CLI workflow](records_cli.md)
