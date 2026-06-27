@@ -114,6 +114,8 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
 
+For command usage and operator sequence details, see [Orchestration inspection CLI](orchestration_inspection_cli.md).
+
 Current read-only plan inspection command:
 
 ```bash
