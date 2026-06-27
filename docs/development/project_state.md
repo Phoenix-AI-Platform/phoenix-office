@@ -8,6 +8,8 @@ Use it as a repo-native source of truth for future development prompts, reviews,
 
 For the recommended human-controlled development process, see [development loop runbook](development_loop_runbook.md).
 
+For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -147,6 +149,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 
 - a project-state handoff
 - a development loop runbook
+- a next-brick planning guide
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -201,7 +204,6 @@ Do not recreate these as new work:
 
 These are safe future lanes to consider, without implementing them here:
 
-- next-brick planning docs that preserve non-execution boundaries
 - additional tests or docs that clarify existing behavior without changing runtime behavior
 
 Execution remains out of scope until explicitly approved in a later task.
