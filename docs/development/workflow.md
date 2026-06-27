@@ -38,6 +38,7 @@ architecture docs
 - [Records CLI workflow](records_cli.md) documents the current SQLite-backed customer/job record import, list, show, and export commands.
 - [Proposal workflow operator checklist](proposal_workflow_operator_checklist.md) is the short checklist for running the current manual A-1 record-backed proposal workflow.
 - [Proposal workflow runbook](proposal_workflow_runbook.md) documents the current manual record-backed proposal command chain from records import through DOCX generation.
+- [Output artifact conventions](output_artifact_conventions.md) documents where generated local workflow artifacts should go and what should not be committed.
 
 ## Scope Guardrail
 
