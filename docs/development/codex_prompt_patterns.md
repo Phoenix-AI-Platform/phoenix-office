@@ -123,6 +123,8 @@ Repair loop:
 4. Do not expand scope.
 5. Rerun CI.
 
+For the dedicated repair preflight, prompt template, and stop/ask criteria, see [failed CI repair prompt guide](failed_ci_repair_prompt_guide.md).
+
 ## Parallel PR Prompt Pattern
 
 Parallel tasks are safe only when they are:
@@ -163,4 +165,5 @@ Do not make unrelated changes.
 - [Project state](project_state.md)
 - [Development loop runbook](development_loop_runbook.md)
 - [PR review guardrails](pr_review_guardrails.md)
+- [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md)
 - [Phoenix development workflow](workflow.md)

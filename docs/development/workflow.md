@@ -39,6 +39,7 @@ architecture docs
 - [Development loop runbook](development_loop_runbook.md) documents the human-controlled branch, PR, CI, review, and merge loop for future Phoenix Office work.
 - [PR review guardrails](pr_review_guardrails.md) documents the advisory machine-readable checklist for evaluating PR scope.
 - [Codex prompt patterns](codex_prompt_patterns.md) documents reusable project-state-aware prompt templates for future Codex tasks.
+- [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md) documents how to create narrow repair prompts after CI fails without expanding PR scope.
 - [Records CLI workflow](records_cli.md) documents the current SQLite-backed customer/job record import, list, show, and export commands.
 - [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md) defines readiness criteria for the current internal manual A-1 proposal workflow.
 - [Orchestration plan model](orchestration_plan_model.md) documents the dry-run planning contract for proposed workflow steps before human approval; see `examples/orchestration/a1_proposal_dry_run_plan.json` for a sanitized reviewable JSON example.
