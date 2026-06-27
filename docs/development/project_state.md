@@ -84,6 +84,11 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #72 Read-only WorkflowPlan inspect CLI
 #73 Project state update through PR #72
 #74 Read-only WorkflowPlanReview inspect CLI
+#75 Project state update through PR #74
+#76 Orchestration inspection CLI guide
+#77 Orchestration inspection CLI help tests
+#78 WorkflowPlanReview inspect fixture coverage
+#79 Orchestration inspection path error tests
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -110,6 +115,10 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 - Approved, rejected, and `needs_changes` review JSON fixtures exist.
 - Read-only `WorkflowPlan` inspect CLI exists.
 - Read-only `WorkflowPlanReview` inspect CLI exists.
+- Orchestration inspection CLI guide exists.
+- Help/discoverability tests protect the read-only orchestration inspection command surface.
+- `WorkflowPlanReview` inspect is covered for approved, rejected, and `needs_changes` review fixtures.
+- `WorkflowPlan` and `WorkflowPlanReview` inspect path error handling is covered for missing files and directory paths.
 - Planning and approval contracts are non-executing.
 
 Phoenix Office can describe a proposed A-1 workflow as a dry-run plan and represent human review decisions as JSON. Phoenix Office still cannot execute orchestration plans.
@@ -167,9 +176,14 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
-- read-only WorkflowPlan inspect CLI from PR #72
-- project state update through PR #73
+- orchestration inspection CLI guide from PR #76
+- orchestration inspection CLI help tests from PR #77
+- WorkflowPlanReview inspect fixture coverage from PR #78
+- orchestration inspection path error tests from PR #79
+- project state update through PR #75
 - read-only WorkflowPlanReview inspect CLI from PR #74
+- project state update through PR #73
+- read-only WorkflowPlan inspect CLI from PR #72
 - ecosystem-informed Phoenix AI Platform PRD from PR #70
 - failed CI repair prompt guide from PR #69
 - project-state verified spine doc from PR #64
@@ -187,9 +201,8 @@ Do not recreate these as new work:
 
 These are safe future lanes to consider, without implementing them here:
 
-- approval review display/inspection helpers
-- approval review docs and examples polish
-- next-brick planning docs
+- next-brick planning docs that preserve non-execution boundaries
+- additional tests or docs that clarify existing behavior without changing runtime behavior
 
 Execution remains out of scope until explicitly approved in a later task.
 
