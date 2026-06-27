@@ -31,9 +31,23 @@ python -m phoenix_office.cli records export customers output/customers.json --db
 python -m phoenix_office.cli records export jobs output/jobs.json --db output/records.sqlite
 ```
 
+Current proposal input composition command:
+
+```bash
+python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
+```
+
 The `list` and `show` commands are read-only. They open the SQLite-backed record store and print existing records without modifying them.
 
 The `export` commands write JSON files. They export all customer or job records from the SQLite store and create parent directories through the existing file export helpers.
+
+The `proposal-input` command writes a `ProposalInput` JSON file only. It combines an existing `CustomerRecord`, an existing `JobRecord`, and explicit `RecordProposalDetails` JSON. It does not generate a DOCX and does not infer pricing, scope, item description, or notes.
+
+DOCX generation remains the existing separate proposal command, using the generated proposal input JSON:
+
+```bash
+python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
 
 ## Abby Hill Example
 
@@ -53,14 +67,18 @@ python -m phoenix_office.cli records show customer customer-abby-hill --db outpu
 python -m phoenix_office.cli records show job job-abby-hill --db output/records.sqlite
 ```
 
+Compose a proposal input JSON file from the imported records plus explicit proposal details:
+
+```bash
+python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
+```
+
 Export the records back to JSON:
 
 ```bash
 python -m phoenix_office.cli records export customers output/records_customers.json --db output/records.sqlite
 python -m phoenix_office.cli records export jobs output/records_jobs.json --db output/records.sqlite
 ```
-
-`examples/records/proposal_details_abby_hill.json` is a preparation artifact for future record-backed proposal input workflows. It is not currently accepted by a records CLI proposal command.
 
 ## Current Non-Goals
 
@@ -73,4 +91,4 @@ The records CLI does not currently provide:
 - worker execution
 - proposal generation from records
 
-Proposal generation still uses the existing proposal input and DOCX rendering flow. Records are not wired into proposal generation yet.
+Proposal generation still uses the existing proposal input and DOCX rendering flow. Records can compose proposal input JSON, but records commands do not render DOCX files.
