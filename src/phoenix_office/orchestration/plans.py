@@ -83,7 +83,9 @@ class WorkflowPlan(BaseModel):
 
     @field_validator("steps")
     @classmethod
-    def steps_must_be_sequential(cls, steps: list[WorkflowPlanStep]) -> list[WorkflowPlanStep]:
+    def steps_must_be_sequential(
+        cls, steps: list[WorkflowPlanStep]
+    ) -> list[WorkflowPlanStep]:
         for expected_number, step in enumerate(steps, start=1):
             if step.step_number != expected_number:
                 raise ValueError(
