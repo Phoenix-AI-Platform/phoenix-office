@@ -10,6 +10,8 @@ For the recommended human-controlled development process, see [development loop 
 
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
+For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
+
 ## Current Verified Spine
 
 ```text

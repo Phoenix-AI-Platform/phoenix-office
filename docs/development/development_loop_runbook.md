@@ -6,6 +6,8 @@ This document describes the recommended development loop for Phoenix Office: rea
 
 The loop is human-controlled. It is meant to help future Codex tasks and human reviewers move safely without duplicating completed work or crossing architecture boundaries.
 
+For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
+
 ## Current Loop
 
 ```text
@@ -124,6 +126,7 @@ No autonomous development loop exists yet.
 
 - [PR review guardrails](pr_review_guardrails.md)
 - [Project state](project_state.md)
+- [Codex prompt patterns](codex_prompt_patterns.md)
 - [Phoenix development workflow](workflow.md)
 - [Orchestration plan model](orchestration_plan_model.md)
 - [Orchestration approval boundary](orchestration_approval_boundary.md)
