@@ -428,7 +428,10 @@ def list_records(args: argparse.Namespace) -> int:
             print(job_records_to_json(jobs))
         elif jobs:
             for job in jobs:
-                print(f"{job.job_id}\t{job.customer_id}\t{job.job_name}\t{job.status.value}")
+                print(
+                    f"{job.job_id}\t{job.customer_id}\t"
+                    f"{job.job_name}\t{job.status.value}"
+                )
         else:
             print("No jobs found.")
         return 0
