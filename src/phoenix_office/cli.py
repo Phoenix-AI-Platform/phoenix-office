@@ -15,10 +15,12 @@ from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.records import (
     create_sqlite_record_store,
+    customer_records_to_json,
     import_customer_record_file,
     import_customer_records_file,
     import_job_record_file,
     import_job_records_file,
+    job_records_to_json,
 )
 from phoenix_office.renderers import DocxProposalRenderer
 
@@ -198,6 +200,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     jobs_import_parser.set_defaults(func=import_records, records_import_kind="jobs")
 
+    records_list_parser = records_subparsers.add_parser(
+        "list",
+        help="List records from a SQLite database",
+    )
+    records_list_subparsers = records_list_parser.add_subparsers(dest="records_list_kind")
+
+    customers_list_parser = records_list_subparsers.add_parser(
+        "customers",
+        help="List CustomerRecord rows",
+    )
+    customers_list_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    customers_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output customers as JSON",
+    )
+    customers_list_parser.set_defaults(func=list_records, records_list_kind="customers")
+
+    jobs_list_parser = records_list_subparsers.add_parser(
+        "jobs",
+        help="List JobRecord rows",
+    )
+    jobs_list_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    jobs_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output jobs as JSON",
+    )
+    jobs_list_parser.set_defaults(func=list_records, records_list_kind="jobs")
+
     return parser
 
 
@@ -364,6 +406,38 @@ def import_records(args: argparse.Namespace) -> int:
         return 1
 
     return 0
+
+
+def list_records(args: argparse.Namespace) -> int:
+    store = create_sqlite_record_store(args.db)
+
+    if args.records_list_kind == "customers":
+        customers = store.customers.list_customers()
+        if args.json:
+            print(customer_records_to_json(customers))
+        elif customers:
+            for customer in customers:
+                print(f"{customer.customer_id}\t{customer.display_name}")
+        else:
+            print("No customers found.")
+        return 0
+
+    if args.records_list_kind == "jobs":
+        jobs = store.jobs.list_jobs()
+        if args.json:
+            print(job_records_to_json(jobs))
+        elif jobs:
+            for job in jobs:
+                print(
+                    f"{job.job_id}\t{job.customer_id}\t"
+                    f"{job.job_name}\t{job.status.value}"
+                )
+        else:
+            print("No jobs found.")
+        return 0
+
+    print(f"Error: unsupported records list kind: {args.records_list_kind}", file=sys.stderr)
+    return 1
 
 
 def intake_proposal(args: argparse.Namespace) -> int:
