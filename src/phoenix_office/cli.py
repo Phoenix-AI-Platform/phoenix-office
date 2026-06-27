@@ -14,6 +14,7 @@ from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.records import (
+    create_proposal_input_from_record_details,
     create_sqlite_record_store,
     customer_record_to_json,
     customer_records_to_json,
@@ -25,6 +26,7 @@ from phoenix_office.records import (
     import_job_records_file,
     job_record_to_json,
     job_records_to_json,
+    record_proposal_details_from_file,
 )
 from phoenix_office.renderers import DocxProposalRenderer
 
@@ -337,6 +339,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     jobs_export_parser.set_defaults(func=export_records, records_export_kind="jobs")
 
+    records_proposal_input_parser = records_subparsers.add_parser(
+        "proposal-input",
+        help="Compose ProposalInput JSON from records and proposal details",
+    )
+    records_proposal_input_parser.add_argument(
+        "customer_id",
+        help="Customer ID to use",
+    )
+    records_proposal_input_parser.add_argument(
+        "job_id",
+        help="Job ID to use",
+    )
+    records_proposal_input_parser.add_argument(
+        "details_json",
+        type=Path,
+        help="Path to RecordProposalDetails JSON",
+    )
+    records_proposal_input_parser.add_argument(
+        "output_json",
+        type=Path,
+        help="Path for composed ProposalInput JSON",
+    )
+    records_proposal_input_parser.add_argument(
+        "--db",
+        type=Path,
+        required=True,
+        help="SQLite database path",
+    )
+    records_proposal_input_parser.set_defaults(func=compose_record_proposal_input)
+
     return parser
 
 
@@ -613,6 +645,37 @@ def export_records(args: argparse.Namespace) -> int:
     return 0
 
 
+def compose_record_proposal_input(args: argparse.Namespace) -> int:
+    try:
+        store = create_sqlite_record_store(args.db)
+        customer = store.customers.get_customer(args.customer_id)
+        if customer is None:
+            print(f"Customer not found: {args.customer_id}", file=sys.stderr)
+            return 1
+
+        job = store.jobs.get_job(args.job_id)
+        if job is None:
+            print(f"Job not found: {args.job_id}", file=sys.stderr)
+            return 1
+
+        details = record_proposal_details_from_file(args.details_json)
+        proposal = create_proposal_input_from_record_details(
+            customer=customer,
+            job=job,
+            details=details,
+        )
+        _write_proposal_input_json(proposal, args.output_json)
+    except (ValueError, ValidationError) as exc:
+        print(f"Error: failed to compose proposal input: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to compose proposal input: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Composed proposal input JSON: {args.output_json}")
+    return 0
+
+
 def intake_proposal(args: argparse.Namespace) -> int:
     template_path = args.template
     output_path = args.output
@@ -757,6 +820,15 @@ def _template_is_valid(template_path: Path) -> bool:
 def _write_proposal_json(proposal: ProposalInput, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(f"{proposal.model_dump_json(indent=2)}\n", encoding="utf-8")
+
+
+def _write_proposal_input_json(proposal: ProposalInput, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = proposal.model_dump(mode="json")
+    output_path.write_text(
+        f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
