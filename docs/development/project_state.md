@@ -10,6 +10,8 @@ For the recommended human-controlled development process, see [development loop 
 
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
+For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -154,9 +156,12 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a project-state handoff
 - a development loop runbook
 - a next-brick planning guide
+- an orchestration execution readiness checklist
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
+
+The orchestration execution readiness checklist is documentation only. It does not approve or implement execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
