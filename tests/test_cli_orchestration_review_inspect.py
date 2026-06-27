@@ -58,6 +58,32 @@ def test_cli_orchestration_review_inspect_outputs_fixture_summary(
     assert "Approval mutation: not supported" in captured.out
 
 
+def test_cli_orchestration_review_inspect_fails_cleanly_for_missing_file(
+    tmp_path,
+    capsys,
+) -> None:
+    missing_review = tmp_path / "missing-review.json"
+
+    exit_code = main(["orchestration", "review", "inspect", str(missing_review)])
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert "WorkflowPlanReview JSON file does not exist" in captured.err
+    assert str(missing_review) in captured.err
+
+
+def test_cli_orchestration_review_inspect_fails_cleanly_for_directory_path(
+    tmp_path,
+    capsys,
+) -> None:
+    exit_code = main(["orchestration", "review", "inspect", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert "WorkflowPlanReview JSON path is not a file" in captured.err
+    assert str(tmp_path) in captured.err
+
+
 def test_cli_orchestration_review_inspect_fails_cleanly_for_invalid_json(
     tmp_path,
     capsys,
