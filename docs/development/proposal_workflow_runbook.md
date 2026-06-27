@@ -98,6 +98,14 @@ Example path:
 examples/records/proposal_details_abby_hill.json
 ```
 
+Starter template path:
+
+```text
+examples/records/proposal_details_template.json
+```
+
+Operators may copy the starter template when preparing details for a new job. Replace all placeholder values before sending a proposal; scope, pricing, and notes are still operator-authored and are not inferred from records. The template does not add automation or orchestration.
+
 Pricing is not inferred from records. Scope is not inferred from records. The operator is responsible for supplying the intended pricing and scope in `RecordProposalDetails`.
 
 ## Validating RecordProposalDetails JSON
