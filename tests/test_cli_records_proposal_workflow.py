@@ -75,6 +75,11 @@ def test_records_cli_proposal_input_to_docx_workflow(
     assert main(["proposal", "validate", str(proposal_input_path)]) == 0
     capsys.readouterr()
 
+    assert main(["proposal", "inspect", str(proposal_input_path)]) == 0
+    captured = capsys.readouterr()
+    assert "Customer: Abby Hill" in captured.out
+    assert "Item Description: Removal of 1,000 Gallon Aboveground Storage Tank" in captured.out
+
     assert main(
         [
             "proposal",
