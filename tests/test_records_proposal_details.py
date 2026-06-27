@@ -58,7 +58,9 @@ def test_record_proposal_details_from_dict_and_json() -> None:
     payload = record_proposal_details_to_dict(_details())
 
     from_dict = record_proposal_details_from_dict(payload)
-    from_json = record_proposal_details_from_json(record_proposal_details_to_json(_details()))
+    from_json = record_proposal_details_from_json(
+        record_proposal_details_to_json(_details())
+    )
 
     assert from_dict == _details()
     assert from_json == _details()
