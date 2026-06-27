@@ -1,0 +1,36 @@
+{
+  "company_config": {
+    "company_name": "A-1 Tank Removal LLC",
+    "starting_at_label": "Starting at",
+    "terms_and_conditions": null,
+    "total_label": "TOTAL"
+  },
+  "item_description": "Removal of two 550 Gallon Aboveground Storage Tanks",
+  "notes": [
+    "Proposal is based on accessible aboveground tanks and operator-authored scope."
+  ],
+  "pricing": {
+    "amount": "5400.00",
+    "is_starting_at": false,
+    "pricing_note": null
+  },
+  "proposal_date": "2026-06-27",
+  "scope_items": [
+    {
+      "description": "Remove two 550 gallon aboveground storage tanks.",
+      "number": 1
+    },
+    {
+      "description": "Pump and clean remaining accessible tank contents as required for removal.",
+      "number": 2
+    },
+    {
+      "description": "Disconnect and remove associated accessible tank piping.",
+      "number": 3
+    },
+    {
+      "description": "Haul tanks and related debris from site.",
+      "number": 4
+    }
+  ]
+}
