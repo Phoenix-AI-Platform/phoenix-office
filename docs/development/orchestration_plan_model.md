@@ -49,6 +49,8 @@ Human approval remains required before any future execution layer. The plan mode
 
 The current planning code does not implement approvals, execution, scheduling, worker assignment, or retries.
 
+See [orchestration approval boundary](orchestration_approval_boundary.md) for the contract-only review decision model.
+
 ## Explicit Non-Behavior
 
 The orchestration plan model does not:
@@ -72,6 +74,7 @@ The orchestration plan model does not:
 
 Use this document for the dry-run plan contract. Use the existing proposal workflow docs for actual manual operation:
 
+- [Orchestration approval boundary](orchestration_approval_boundary.md)
 - [A-1 proposal MVP acceptance](a1_proposal_mvp_acceptance.md)
 - [Proposal workflow operator checklist](proposal_workflow_operator_checklist.md)
 - [Proposal workflow runbook](proposal_workflow_runbook.md)
