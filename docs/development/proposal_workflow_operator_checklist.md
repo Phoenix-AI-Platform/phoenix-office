@@ -18,6 +18,8 @@ Prepare or choose these files and paths before running the workflow:
 - output `ProposalInput` JSON path
 - output DOCX path
 
+Operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file for a new job. Replace all placeholder values before sending a proposal.
+
 Example paths used by the current Abby Hill workflow:
 
 - `examples/records/customer_abby_hill.json`
