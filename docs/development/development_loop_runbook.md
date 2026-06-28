@@ -25,6 +25,16 @@ Read docs/development/project_state.md
   -> update project state when the verified spine changes
 ```
 
+## Project State Entry Check
+
+After a project-state update PR, the local helper can check whether `docs/development/project_state.md` contains an entry for a supplied PR number:
+
+```bash
+python scripts/check_project_state_entry.py --pr-number 109
+```
+
+The helper is read-only. It checks the project-state document for `#<number>` and does not call GitHub APIs, mutate files, add workflow enforcement, or change repository state.
+
 ## One Branch / One PR Rule
 
 - One branch.
