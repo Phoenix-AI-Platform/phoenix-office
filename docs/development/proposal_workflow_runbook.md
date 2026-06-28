@@ -31,10 +31,11 @@ python -m phoenix_office.cli records proposal-details validate examples/records/
 python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
 python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
 python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
+python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json --json
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal inspect` is an optional review step that validates and loads `ProposalInput` JSON, then prints a human-readable summary without generating a DOCX. `proposal generate` remains responsible for DOCX generation.
+`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal inspect` is an optional review step that validates and loads `ProposalInput` JSON, then prints a human-readable summary without generating a DOCX. `proposal inspect --json` prints deterministic machine-readable JSON for reviewer tooling. `proposal generate` remains responsible for DOCX generation.
 
 ## Required Input Files
 
@@ -172,13 +173,23 @@ This command validates `ProposalInput` JSON only. It does not generate DOCX, loa
 
 ## Inspecting ProposalInput JSON
 
-Optionally inspect the composed `ProposalInput` JSON before generating the DOCX proposal:
+After composing `ProposalInput` from records, reviewers can inspect the composed JSON before rendering DOCX.
+
+Human-readable inspection:
 
 ```bash
 python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
 ```
 
-This command validates and loads `ProposalInput` JSON, then prints a short human-readable summary. It does not generate DOCX, load a DOCX template, read customer records, read job records, open SQLite, or infer pricing or scope.
+Machine-readable inspection:
+
+```bash
+python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json --json
+```
+
+Text inspect is for human review. `--json` inspect is for deterministic machine-readable review.
+
+Both inspection forms are read-only. They validate and load `ProposalInput` JSON, then print review output. They do not render DOCX, mutate records, change proposal data, call GitHub APIs, or trigger workflows. Rendering still requires the explicit `proposal generate` command.
 
 ## Generating The DOCX Proposal
 
