@@ -104,6 +104,29 @@ def test_sample_north_prairie_records_to_docx_workflow(
     assert "Total: $5,400.00" in inspect_output
     assert "Notes: present" in inspect_output
 
+    assert main(["proposal", "inspect", str(proposal_input_path), "--json"]) == 0
+    captured = capsys.readouterr()
+    inspect_payload = json.loads(captured.out)
+    assert inspect_payload["customer_name"] == "Sample North Prairie Customer"
+    assert inspect_payload["street_address"] == "100 Sample Site Rd."
+    assert inspect_payload["city_state_zip"] == "North Prairie, WI 53153"
+    assert (
+        inspect_payload["item_description"]
+        == "Removal of two 550 Gallon Aboveground Storage Tanks"
+    )
+    assert [item["description"] for item in inspect_payload["scope_items"]] == [
+        "Remove two 550 gallon aboveground storage tanks.",
+        "Pump and clean remaining accessible tank contents as required for removal.",
+        "Disconnect and remove associated accessible tank piping.",
+        "Haul tanks and related debris from site.",
+    ]
+    assert inspect_payload["pricing"]["amount"] == "5400.00"
+    assert inspect_payload["pricing"]["is_starting_at"] is False
+    assert inspect_payload["notes"] == [
+        "Proposal is based on accessible aboveground tanks and operator-authored scope."
+    ]
+    assert captured.err == ""
+
     assert main(
         [
             "proposal",
