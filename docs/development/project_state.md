@@ -144,6 +144,9 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #122 feat: add JSON output to dev status (`python -m phoenix_office.cli dev status --json` emits deterministic machine-readable JSON for the read-only local dev status command)
 #124 docs: document dev status JSON contract (`docs/development/dev-status-json-contract.md` documents the read-only `dev status --json` output contract and consumer safety boundaries)
 #126 test: cover record-backed proposal inspect JSON (deterministic regression coverage proves Abby Hill and Sample North Prairie composed ProposalInput output can be inspected through `proposal inspect --json`)
+#128 docs: clarify record-backed proposal inspection (documents human-readable and machine-readable `proposal inspect` review commands after record-backed ProposalInput composition; rendering still requires explicit `proposal generate`)
+#129 docs: document proposal inspect JSON contract (adds `docs/proposals/proposal-inspect-json-contract.md` describing read-only `proposal inspect --json` inputs, normalized JSON output, failure behavior, consumer guidance, and stability expectations)
+#130 test: cover proposal inspect JSON optional fields (adds deterministic `proposal inspect --json` coverage for `company_config`, provided notes, and omitted notes defaulting to an empty list)
 ```
 
 ## Current Manual A-1 Proposal Workflow
