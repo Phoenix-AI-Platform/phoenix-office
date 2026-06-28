@@ -136,6 +136,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #105 docs: add ProposalInput validation examples (valid/invalid validation commands + operator-facing field-level errors)
 #107 ci: add pull request body section guard (read-only PR body guard workflow + required-section script)
 #109 process: add project state entry checker (read-only local helper for checking project_state.md PR entries)
+#112 test: add deterministic proposal inspect regression coverage (focused assertions for Abby Hill stable summary lines + tmp_path-backed Company/Notes conditional case)
 ```
 
 ## Current Manual A-1 Proposal Workflow
