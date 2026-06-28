@@ -138,6 +138,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #109 process: add project state entry checker (read-only local helper for checking project_state.md PR entries)
 #112 test: add deterministic proposal inspect regression coverage (focused assertions for Abby Hill stable summary lines + tmp_path-backed Company/Notes conditional case)
 #114 test: strengthen deterministic record-backed proposal workflow regression assertions (Abby Hill + Sample North Prairie composed ProposalInput fields and inspect output)
+#116 cli: add optional JSON output to proposal inspect (deterministic `proposal inspect --json` emits normalized ProposalInput JSON; default text inspect output remains unchanged)
 ```
 
 ## Current Manual A-1 Proposal Workflow
