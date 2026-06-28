@@ -135,6 +135,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #103 test: add invalid ProposalInput fixture (sanitized invalid fixture reused in focused validation-error tests)
 #105 docs: add ProposalInput validation examples (valid/invalid validation commands + operator-facing field-level errors)
 #107 ci: add pull request body section guard (read-only PR body guard workflow + required-section script)
+#109 process: add project state entry checker (read-only local helper for checking project_state.md PR entries)
 ```
 
 ## Current Manual A-1 Proposal Workflow
