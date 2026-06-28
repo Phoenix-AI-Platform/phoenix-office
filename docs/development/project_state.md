@@ -141,6 +141,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #116 cli: add optional JSON output to proposal inspect (deterministic `proposal inspect --json` emits normalized ProposalInput JSON; default text inspect output remains unchanged)
 #118 chore: fix E501 in project state guard script (wrapped project-state checker PR-number argument definition so full repo ruff lint passes cleanly again)
 #120 feat: add read-only dev status command (`python -m phoenix_office.cli dev status` reads project_state.md and reports the latest recorded PR entry)
+#122 feat: add JSON output to dev status (`python -m phoenix_office.cli dev status --json` emits deterministic machine-readable JSON for the read-only local dev status command)
 ```
 
 ## Current Manual A-1 Proposal Workflow
