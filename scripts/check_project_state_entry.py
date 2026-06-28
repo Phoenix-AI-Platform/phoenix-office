@@ -26,7 +26,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Check whether docs/development/project_state.md records a PR number."
     )
-    parser.add_argument("--pr-number", type=int, required=True, help="Pull request number to find.")
+    parser.add_argument(
+        "--pr-number", type=int, required=True, help="Pull request number to find."
+    )
     parser.add_argument(
         "--project-state-path",
         type=Path,
