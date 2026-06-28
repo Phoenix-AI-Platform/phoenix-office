@@ -43,6 +43,7 @@ architecture docs
 - [Orchestration plan/review binding design notes](orchestration_plan_review_binding_design_notes.md) document future binding expectations as design guidance only, without implementing binding enforcement or changing models.
 - [Orchestration validation/preflight design notes](orchestration_validation_preflight_design_notes.md) document future read-only validation/preflight expectations as design guidance only, without implementing validation/preflight enforcement or adding CLI commands.
 - [Orchestration operator confirmation design notes](orchestration_operator_confirmation_design_notes.md) document future explicit operator confirmation expectations as design guidance only, without implementing operator confirmation enforcement, execution, or CLI commands.
+- [Orchestration output artifact policy design notes](orchestration_output_artifact_policy_design_notes.md) document future output/artifact policy expectations as design guidance only, without implementing output/artifact policy enforcement, generating artifacts, or adding CLI commands.
 - [PR review guardrails](pr_review_guardrails.md) documents the advisory machine-readable checklist for evaluating PR scope.
 - [Codex prompt patterns](codex_prompt_patterns.md) documents reusable project-state-aware prompt templates for future Codex tasks.
 - [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md) documents how to create narrow repair prompts after CI fails without expanding PR scope.
