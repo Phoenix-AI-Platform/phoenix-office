@@ -140,6 +140,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #114 test: strengthen deterministic record-backed proposal workflow regression assertions (Abby Hill + Sample North Prairie composed ProposalInput fields and inspect output)
 #116 cli: add optional JSON output to proposal inspect (deterministic `proposal inspect --json` emits normalized ProposalInput JSON; default text inspect output remains unchanged)
 #118 chore: fix E501 in project state guard script (wrapped project-state checker PR-number argument definition so full repo ruff lint passes cleanly again)
+#120 feat: add read-only dev status command (`python -m phoenix_office.cli dev status` reads project_state.md and reports the latest recorded PR entry)
 ```
 
 ## Current Manual A-1 Proposal Workflow
