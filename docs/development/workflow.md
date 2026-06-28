@@ -40,6 +40,7 @@ architecture docs
 - [Next-brick planning guide](next_brick_planning_guide.md) helps choose the next narrow PR without crossing execution, mutation, persistence, or automation boundaries.
 - [Orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md) defines documentation-only gates that must be addressed before future orchestration execution work may be considered.
 - [Orchestration audit logging design notes](orchestration_audit_logging_design_notes.md) document future audit/logging expectations as design guidance only, without implementing audit persistence or execution.
+- [Orchestration plan/review binding design notes](orchestration_plan_review_binding_design_notes.md) document future binding expectations as design guidance only, without implementing binding enforcement or changing models.
 - [PR review guardrails](pr_review_guardrails.md) documents the advisory machine-readable checklist for evaluating PR scope.
 - [Codex prompt patterns](codex_prompt_patterns.md) documents reusable project-state-aware prompt templates for future Codex tasks.
 - [Failed CI repair prompt guide](failed_ci_repair_prompt_guide.md) documents how to create narrow repair prompts after CI fails without expanding PR scope.
