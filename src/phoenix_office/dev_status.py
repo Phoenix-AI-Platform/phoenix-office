@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,17 @@ def latest_project_state_pr_entry(project_state_text: str) -> str | None:
     return latest_entry
 
 
+def development_status_payload(status: DevelopmentStatus) -> dict[str, object]:
+    """Return a JSON-serializable deterministic status payload."""
+
+    return {
+        "project_name": status.project_name,
+        "status_source_path": str(status.status_source_path),
+        "project_state_exists": status.project_state_exists,
+        "latest_recorded_pr_entry": status.latest_recorded_pr_entry,
+    }
+
+
 def format_development_status(status: DevelopmentStatus) -> str:
     """Format a concise, deterministic status summary."""
 
@@ -78,6 +90,12 @@ def format_development_status(status: DevelopmentStatus) -> str:
             f"latest recorded PR entry: {latest_entry}",
         ]
     )
+
+
+def format_development_status_json(status: DevelopmentStatus) -> str:
+    """Format a deterministic machine-readable status summary."""
+
+    return json.dumps(development_status_payload(status), indent=2, sort_keys=True)
 
 
 def _is_pr_entry(line: str) -> bool:
