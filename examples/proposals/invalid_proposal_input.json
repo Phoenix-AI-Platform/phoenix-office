@@ -1,0 +1,14 @@
+{
+  "customer_name": "",
+  "street_address": "123 Example Street",
+  "city_state_zip": "Exampleville, WI 00000",
+  "proposal_date": "2026-06-25",
+  "item_description": "Test-only invalid proposal input fixture",
+  "scope_items": [],
+  "pricing": {
+    "amount": "0.00",
+    "is_starting_at": false,
+    "pricing_note": "Sanitized fixture for validation-error tests."
+  },
+  "notes": []
+}
