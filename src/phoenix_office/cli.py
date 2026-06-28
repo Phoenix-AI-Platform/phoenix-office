@@ -10,6 +10,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from phoenix_office.dev_status import (
+    DEFAULT_PROJECT_STATE_PATH,
+    format_development_status,
+    read_development_status,
+)
 from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.orchestration import WorkflowPlan, WorkflowPlanReview
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
@@ -31,10 +36,23 @@ from phoenix_office.records import (
 )
 from phoenix_office.renderers import DocxProposalRenderer
 
+DEV_STATUS_PROJECT_STATE_PATH = DEFAULT_PROJECT_STATE_PATH
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="phoenix-office")
     subparsers = parser.add_subparsers(dest="command")
+
+    dev_parser = subparsers.add_parser(
+        "dev",
+        help="Inspect Phoenix Office development state",
+    )
+    dev_subparsers = dev_parser.add_subparsers(dest="dev_command")
+    dev_status_parser = dev_subparsers.add_parser(
+        "status",
+        help="Show read-only development status",
+    )
+    dev_status_parser.set_defaults(func=dev_status)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -463,6 +481,18 @@ def build_parser() -> argparse.ArgumentParser:
     records_proposal_input_parser.set_defaults(func=compose_record_proposal_input)
 
     return parser
+
+
+def dev_status(args: argparse.Namespace) -> int:
+    status = read_development_status(DEV_STATUS_PROJECT_STATE_PATH)
+    print(format_development_status(status))
+    if not status.project_state_exists:
+        print(
+            f"Error: project-state file does not exist: {status.status_source_path}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def load_proposal(path: Path) -> ProposalInput:
