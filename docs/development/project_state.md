@@ -16,6 +16,8 @@ For documentation-only future audit/logging expectations, see [orchestration aud
 
 For documentation-only future plan/review binding expectations, see [orchestration plan/review binding design notes](orchestration_plan_review_binding_design_notes.md).
 
+For documentation-only future validation/preflight expectations, see [orchestration validation/preflight design notes](orchestration_validation_preflight_design_notes.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -166,6 +168,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
 - orchestration plan/review binding design notes
+- orchestration validation/preflight design notes
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -175,6 +178,8 @@ The orchestration execution readiness checklist is documentation only. It does n
 The orchestration audit logging design notes are documentation only. They do not implement audit persistence or approve execution.
 
 The orchestration plan/review binding design notes are documentation only. They do not implement binding enforcement, modify models, or approve execution.
+
+The orchestration validation/preflight design notes are documentation only. They do not implement validation/preflight enforcement, add CLI commands, modify models, or approve execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
@@ -192,6 +197,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No natural-language intake exists.
 - No audit persistence exists.
 - No plan/review binding enforcement exists.
+- No validation/preflight enforcement exists.
 - No worker execution exists.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
