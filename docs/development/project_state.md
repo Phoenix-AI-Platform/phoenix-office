@@ -312,6 +312,6 @@ Execution remains out of scope until explicitly approved in a later task.
 - No CLI execution command yet.
 - No customer data in repo.
 - No generated output artifacts committed.
-- No pricing, scope, and notes inference.
+- No pricing, scope, or notes inference.
 - No DOCX renderer/template changes without a dedicated PR.
 - One branch, one PR, one narrow scope.
