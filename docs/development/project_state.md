@@ -20,6 +20,8 @@ For documentation-only future validation/preflight expectations, see [orchestrat
 
 For documentation-only future operator confirmation expectations, see [orchestration operator confirmation design notes](orchestration_operator_confirmation_design_notes.md).
 
+For documentation-only future output/artifact policy expectations, see [orchestration output artifact policy design notes](orchestration_output_artifact_policy_design_notes.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -174,6 +176,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - orchestration plan/review binding design notes
 - orchestration validation/preflight design notes
 - orchestration operator confirmation design notes
+- orchestration output/artifact policy design notes
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -187,6 +190,8 @@ The orchestration plan/review binding design notes are documentation only. They 
 The orchestration validation/preflight design notes are documentation only. They do not implement validation/preflight enforcement, add CLI commands, modify models, or approve execution.
 
 The orchestration operator confirmation design notes are documentation only. They do not implement operator confirmation enforcement, add CLI commands, modify models or schemas, or approve execution.
+
+The orchestration output/artifact policy design notes are documentation only. They do not implement output/artifact policy enforcement, generate artifacts, add CLI commands, modify models or schemas, or approve execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
@@ -206,6 +211,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No plan/review binding enforcement exists.
 - No validation/preflight enforcement exists.
 - No operator confirmation enforcement exists.
+- No output/artifact policy enforcement exists.
 - No worker execution exists.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
