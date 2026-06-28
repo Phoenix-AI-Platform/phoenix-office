@@ -143,6 +143,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #120 feat: add read-only dev status command (`python -m phoenix_office.cli dev status` reads project_state.md and reports the latest recorded PR entry)
 #122 feat: add JSON output to dev status (`python -m phoenix_office.cli dev status --json` emits deterministic machine-readable JSON for the read-only local dev status command)
 #124 docs: document dev status JSON contract (`docs/development/dev-status-json-contract.md` documents the read-only `dev status --json` output contract and consumer safety boundaries)
+#126 test: cover record-backed proposal inspect JSON (deterministic regression coverage proves Abby Hill and Sample North Prairie composed ProposalInput output can be inspected through `proposal inspect --json`)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -323,6 +324,6 @@ Execution remains out of scope until explicitly approved in a later task.
 - No CLI execution command yet.
 - No customer data in repo.
 - No generated output artifacts committed.
-- No pricing, scope, or notes inference.
+- No pricing, scope, and notes inference.
 - No DOCX renderer/template changes without a dedicated PR.
 - One branch, one PR, one narrow scope.
