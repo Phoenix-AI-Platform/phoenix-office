@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from phoenix_office import cli
 from phoenix_office.cli import main
 
