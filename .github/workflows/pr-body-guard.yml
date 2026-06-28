@@ -1,0 +1,30 @@
+name: Pull request body guard
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-body-guard:
+    name: Validate PR body sections
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate required PR body sections
+        run: python scripts/check_pr_body_sections.py --event-path "$GITHUB_EVENT_PATH"
