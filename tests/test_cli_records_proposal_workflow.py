@@ -102,6 +102,27 @@ def test_records_cli_proposal_input_to_docx_workflow(
     assert "Total: Starting at $3,000.00" in inspect_output
     assert "Notes: none" in inspect_output
 
+    assert main(["proposal", "inspect", str(proposal_input_path), "--json"]) == 0
+    captured = capsys.readouterr()
+    inspect_payload = json.loads(captured.out)
+    assert inspect_payload["customer_name"] == "Abby Hill"
+    assert inspect_payload["street_address"] == "123 Main St."
+    assert inspect_payload["city_state_zip"] == "Menomonee Falls, WI 53051"
+    assert (
+        inspect_payload["item_description"]
+        == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    )
+    assert [item["description"] for item in inspect_payload["scope_items"]] == [
+        "Pump contents of tank (contents unknown)",
+        "Open and clean tank",
+        "Remove 1,000 gallon AST",
+        "Remove and dispose of tank and residual contents",
+    ]
+    assert inspect_payload["pricing"]["amount"] == "3000.00"
+    assert inspect_payload["pricing"]["is_starting_at"] is True
+    assert inspect_payload["notes"] == []
+    assert captured.err == ""
+
     assert main(
         [
             "proposal",
