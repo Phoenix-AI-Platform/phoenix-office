@@ -22,6 +22,14 @@ For documentation-only future operator confirmation expectations, see [orchestra
 
 For documentation-only future output/artifact policy expectations, see [orchestration output artifact policy design notes](orchestration_output_artifact_policy_design_notes.md).
 
+For documentation-only future dry-run/no-write expectations, see [orchestration dry-run/no-write design notes](orchestration_dry_run_no_write_design_notes.md).
+
+For documentation-only future execution result/reporting expectations, see [orchestration execution result design notes](orchestration_execution_result_design_notes.md).
+
+For documentation-only future execution command-surface expectations, see [orchestration execution command surface design notes](orchestration_execution_command_surface_design_notes.md).
+
+For documentation-only future cancellation/rollback expectations, see [orchestration cancellation/rollback design notes](orchestration_cancellation_rollback_design_notes.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -111,6 +119,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #89 Orchestration plan/review binding design notes
 #91 Orchestration validation/preflight design notes
 #93 Orchestration operator confirmation design notes
+#95 Orchestration output artifact policy design notes
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -177,6 +186,10 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - orchestration validation/preflight design notes
 - orchestration operator confirmation design notes
 - orchestration output/artifact policy design notes
+- orchestration dry-run/no-write design notes
+- orchestration execution result design notes
+- orchestration execution command surface design notes
+- orchestration cancellation/rollback design notes
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -192,6 +205,8 @@ The orchestration validation/preflight design notes are documentation only. They
 The orchestration operator confirmation design notes are documentation only. They do not implement operator confirmation enforcement, add CLI commands, modify models or schemas, or approve execution.
 
 The orchestration output/artifact policy design notes are documentation only. They do not implement output/artifact policy enforcement, generate artifacts, add CLI commands, modify models or schemas, or approve execution.
+
+The orchestration dry-run/no-write, execution result, execution command surface, and cancellation/rollback design notes are documentation only. They do not implement behavior, add CLI commands, modify models or schemas, create persistence or mutation, generate artifacts, or approve execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
@@ -212,6 +227,10 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No validation/preflight enforcement exists.
 - No operator confirmation enforcement exists.
 - No output/artifact policy enforcement exists.
+- No dry-run/no-write enforcement exists.
+- No execution result reporting exists.
+- No execution command surface exists.
+- No cancellation or rollback behavior exists.
 - No worker execution exists.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
@@ -223,6 +242,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- orchestration output/artifact policy design notes from PR #95
 - orchestration operator confirmation design notes from PR #93
 - orchestration validation/preflight design notes from PR #91
 - orchestration plan/review binding design notes from PR #89
