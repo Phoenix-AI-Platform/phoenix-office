@@ -44,4 +44,5 @@ def test_cli_proposal_validate_invalid_data(tmp_path: Path, capsys) -> None:
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Error: invalid proposal input:" in captured.err
-    assert "Invalid proposal input" in captured.err
+    assert "Validation errors:" in captured.err
+    assert "- scope_items:" in captured.err

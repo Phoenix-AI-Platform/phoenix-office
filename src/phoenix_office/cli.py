@@ -512,9 +512,20 @@ def validate_proposal(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        load_proposal(input_path)
-    except ValueError as exc:
-        print(f"Error: invalid proposal input: {exc}", file=sys.stderr)
+        with input_path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+        ProposalInput.model_validate(data)
+    except json.JSONDecodeError as exc:
+        print(
+            f"Error: invalid proposal input: Invalid JSON in {input_path}: {exc.msg}",
+            file=sys.stderr,
+        )
+        return 1
+    except ValidationError as exc:
+        print(f"Error: invalid proposal input: {input_path}", file=sys.stderr)
+        print("Validation errors:", file=sys.stderr)
+        for error in _format_proposal_validation_errors(exc):
+            print(f"- {error}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
         print(f"Error: failed to validate proposal input: {exc}", file=sys.stderr)
@@ -522,6 +533,20 @@ def validate_proposal(args: argparse.Namespace) -> int:
 
     print(f"ProposalInput validation passed: {input_path}")
     return 0
+
+
+def _format_proposal_validation_errors(exc: ValidationError) -> list[str]:
+    return [_format_proposal_validation_error(error) for error in exc.errors()]
+
+
+def _format_proposal_validation_error(error: dict[str, Any]) -> str:
+    location_parts = error.get("loc", ())
+    if location_parts:
+        location = ".".join(str(part) for part in location_parts)
+    else:
+        location = "(root)"
+    message = str(error.get("msg", "Invalid value"))
+    return f"{location}: {message}"
 
 
 def inspect_proposal(args: argparse.Namespace) -> int:
