@@ -14,6 +14,8 @@ For documentation-only gates before any future orchestration execution work may 
 
 For documentation-only future audit/logging expectations, see [orchestration audit logging design notes](orchestration_audit_logging_design_notes.md).
 
+For documentation-only future plan/review binding expectations, see [orchestration plan/review binding design notes](orchestration_plan_review_binding_design_notes.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -162,6 +164,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
+- orchestration plan/review binding design notes
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -169,6 +172,8 @@ Phoenix Office now has repo-native process documentation for keeping future work
 The orchestration execution readiness checklist is documentation only. It does not approve or implement execution.
 
 The orchestration audit logging design notes are documentation only. They do not implement audit persistence or approve execution.
+
+The orchestration plan/review binding design notes are documentation only. They do not implement binding enforcement, modify models, or approve execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
@@ -185,6 +190,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No CLI approval command exists.
 - No natural-language intake exists.
 - No audit persistence exists.
+- No plan/review binding enforcement exists.
 - No worker execution exists.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
