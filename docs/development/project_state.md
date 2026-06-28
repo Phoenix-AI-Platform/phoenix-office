@@ -142,6 +142,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #118 chore: fix E501 in project state guard script (wrapped project-state checker PR-number argument definition so full repo ruff lint passes cleanly again)
 #120 feat: add read-only dev status command (`python -m phoenix_office.cli dev status` reads project_state.md and reports the latest recorded PR entry)
 #122 feat: add JSON output to dev status (`python -m phoenix_office.cli dev status --json` emits deterministic machine-readable JSON for the read-only local dev status command)
+#124 docs: document dev status JSON contract (`docs/development/dev-status-json-contract.md` documents the read-only `dev status --json` output contract and consumer safety boundaries)
 ```
 
 ## Current Manual A-1 Proposal Workflow
