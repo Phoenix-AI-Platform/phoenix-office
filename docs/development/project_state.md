@@ -133,6 +133,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #96 Batched orchestration execution gate design notes
 #101 cli: improve proposal validation error readability (operator-facing invalid ProposalInput errors + focused tests)
 #103 test: add invalid ProposalInput fixture (sanitized invalid fixture reused in focused validation-error tests)
+#105 docs: add ProposalInput validation examples (valid/invalid validation commands + operator-facing field-level errors)
 ```
 
 ## Current Manual A-1 Proposal Workflow
