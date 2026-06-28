@@ -54,6 +54,20 @@ def test_cli_proposal_inspect_includes_company_and_notes_when_present(
     assert captured.err == ""
 
 
+def test_cli_proposal_inspect_json_output(capsys) -> None:
+    exit_code = main(["proposal", "inspect", str(EXAMPLE_JSON), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["customer_name"] == "Abby Hill"
+    assert payload["proposal_date"] == "2026-06-25"
+    assert payload["pricing"]["amount"] == "3000.00"
+    assert payload["pricing"]["is_starting_at"] is True
+    assert payload["scope_items"][0]["number"] == 1
+    assert captured.err == ""
+
+
 def test_cli_proposal_inspect_invalid_json(tmp_path: Path, capsys) -> None:
     input_path = tmp_path / "invalid_proposal.json"
     input_path.write_text("{not valid json", encoding="utf-8")

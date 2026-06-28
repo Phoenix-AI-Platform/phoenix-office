@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to proposal JSON input",
     )
+    inspect_proposal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output normalized proposal input as JSON",
+    )
     inspect_proposal_parser.set_defaults(func=inspect_proposal)
 
     intake_parser = proposal_subparsers.add_parser(
@@ -568,7 +573,10 @@ def inspect_proposal(args: argparse.Namespace) -> int:
         print(f"Error: failed to inspect proposal input: {exc}", file=sys.stderr)
         return 1
 
-    _print_proposal_summary(proposal)
+    if args.json:
+        print(json.dumps(proposal.model_dump(mode="json"), indent=2, sort_keys=True))
+    else:
+        _print_proposal_summary(proposal)
     return 0
 
 
