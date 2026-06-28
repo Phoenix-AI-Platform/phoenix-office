@@ -35,6 +35,7 @@ architecture docs
 
 ## Developer Workflows
 
+- [Development progress dashboard](progress_dashboard.md) provides a visual summary of completed capabilities, current guardrails, the Mermaid roadmap, and next work lanes.
 - [Project state](project_state.md) records the verified Phoenix Office implementation spine, current capabilities, non-capabilities, and guardrails for future PRs.
 - [Development loop runbook](development_loop_runbook.md) documents the human-controlled branch, PR, CI, review, and merge loop for future Phoenix Office work.
 - [Next-brick planning guide](next_brick_planning_guide.md) helps choose the next narrow PR without crossing execution, mutation, persistence, or automation boundaries.

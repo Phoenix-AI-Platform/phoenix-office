@@ -6,6 +6,8 @@ This document is a project-state handoff for Phoenix Office. It is intended to r
 
 Use it as a repo-native source of truth for future development prompts, reviews, and planning.
 
+For a visual overview of completed capabilities, the Mermaid roadmap, guardrails, and next work lanes, see [development progress dashboard](progress_dashboard.md).
+
 For the recommended human-controlled development process, see [development loop runbook](development_loop_runbook.md).
 
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
