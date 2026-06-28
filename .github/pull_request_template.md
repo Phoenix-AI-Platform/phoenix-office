@@ -24,6 +24,16 @@ Confirm this PR does not include changes outside the requested scope.
 - [ ] No schemas or models changed unless explicitly scoped.
 - [ ] No private customer data added.
 
+## Phoenix guardrails
+
+- [ ] No orchestrator implementation unless explicitly requested.
+- [ ] No worker execution unless explicitly requested.
+- [ ] No plugin runtime behavior unless explicitly requested.
+- [ ] No proposal generation behavior changes unless explicitly requested.
+- [ ] No CLI behavior changes unless explicitly requested.
+- [ ] No DOCX rendering behavior changes unless explicitly requested.
+- [ ] No unrelated code churn.
+
 ## Validation performed
 
 - [ ] `python -m pytest`
@@ -39,5 +49,6 @@ Confirm this PR does not include changes outside the requested scope.
 - [ ] Scope matches the prompt or issue.
 - [ ] Changed files match the stated scope.
 - [ ] Out-of-scope confirmations are accurate.
+- [ ] Phoenix guardrails are accurate.
 - [ ] Validation is present or the reason for not running it is clear.
 - [ ] No autonomous merge is requested or implied.
