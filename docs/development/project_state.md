@@ -30,6 +30,14 @@ For documentation-only future execution command-surface expectations, see [orche
 
 For documentation-only future cancellation/rollback expectations, see [orchestration cancellation/rollback design notes](orchestration_cancellation_rollback_design_notes.md).
 
+For documentation-only future input provenance expectations, see [orchestration input provenance design notes](orchestration_input_provenance_design_notes.md).
+
+For documentation-only future private-data/secrets expectations, see [orchestration private data/secrets design notes](orchestration_private_data_secrets_design_notes.md).
+
+For documentation-only future permission/capability boundary expectations, see [orchestration permission/capability boundary design notes](orchestration_permission_capability_boundary_design_notes.md).
+
+For documentation-only future idempotency/replay expectations, see [orchestration idempotency/replay design notes](orchestration_idempotency_replay_design_notes.md).
+
 For the advisory PR scope checklist, see [PR review guardrails](pr_review_guardrails.md).
 
 For reusable project-state-aware Codex prompt templates, see [Codex prompt patterns](codex_prompt_patterns.md).
@@ -120,6 +128,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #91 Orchestration validation/preflight design notes
 #93 Orchestration operator confirmation design notes
 #95 Orchestration output artifact policy design notes
+#96 Batched orchestration execution gate design notes
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -190,6 +199,10 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - orchestration execution result design notes
 - orchestration execution command surface design notes
 - orchestration cancellation/rollback design notes
+- orchestration input provenance design notes
+- orchestration private data/secrets design notes
+- orchestration permission/capability boundary design notes
+- orchestration idempotency/replay design notes
 - advisory PR review guardrails JSON/docs
 - Codex prompt patterns for project-state-aware tasks
 - a failed CI repair prompt guide
@@ -207,6 +220,8 @@ The orchestration operator confirmation design notes are documentation only. The
 The orchestration output/artifact policy design notes are documentation only. They do not implement output/artifact policy enforcement, generate artifacts, add CLI commands, modify models or schemas, or approve execution.
 
 The orchestration dry-run/no-write, execution result, execution command surface, and cancellation/rollback design notes are documentation only. They do not implement behavior, add CLI commands, modify models or schemas, create persistence or mutation, generate artifacts, or approve execution.
+
+The orchestration input provenance, private data/secrets, permission/capability boundary, and idempotency/replay design notes are documentation only. They do not implement behavior, add CLI commands, modify models or schemas, create enforcement, create persistence or mutation, generate artifacts, add authorization/redaction/secret scanning, or approve execution.
 
 These process docs are guidance for human-controlled development and review. They do not add automation, execution, or enforcement behavior.
 
@@ -231,6 +246,10 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No execution result reporting exists.
 - No execution command surface exists.
 - No cancellation or rollback behavior exists.
+- No input provenance enforcement exists.
+- No private-data or secrets enforcement exists.
+- No permission or capability enforcement exists.
+- No idempotency or replay behavior exists.
 - No worker execution exists.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
@@ -242,6 +261,10 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 Do not recreate these as new work:
 
+- orchestration dry-run/no-write design notes from PR #96
+- orchestration execution result design notes from PR #96
+- orchestration execution command surface design notes from PR #96
+- orchestration cancellation/rollback design notes from PR #96
 - orchestration output/artifact policy design notes from PR #95
 - orchestration operator confirmation design notes from PR #93
 - orchestration validation/preflight design notes from PR #91
