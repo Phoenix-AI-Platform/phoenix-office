@@ -1,6 +1,7 @@
 """Smoke test for the record-backed proposal CLI workflow."""
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 from phoenix_office.cli import main
@@ -11,6 +12,10 @@ CUSTOMER_EXAMPLE = ROOT / "examples" / "records" / "customer_abby_hill.json"
 JOB_EXAMPLE = ROOT / "examples" / "records" / "job_abby_hill.json"
 DETAILS_EXAMPLE = ROOT / "examples" / "records" / "proposal_details_abby_hill.json"
 TEMPLATE = ROOT / "tests" / "fixtures" / "templates" / "a1_proposal_template.docx"
+
+
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
 
 
 def test_records_cli_proposal_input_to_docx_workflow(
@@ -71,14 +76,31 @@ def test_records_cli_proposal_input_to_docx_workflow(
         proposal.item_description
         == "Removal of 1,000 Gallon Aboveground Storage Tank"
     )
+    assert proposal.street_address == "123 Main St."
+    assert proposal.city_state_zip == "Menomonee Falls, WI 53051"
+    assert len(proposal.scope_items) == 4
+    assert [item.description for item in proposal.scope_items] == [
+        "Pump contents of tank (contents unknown)",
+        "Open and clean tank",
+        "Remove 1,000 gallon AST",
+        "Remove and dispose of tank and residual contents",
+    ]
+    assert proposal.pricing.amount == Decimal("3000.00")
+    assert proposal.pricing.is_starting_at is True
+    assert proposal.notes == []
 
     assert main(["proposal", "validate", str(proposal_input_path)]) == 0
     capsys.readouterr()
 
     assert main(["proposal", "inspect", str(proposal_input_path)]) == 0
     captured = capsys.readouterr()
-    assert "Customer: Abby Hill" in captured.out
-    assert "Item Description: Removal of 1,000 Gallon Aboveground Storage Tank" in captured.out
+    inspect_output = _collapse_whitespace(captured.out)
+    assert "Customer: Abby Hill" in inspect_output
+    assert "Site Address: 123 Main St., Menomonee Falls, WI 53051" in inspect_output
+    assert "Item Description: Removal of 1,000 Gallon Aboveground Storage Tank" in inspect_output
+    assert "Scope Items: 4" in inspect_output
+    assert "Total: Starting at $3,000.00" in inspect_output
+    assert "Notes: none" in inspect_output
 
     assert main(
         [
