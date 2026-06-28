@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from phoenix_office.dev_status import (
     DEFAULT_PROJECT_STATE_PATH,
     format_development_status,
+    format_development_status_json,
     read_development_status,
 )
 from phoenix_office.models.proposal import ProposalInput
@@ -51,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     dev_status_parser = dev_subparsers.add_parser(
         "status",
         help="Show read-only development status",
+    )
+    dev_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output development status as JSON",
     )
     dev_status_parser.set_defaults(func=dev_status)
 
@@ -485,7 +491,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def dev_status(args: argparse.Namespace) -> int:
     status = read_development_status(DEV_STATUS_PROJECT_STATE_PATH)
-    print(format_development_status(status))
+    if args.json:
+        print(format_development_status_json(status))
+    else:
+        print(format_development_status(status))
     if not status.project_state_exists:
         print(
             f"Error: project-state file does not exist: {status.status_source_path}",
