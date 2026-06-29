@@ -176,6 +176,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #150 docs/process: define docs-only auto-merge implementation plan (adds `docs/process/docs-only-auto-merge-implementation-plan.md` documenting the future docs-only auto-merge eligible class, permission model, checks, fail-closed behavior, and implementation checklist; no auto-merge behavior added)
 #152 ci: add docs-only auto-merge dry-run gate (adds read-only `.github/workflows/docs_only_auto_merge_dry_run.yml` and `docs/process/docs-only-auto-merge-dry-run.md` to evaluate future docs-only auto-merge gates without merge, approval, labels, comments, or repository writes)
 #154 ci: implement docs-only auto-merge pilot workflow (adds `.github/workflows/docs_only_auto_merge.yml` and `docs/process/docs-only-auto-merge-pilot.md` for label-gated docs-only squash merge after required gates pass; no approval, label, comment, branch-update, trigger, or background behavior added)
+#158 ci: fix docs-only auto-merge required check detection (updates docs-only dry-run and pilot workflows to resolve required checks by accepted workflow/check-run aliases while preserving fail-closed and defer behavior; docs updated for alias diagnostics)
 ```
 
 ## Current Manual A-1 Proposal Workflow
