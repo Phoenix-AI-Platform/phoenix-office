@@ -10,6 +10,8 @@ For a visual overview of completed capabilities, the Mermaid roadmap, guardrails
 
 For the recommended human-controlled development process, see [development loop runbook](development_loop_runbook.md).
 
+For the repo-native issue-driven autopilot process direction, see [Phoenix autopilot loop](../process/phoenix-autopilot-loop.md).
+
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
 For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
@@ -24,7 +26,7 @@ For the read-only orchestration preflight JSON output contract, see [orchestrati
 
 For documentation-only future operator confirmation expectations, see [orchestration operator confirmation design notes](orchestration_operator_confirmation_design_notes.md).
 
-For documentation-only future output/artifact policy expectations, see [orchestration output artifact policy design notes](orchestration_output_artifact_policy_design_notes.md).
+For documentation-only future output/artifact policy expectations, see [orchestration output/artifact policy design notes](orchestration_output_artifact_policy_design_notes.md).
 
 For documentation-only future dry-run/no-write expectations, see [orchestration dry-run/no-write design notes](orchestration_dry_run_no_write_design_notes.md).
 
@@ -155,6 +157,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #137 docs: document orchestration preflight JSON contract (adds `docs/development/orchestration-preflight-json-contract.md` describing read-only preflight JSON fields, issues, exit behavior, consumer guidance, and compatibility expectations)
 #138 feat: add deterministic plan fingerprint to orchestration preflight (adds SHA-256 WorkflowPlan fingerprints to read-only PreflightReport output, human preflight inspect output, and JSON preflight inspect output; execution remains unavailable)
 #139 feat: bind orchestration reviews to plan fingerprints (adds optional reviewed WorkflowPlan fingerprints to WorkflowPlanReview fixtures and read-only preflight reports, with blocking issues for missing or mismatched bindings; execution remains unavailable)
+#142 docs/process: define Phoenix autopilot loop (adds `docs/process/phoenix-autopilot-loop.md` documenting the issue-driven, review-gated Phoenix autopilot process direction; no automation or execution behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -214,6 +217,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 
 - a project-state handoff
 - a development loop runbook
+- a Phoenix autopilot loop process direction
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
