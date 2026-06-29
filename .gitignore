@@ -219,3 +219,5 @@ __marimo__/
 
 # Local generated workflow artifacts
 output/
+
+.pytest-tmp/
