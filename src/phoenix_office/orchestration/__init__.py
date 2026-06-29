@@ -12,8 +12,15 @@ from phoenix_office.orchestration.plans import (
     WorkflowPlanStep,
     create_a1_proposal_dry_run_plan,
 )
+from phoenix_office.orchestration.preflight import (
+    PreflightIssue,
+    PreflightReport,
+    run_orchestration_preflight,
+)
 
 __all__ = [
+    "PreflightIssue",
+    "PreflightReport",
     "WorkflowPlan",
     "WorkflowPlanApproval",
     "WorkflowPlanApprovalDecision",
@@ -22,4 +29,5 @@ __all__ = [
     "WorkflowPlanStep",
     "create_a1_proposal_dry_run_plan",
     "create_workflow_plan_review",
+    "run_orchestration_preflight",
 ]
