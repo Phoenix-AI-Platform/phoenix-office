@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from phoenix_office.cli import build_parser, main
+from phoenix_office.orchestration import WorkflowPlan, workflow_plan_fingerprint
 
 ROOT = Path(__file__).parents[1]
 ORCHESTRATION_EXAMPLES = ROOT / "examples" / "orchestration"
@@ -21,6 +22,11 @@ EXECUTION_UNAVAILABLE_MESSAGE = (
     "Execution is unavailable: orchestration preflight is read-only and "
     "does not implement execution."
 )
+
+
+def _plan_fingerprint() -> str:
+    plan = WorkflowPlan.model_validate_json(PLAN_FIXTURE.read_text(encoding="utf-8"))
+    return workflow_plan_fingerprint(plan)
 
 
 def test_cli_orchestration_preflight_inspect_outputs_approved_summary(capsys) -> None:
@@ -38,6 +44,7 @@ def test_cli_orchestration_preflight_inspect_outputs_approved_summary(capsys) ->
     assert exit_code == 0
     assert "Orchestration preflight: a1_proposal_manual_workflow" in captured.out
     assert "Plan workflow: a1_proposal_manual_workflow" in captured.out
+    assert f"Plan fingerprint: {_plan_fingerprint()}" in captured.out
     assert "Review workflow: a1_proposal_manual_workflow" in captured.out
     assert "Review decision: approved" in captured.out
     assert "Approved for execution: yes" in captured.out
@@ -135,6 +142,7 @@ def test_cli_orchestration_preflight_inspect_json_outputs_approved_report(capsys
         "execution_available": False,
         "execution_message": EXECUTION_UNAVAILABLE_MESSAGE,
         "issues": [],
+        "plan_fingerprint": _plan_fingerprint(),
         "plan_valid": True,
         "plan_workflow_name": "a1_proposal_manual_workflow",
         "review_decision": "approved",
@@ -172,6 +180,7 @@ def test_cli_orchestration_preflight_inspect_json_outputs_blocking_issue_codes(
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert exit_code == 0
+    assert payload["plan_fingerprint"] == _plan_fingerprint()
     assert payload["review_decision"] == decision
     assert payload["execution_available"] is False
     assert payload["safe_to_consider_for_future_execution"] is False
@@ -209,6 +218,7 @@ def test_cli_orchestration_preflight_inspect_json_outputs_workflow_mismatch_issu
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert exit_code == 0
+    assert payload["plan_fingerprint"] == _plan_fingerprint()
     assert payload["review_workflow_name"] == "other_workflow"
     assert payload["safe_to_consider_for_future_execution"] is False
     assert [issue["code"] for issue in payload["issues"]] == [
