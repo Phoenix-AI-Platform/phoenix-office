@@ -236,12 +236,6 @@ jobs:
                 deferrals.push(`${group.label} is ${result.state} for ${evaluatedHeadSha}.`);
               }
             }
-            if (pr.mergeable === false) {
-              hardFailures.push("GitHub reports PR is not mergeable.");
-            } else if (pr.mergeable === null) {
-              deferrals.push("GitHub mergeability is unknown.");
-            }
-
             if (hardFailures.length > 0) {
               core.setFailed(`Docs-only auto-merge pilot failed closed: ${hardFailures.join(" ")}`);
               return;

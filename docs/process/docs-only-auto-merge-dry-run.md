@@ -59,7 +59,7 @@ When `phoenix-automerge-docs` is present, the workflow checks:
 - changed files are Markdown files under `docs/process/` or `docs/development/`
 - no current review requests changes
 - required status checks are successful for the current head SHA
-- GitHub reports the PR as mergeable
+- GitHub reports the PR as mergeable after the workflow re-reads current PR state
 
 Required status checks are:
 

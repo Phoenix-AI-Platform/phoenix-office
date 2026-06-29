@@ -56,7 +56,7 @@ The pilot only considers PRs that satisfy all of these conditions:
 - PR body links to a Phoenix task issue
 - no current latest review state is `CHANGES_REQUESTED`
 - required checks are successful for the current head SHA
-- GitHub reports the PR as mergeable
+- GitHub reports the PR as mergeable after the workflow re-reads current PR state
 - the PR head SHA is unchanged after the workflow re-reads the PR immediately before merge
 
 ## Required Checks
