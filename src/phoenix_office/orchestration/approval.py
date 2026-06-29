@@ -34,6 +34,13 @@ class WorkflowPlanReview(BaseModel):
         default=False,
         description="Whether a future execution layer may treat the plan as approved.",
     )
+    reviewed_plan_fingerprint: str | None = Field(
+        default=None,
+        description=(
+            "Optional SHA-256 fingerprint of the WorkflowPlan content reviewed "
+            "by the human."
+        ),
+    )
 
     @model_validator(mode="after")
     def approved_for_execution_only_when_approved(self) -> Self:
@@ -52,6 +59,7 @@ def create_workflow_plan_review(
     decision: WorkflowPlanApprovalDecision,
     reviewed_by: str,
     review_notes: str | None = None,
+    reviewed_plan_fingerprint: str | None = None,
 ) -> WorkflowPlanReview:
     """Return a human review contract for a dry-run workflow plan.
 
@@ -64,4 +72,5 @@ def create_workflow_plan_review(
         reviewed_by=reviewed_by,
         review_notes=review_notes,
         approved_for_execution=decision == WorkflowPlanApprovalDecision.APPROVED,
+        reviewed_plan_fingerprint=reviewed_plan_fingerprint,
     )
