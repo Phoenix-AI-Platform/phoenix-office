@@ -2,7 +2,7 @@ name: Phoenix Task
 description: Queue a scoped Phoenix Office task for Codex and human review.
 title: "[Phoenix Task]: "
 labels:
-  - phoenix-task
+  - task
 body:
   - type: markdown
     attributes:
