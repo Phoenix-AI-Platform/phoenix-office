@@ -45,6 +45,8 @@ def test_cli_orchestration_preflight_inspect_outputs_approved_summary(capsys) ->
     assert "Orchestration preflight: a1_proposal_manual_workflow" in captured.out
     assert "Plan workflow: a1_proposal_manual_workflow" in captured.out
     assert f"Plan fingerprint: {_plan_fingerprint()}" in captured.out
+    assert f"Reviewed plan fingerprint: {_plan_fingerprint()}" in captured.out
+    assert "Plan fingerprint matches review: yes" in captured.out
     assert "Review workflow: a1_proposal_manual_workflow" in captured.out
     assert "Review decision: approved" in captured.out
     assert "Approved for execution: yes" in captured.out
@@ -84,6 +86,7 @@ def test_cli_orchestration_preflight_inspect_outputs_blocking_issue_codes(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert f"Review decision: {decision}" in captured.out
+    assert "Plan fingerprint matches review: yes" in captured.out
     assert "Blocking issues: yes" in captured.out
     assert "review_not_approved: WorkflowPlanReview decision must be approved" in captured.out
     assert (
@@ -118,6 +121,7 @@ def test_cli_orchestration_preflight_inspect_outputs_workflow_mismatch_issue(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert "Review workflow: other_workflow" in captured.out
+    assert "Plan fingerprint matches review: yes" in captured.out
     assert "Blocking issues: yes" in captured.out
     assert "workflow_name_mismatch" in captured.out
 
@@ -143,11 +147,13 @@ def test_cli_orchestration_preflight_inspect_json_outputs_approved_report(capsys
         "execution_message": EXECUTION_UNAVAILABLE_MESSAGE,
         "issues": [],
         "plan_fingerprint": _plan_fingerprint(),
+        "plan_fingerprint_matches_review": True,
         "plan_valid": True,
         "plan_workflow_name": "a1_proposal_manual_workflow",
         "review_decision": "approved",
         "review_valid": True,
         "review_workflow_name": "a1_proposal_manual_workflow",
+        "reviewed_plan_fingerprint": _plan_fingerprint(),
         "safe_to_consider_for_future_execution": True,
     }
     assert captured.out.endswith("\n")
@@ -181,6 +187,8 @@ def test_cli_orchestration_preflight_inspect_json_outputs_blocking_issue_codes(
     payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["plan_fingerprint"] == _plan_fingerprint()
+    assert payload["reviewed_plan_fingerprint"] == _plan_fingerprint()
+    assert payload["plan_fingerprint_matches_review"] is True
     assert payload["review_decision"] == decision
     assert payload["execution_available"] is False
     assert payload["safe_to_consider_for_future_execution"] is False
@@ -219,12 +227,48 @@ def test_cli_orchestration_preflight_inspect_json_outputs_workflow_mismatch_issu
     payload = json.loads(captured.out)
     assert exit_code == 0
     assert payload["plan_fingerprint"] == _plan_fingerprint()
+    assert payload["reviewed_plan_fingerprint"] == _plan_fingerprint()
+    assert payload["plan_fingerprint_matches_review"] is True
     assert payload["review_workflow_name"] == "other_workflow"
     assert payload["safe_to_consider_for_future_execution"] is False
     assert [issue["code"] for issue in payload["issues"]] == [
         "workflow_name_mismatch"
     ]
     assert payload["issues"][0]["blocking"] is True
+    assert captured.err == ""
+
+
+def test_cli_orchestration_preflight_inspect_json_outputs_fingerprint_mismatch_issue(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    review_payload = json.loads(APPROVED_REVIEW_FIXTURE.read_text(encoding="utf-8"))
+    review_payload["reviewed_plan_fingerprint"] = "not-the-current-plan"
+    mismatched_review = tmp_path / "mismatched-fingerprint-review.json"
+    mismatched_review.write_text(
+        f"{json.dumps(review_payload, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(mismatched_review),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["reviewed_plan_fingerprint"] == "not-the-current-plan"
+    assert payload["plan_fingerprint_matches_review"] is False
+    assert [issue["code"] for issue in payload["issues"]] == [
+        "review_plan_fingerprint_mismatch"
+    ]
     assert captured.err == ""
 
 
