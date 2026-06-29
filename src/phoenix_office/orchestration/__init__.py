@@ -16,6 +16,7 @@ from phoenix_office.orchestration.preflight import (
     PreflightIssue,
     PreflightReport,
     run_orchestration_preflight,
+    workflow_plan_fingerprint,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "create_a1_proposal_dry_run_plan",
     "create_workflow_plan_review",
     "run_orchestration_preflight",
+    "workflow_plan_fingerprint",
 ]

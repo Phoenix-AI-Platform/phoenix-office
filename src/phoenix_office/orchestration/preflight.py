@@ -7,6 +7,9 @@ write artifacts, enqueue work, schedule retries, or render DOCX files.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from pydantic import BaseModel, Field
 
 from phoenix_office.orchestration.approval import (
@@ -19,6 +22,17 @@ EXECUTION_UNAVAILABLE_MESSAGE = (
     "Execution is unavailable: orchestration preflight is read-only and "
     "does not implement execution."
 )
+
+
+def workflow_plan_fingerprint(plan: WorkflowPlan) -> str:
+    """Return a deterministic SHA-256 fingerprint for a WorkflowPlan."""
+
+    payload = json.dumps(
+        plan.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class PreflightIssue(BaseModel):
@@ -36,6 +50,7 @@ class PreflightReport(BaseModel):
     """Read-only preflight result for a WorkflowPlan and WorkflowPlanReview."""
 
     plan_workflow_name: str
+    plan_fingerprint: str
     review_workflow_name: str
     review_decision: WorkflowPlanApprovalDecision
     approved_for_execution: bool
@@ -97,6 +112,7 @@ def run_orchestration_preflight(
     has_blocking_issues = any(issue.blocking for issue in issues)
     return PreflightReport(
         plan_workflow_name=plan.workflow_name,
+        plan_fingerprint=workflow_plan_fingerprint(plan),
         review_workflow_name=review.workflow_name,
         review_decision=review.decision,
         approved_for_execution=review.approved_for_execution,
