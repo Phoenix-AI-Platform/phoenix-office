@@ -149,6 +149,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #130 test: cover proposal inspect JSON optional fields (adds deterministic `proposal inspect --json` coverage for `company_config`, provided notes, and omitted notes defaulting to an empty list)
 #134 feat: add non-executing orchestration preflight skeleton (adds read-only WorkflowPlan/WorkflowPlanReview preflight reports with blocking issues for rejected or needs_changes reviews; execution remains unavailable)
 #135 cli: add read-only orchestration preflight inspect (`orchestration preflight inspect` prints deterministic non-executing WorkflowPlan/WorkflowPlanReview preflight summaries; execution remains unavailable)
+#136 cli: add JSON output to orchestration preflight inspect (`orchestration preflight inspect --json` emits deterministic read-only PreflightReport JSON; execution remains unavailable)
 ```
 
 ## Current Manual A-1 Proposal Workflow
