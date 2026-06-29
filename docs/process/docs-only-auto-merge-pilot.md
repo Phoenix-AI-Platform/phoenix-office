@@ -195,6 +195,19 @@ Reviewers should confirm the PR changes only eligible Markdown paths, verify all
 
 Applying the label remains a human-controlled decision.
 
+## Pilot Result
+
+PR #156 completed the first successful human-controlled docs-only auto-merge pilot.
+
+The PR remained gated by the `phoenix-automerge-docs` label. A human reviewed the docs-only PR, left the label off during normal validation, and then used the label as the explicit test switch for the pilot path.
+
+The workflow performed only the eligible docs-only squash merge. It did not add approvals, comments, labels, branch updates, artifacts, runtime behavior, proposal generation, DOCX rendering, execution behavior, queueing, scheduling, retries, API/MCP/server/worker/background behavior, or other side effects.
+
+Two hardening fixes were required before the pilot completed cleanly:
+
+- PR #158 fixed required-check detection by accepting actual GitHub check-run/job-name aliases instead of matching only workflow display names.
+- PR #159 fixed stale webhook mergeability by re-reading current PR state before evaluating mergeability.
+
 ## Future Boundary
 
 Future expansion requires a separate reviewed PR.
