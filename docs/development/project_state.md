@@ -16,6 +16,8 @@ For Phoenix task issue classification guidance, see [Phoenix task labels](../pro
 
 For the issue-to-Codex trigger evaluation, see [issue-to-Codex trigger evaluation](../process/issue-to-codex-trigger-evaluation.md).
 
+For docs-only autopilot eligibility guidance, see [docs-only autopilot eligibility](../process/docs-only-autopilot-eligibility.md).
+
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
 For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
@@ -164,6 +166,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #142 docs/process: define Phoenix autopilot loop (adds `docs/process/phoenix-autopilot-loop.md` documenting the issue-driven, review-gated Phoenix autopilot process direction; no automation or execution behavior added)
 #144 chore: add Phoenix task issue template (updates `.github/ISSUE_TEMPLATE/phoenix_task.yml` and adds `docs/process/phoenix-task-labels.md` for repo-native Phoenix task intake, risk classification, and merge-authority guidance; no automation behavior added)
 #146 docs/process: evaluate issue-to-Codex trigger path (adds `docs/process/issue-to-codex-trigger-evaluation.md` documenting candidate issue-to-Codex trigger paths, observed access separation, safety gates, and manual fallback recommendation; no trigger behavior added)
+#148 ci: add docs-only autopilot eligibility check (adds read-only `.github/workflows/docs_only_autopilot_eligibility.yml` and `docs/process/docs-only-autopilot-eligibility.md` for future docs-only eligibility signaling; no auto-merge or mutation behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -226,6 +229,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a Phoenix autopilot loop process direction
 - Phoenix task issue classification guidance
 - an issue-to-Codex trigger evaluation
+- docs-only autopilot eligibility guidance
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
