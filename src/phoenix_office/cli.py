@@ -1193,6 +1193,108 @@ def _write_proposal_input_json(proposal: ProposalInput, output_path: Path) -> No
     )
 
 
+_ORIGINAL_BUILD_PARSER = build_parser
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _ORIGINAL_BUILD_PARSER()
+    orchestration_parser = _get_subparser(parser, "orchestration")
+    orchestration_subparsers = _get_subparsers_action(orchestration_parser)
+    preflight_parser = orchestration_subparsers.add_parser(
+        "preflight",
+        help="Inspect workflow plan preflight reports",
+    )
+    preflight_subparsers = preflight_parser.add_subparsers(
+        dest="orchestration_preflight_command"
+    )
+    preflight_inspect_parser = preflight_subparsers.add_parser(
+        "inspect",
+        help="Inspect a WorkflowPlan and WorkflowPlanReview without executing them",
+    )
+    preflight_inspect_parser.add_argument(
+        "plan_json",
+        type=Path,
+        help="Path to serialized WorkflowPlan JSON",
+    )
+    preflight_inspect_parser.add_argument(
+        "review_json",
+        type=Path,
+        help="Path to serialized WorkflowPlanReview JSON",
+    )
+    preflight_inspect_parser.set_defaults(func=inspect_workflow_preflight)
+    return parser
+
+
+def inspect_workflow_preflight(args: argparse.Namespace) -> int:
+    plan_path = args.plan_json
+    review_path = args.review_json
+
+    if not plan_path.exists():
+        print(f"Error: WorkflowPlan JSON file does not exist: {plan_path}", file=sys.stderr)
+        return 1
+    if not plan_path.is_file():
+        print(f"Error: WorkflowPlan JSON path is not a file: {plan_path}", file=sys.stderr)
+        return 1
+    if not review_path.exists():
+        print(
+            f"Error: WorkflowPlanReview JSON file does not exist: {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not review_path.is_file():
+        print(
+            f"Error: WorkflowPlanReview JSON path is not a file: {review_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        plan = _load_workflow_plan(plan_path)
+        review = _load_workflow_plan_review(review_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    from phoenix_office.orchestration import run_orchestration_preflight
+
+    report = run_orchestration_preflight(plan, review)
+    _print_workflow_preflight_summary(report)
+    return 0
+
+
+def _print_workflow_preflight_summary(report: Any) -> None:
+    print(f"Orchestration preflight: {report.plan_workflow_name}")
+    print(f"Plan workflow: {report.plan_workflow_name}")
+    print(f"Review workflow: {report.review_workflow_name}")
+    print(f"Review decision: {report.review_decision.value}")
+    print(f"Approved for execution: {_format_yes_no(report.approved_for_execution)}")
+    print(f"Execution available: {_format_yes_no(report.execution_available)}")
+    print(f"Execution message: {report.execution_message}")
+    print(f"Blocking issues: {_format_yes_no(report.has_blocking_issues)}")
+    print("Issues:")
+    if not report.issues:
+        print("  - (none)")
+    else:
+        for issue in report.issues:
+            print(f"  - {issue.code}: {issue.message}")
+    print("Execution: not supported")
+
+
+def _get_subparsers_action(parser: argparse.ArgumentParser) -> argparse.Action:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    raise RuntimeError("parser does not define subcommands")
+
+
+def _get_subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+    subparsers_action = _get_subparsers_action(parser)
+    subparser = subparsers_action.choices.get(name)
+    if subparser is None:
+        raise RuntimeError(f"parser does not define subcommand: {name}")
+    return subparser
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
