@@ -20,6 +20,8 @@ For documentation-only future plan/review binding expectations, see [orchestrati
 
 For documentation-only future validation/preflight expectations, see [orchestration validation/preflight design notes](orchestration_validation_preflight_design_notes.md).
 
+For the read-only orchestration preflight JSON output contract, see [orchestration preflight JSON contract](orchestration-preflight-json-contract.md).
+
 For documentation-only future operator confirmation expectations, see [orchestration operator confirmation design notes](orchestration_operator_confirmation_design_notes.md).
 
 For documentation-only future output/artifact policy expectations, see [orchestration output artifact policy design notes](orchestration_output_artifact_policy_design_notes.md).
@@ -150,6 +152,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #134 feat: add non-executing orchestration preflight skeleton (adds read-only WorkflowPlan/WorkflowPlanReview preflight reports with blocking issues for rejected or needs_changes reviews; execution remains unavailable)
 #135 cli: add read-only orchestration preflight inspect (`orchestration preflight inspect` prints deterministic non-executing WorkflowPlan/WorkflowPlanReview preflight summaries; execution remains unavailable)
 #136 cli: add JSON output to orchestration preflight inspect (`orchestration preflight inspect --json` emits deterministic read-only PreflightReport JSON; execution remains unavailable)
+#137 docs: document orchestration preflight JSON contract (adds `docs/development/orchestration-preflight-json-contract.md` describing read-only preflight JSON fields, issues, exit behavior, consumer guidance, and compatibility expectations)
 ```
 
 ## Current Manual A-1 Proposal Workflow
