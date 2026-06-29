@@ -154,6 +154,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #136 cli: add JSON output to orchestration preflight inspect (`orchestration preflight inspect --json` emits deterministic read-only PreflightReport JSON; execution remains unavailable)
 #137 docs: document orchestration preflight JSON contract (adds `docs/development/orchestration-preflight-json-contract.md` describing read-only preflight JSON fields, issues, exit behavior, consumer guidance, and compatibility expectations)
 #138 feat: add deterministic plan fingerprint to orchestration preflight (adds SHA-256 WorkflowPlan fingerprints to read-only PreflightReport output, human preflight inspect output, and JSON preflight inspect output; execution remains unavailable)
+#139 feat: bind orchestration reviews to plan fingerprints (adds optional reviewed WorkflowPlan fingerprints to WorkflowPlanReview fixtures and read-only preflight reports, with blocking issues for missing or mismatched bindings; execution remains unavailable)
 ```
 
 ## Current Manual A-1 Proposal Workflow

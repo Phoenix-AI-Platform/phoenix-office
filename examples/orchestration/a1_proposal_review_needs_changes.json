@@ -3,5 +3,6 @@
   "decision": "needs_changes",
   "reviewed_by": "human:sample-operator",
   "review_notes": "Human requested changes before approval.",
-  "approved_for_execution": false
+  "approved_for_execution": false,
+  "reviewed_plan_fingerprint": "588b81548d749020d4f28edda30b8dce5c549d2e872e6628d0adf4addca09cad"
 }

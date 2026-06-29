@@ -36,6 +36,8 @@ Current top-level fields emitted by `PreflightReport` are:
 
 - `plan_workflow_name`: string
 - `plan_fingerprint`: string
+- `reviewed_plan_fingerprint`: string or null
+- `plan_fingerprint_matches_review`: boolean or null
 - `review_workflow_name`: string
 - `review_decision`: string
 - `approved_for_execution`: boolean
@@ -47,6 +49,10 @@ Current top-level fields emitted by `PreflightReport` are:
 - `issues`: array
 
 `plan_fingerprint` is a lowercase SHA-256 hex digest of the loaded `WorkflowPlan` serialized from normalized JSON using sorted keys and compact separators. The same plan content produces the same fingerprint across runs, and meaningful plan content changes should change the fingerprint.
+
+`reviewed_plan_fingerprint` is the optional SHA-256 fingerprint carried by the `WorkflowPlanReview` to identify the exact plan content reviewed by the human.
+
+`plan_fingerprint_matches_review` is `true` when `reviewed_plan_fingerprint` is present and matches the computed `plan_fingerprint`, `false` when it is present but different, and `null` when the review does not carry a fingerprint.
 
 `plan_valid` and `review_valid` currently indicate that the loaded model objects were structurally valid before preflight reporting.
 
@@ -63,6 +69,8 @@ Known current blocking issue codes include:
 - `review_not_approved`
 - `review_not_marked_approved_for_execution`
 - `workflow_name_mismatch`
+- `review_plan_fingerprint_missing`
+- `review_plan_fingerprint_mismatch`
 
 Consumers should prefer `code` for deterministic checks and treat `message` as operator-facing text.
 
@@ -78,7 +86,9 @@ This means Phoenix Office can inspect the plan/review pair but still cannot exec
 
 This field means the pair passed the current read-only preflight checks. It does not mean execution exists, is authorized, or should occur. Future execution remains unavailable unless explicitly implemented and reviewed in later dedicated PRs.
 
-`plan_fingerprint` is a stable identifier for the exact plan content being inspected. It is not a review binding check, approval signal, execution authorization, audit record, or mutation permission.
+`plan_fingerprint` is a stable identifier for the exact plan content being inspected.
+
+`reviewed_plan_fingerprint` and `plan_fingerprint_matches_review` let preflight report whether the review appears to identify the same plan content being inspected. A matching fingerprint is not an approval signal, execution authorization, audit record, or mutation permission.
 
 ## Read-Only Behavior
 
@@ -116,7 +126,7 @@ On failure, errors are written to stderr and no partial JSON report is emitted.
 
 Consumers may inspect, display, summarize, or block future workflow consideration based on report fields.
 
-Consumers may show `plan_fingerprint` to help operators identify the exact `WorkflowPlan` content under review, but consumers must not treat the fingerprint as proof of approval or permission to act.
+Consumers may show `plan_fingerprint`, `reviewed_plan_fingerprint`, and `plan_fingerprint_matches_review` to help operators identify whether the current `WorkflowPlan` matches the content identified by the review. Consumers must not treat matching fingerprints as proof of approval or permission to act.
 
 Consumers must not treat this JSON as permission to:
 

@@ -1099,6 +1099,12 @@ def _format_yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
 
+def _format_yes_no_or_not_available(value: bool | None) -> str:
+    if value is None:
+        return "not available"
+    return _format_yes_no(value)
+
+
 def _print_list(label: str, values: list[Any]) -> None:
     print(f"{label}:")
     if not values:
@@ -1274,6 +1280,14 @@ def _print_workflow_preflight_summary(report: Any) -> None:
     print(f"Orchestration preflight: {report.plan_workflow_name}")
     print(f"Plan workflow: {report.plan_workflow_name}")
     print(f"Plan fingerprint: {report.plan_fingerprint}")
+    print(
+        "Reviewed plan fingerprint: "
+        f"{report.reviewed_plan_fingerprint or 'not available'}"
+    )
+    print(
+        "Plan fingerprint matches review: "
+        f"{_format_yes_no_or_not_available(report.plan_fingerprint_matches_review)}"
+    )
     print(f"Review workflow: {report.review_workflow_name}")
     print(f"Review decision: {report.review_decision.value}")
     print(f"Approved for execution: {_format_yes_no(report.approved_for_execution)}")
