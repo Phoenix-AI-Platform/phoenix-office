@@ -187,6 +187,14 @@ If a docs-only auto-merge is later found incorrect, the expected response is a n
 
 The pilot workflow does not attempt automatic rollback.
 
+## Pilot Validation Notes
+
+The first validation PR for this pilot should be intentionally small, documentation-only, and initially unlabeled.
+
+Reviewers should confirm the PR changes only eligible Markdown paths, verify all checks pass, and then decide manually whether to apply `phoenix-automerge-docs` as the pilot test switch.
+
+Applying the label remains a human-controlled decision.
+
 ## Future Boundary
 
 Future expansion requires a separate reviewed PR.
