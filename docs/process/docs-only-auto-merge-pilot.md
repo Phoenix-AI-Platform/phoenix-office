@@ -68,6 +68,17 @@ The pilot requires these checks to pass before merging:
 - `Docs-only autopilot eligibility`
 - `Docs-only auto-merge dry-run`
 
+Each required check may be satisfied by either the workflow display name or the current GitHub check-run/job name:
+
+- `Tests` or `Test and lint`
+- `Pull request body guard` or `Validate PR body sections`
+- `Docs-only autopilot eligibility` or `Check docs-only autopilot eligibility`
+- `Docs-only auto-merge dry-run` or `Check docs-only auto-merge dry-run`
+
+If a required check group is missing, the workflow logs the discovered check-run names and status contexts for debugging.
+
+This alias matching does not weaken the gate. The pilot still defers safely when required groups are missing or pending, and fails closed when a matched required check fails.
+
 Pending or missing checks defer the merge without failing the workflow.
 
 Failed required checks fail closed and do not merge.

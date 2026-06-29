@@ -27,10 +27,19 @@ jobs:
         with:
           script: |
             const labelName = "phoenix-automerge-docs";
-            const requiredCheckNames = [
-              "Tests",
-              "Pull request body guard",
-              "Docs-only autopilot eligibility",
+            const requiredCheckGroups = [
+              {
+                label: "Tests",
+                aliases: ["Tests", "Test and lint"],
+              },
+              {
+                label: "Pull request body guard",
+                aliases: ["Pull request body guard", "Validate PR body sections"],
+              },
+              {
+                label: "Docs-only autopilot eligibility",
+                aliases: ["Docs-only autopilot eligibility", "Check docs-only autopilot eligibility"],
+              },
             ];
             const requiredBodyHeadings = [
               "Summary",
@@ -139,32 +148,75 @@ jobs:
               ref: headSha,
             });
 
-            for (const requiredName of requiredCheckNames) {
-              const matchingChecks = checkRuns
-                .filter((check) => check.name === requiredName)
-                .sort((a, b) => new Date(b.started_at || b.created_at) - new Date(a.started_at || a.created_at));
-              const matchingStatuses = combinedStatus.data.statuses
-                .filter((status) => status.context === requiredName)
-                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const discoveredCheckNames = [...new Set(checkRuns.map((check) => check.name))].sort();
+            const discoveredStatusContexts = [...new Set(combinedStatus.data.statuses.map((status) => status.context))].sort();
 
-              const latestCheck = matchingChecks[0];
-              const latestStatus = matchingStatuses[0];
-
-              if (latestCheck) {
-                core.notice(`${requiredName}: check_run ${latestCheck.status}/${latestCheck.conclusion}`);
-                if (latestCheck.status !== "completed" || latestCheck.conclusion !== "success") {
-                  failures.push(`${requiredName} is not successful for ${headSha}.`);
-                }
-              } else if (latestStatus) {
-                core.notice(`${requiredName}: status ${latestStatus.state}`);
-                if (latestStatus.state !== "success") {
-                  failures.push(`${requiredName} is not successful for ${headSha}.`);
-                }
-              } else {
-                failures.push(`${requiredName} is missing for ${headSha}.`);
-              }
+            function latestByDate(items, dateSelector) {
+              return items.sort((a, b) => new Date(dateSelector(b)) - new Date(dateSelector(a)))[0];
             }
 
+            function resolveRequiredCheckGroup(group) {
+              const candidates = [];
+
+              for (const alias of group.aliases) {
+                const latestCheck = latestByDate(
+                  checkRuns.filter((check) => check.name === alias),
+                  (check) => check.started_at || check.created_at,
+                );
+                if (latestCheck) {
+                  candidates.push({
+                    kind: "check_run",
+                    name: alias,
+                    state: `${latestCheck.status}/${latestCheck.conclusion}`,
+                    successful: latestCheck.status === "completed" && latestCheck.conclusion === "success",
+                    pending: latestCheck.status !== "completed" || latestCheck.conclusion === null,
+                  });
+                }
+
+                const latestStatus = latestByDate(
+                  combinedStatus.data.statuses.filter((status) => status.context === alias),
+                  (status) => status.created_at,
+                );
+                if (latestStatus) {
+                  candidates.push({
+                    kind: "status",
+                    name: alias,
+                    state: latestStatus.state,
+                    successful: latestStatus.state === "success",
+                    pending: latestStatus.state === "pending",
+                  });
+                }
+              }
+
+              if (candidates.some((candidate) => candidate.successful)) {
+                return { state: "success", candidates };
+              }
+
+              if (candidates.some((candidate) => !candidate.pending)) {
+                return { state: "failed", candidates };
+              }
+
+              if (candidates.some((candidate) => candidate.pending)) {
+                return { state: "pending", candidates };
+              }
+
+              core.notice(`Missing ${group.label}. Accepted aliases: ${group.aliases.join(", ")}`);
+              core.notice(`Discovered check-run names: ${discoveredCheckNames.join(", ") || "(none)"}`);
+              core.notice(`Discovered status contexts: ${discoveredStatusContexts.join(", ") || "(none)"}`);
+              return { state: "missing", candidates };
+            }
+
+            for (const group of requiredCheckGroups) {
+              const result = resolveRequiredCheckGroup(group);
+              const candidateSummary = result.candidates
+                .map((candidate) => `${candidate.kind} ${candidate.name} ${candidate.state}`)
+                .join("; ");
+              core.notice(`${group.label}: ${result.state}${candidateSummary ? ` (${candidateSummary})` : ""}`);
+
+              if (result.state !== "success") {
+                failures.push(`${group.label} is ${result.state} for ${headSha}.`);
+              }
+            }
             if (pr.mergeable === false) {
               failures.push("GitHub reports PR is not mergeable.");
             } else if (pr.mergeable === null) {

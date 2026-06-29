@@ -67,6 +67,16 @@ Required status checks are:
 - `Pull request body guard`
 - `Docs-only autopilot eligibility`
 
+Each required check may be satisfied by either the workflow display name or the current GitHub check-run/job name:
+
+- `Tests` or `Test and lint`
+- `Pull request body guard` or `Validate PR body sections`
+- `Docs-only autopilot eligibility` or `Check docs-only autopilot eligibility`
+
+If a required check group is missing, the workflow logs the discovered check-run names and status contexts for debugging.
+
+This alias matching does not weaken the gate. The dry-run workflow still fails closed when labeled and a required check group is missing, pending, stale, or failing.
+
 ## Required PR Body Headings
 
 The workflow checks for these headings:
