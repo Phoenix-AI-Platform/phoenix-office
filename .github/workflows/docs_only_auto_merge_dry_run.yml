@@ -217,12 +217,23 @@ jobs:
                 failures.push(`${group.label} is ${result.state} for ${headSha}.`);
               }
             }
-            if (pr.mergeable === false) {
-              failures.push("GitHub reports PR is not mergeable.");
-            } else if (pr.mergeable === null) {
-              failures.push("GitHub mergeability is unknown.");
+            const mergeabilityRead = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+            const currentPr = mergeabilityRead.data;
+            core.notice(`Fresh GitHub mergeability is ${currentPr.mergeable}.`);
+
+            if (currentPr.head.sha !== headSha) {
+              failures.push(`Head SHA changed from ${headSha} to ${currentPr.head.sha}.`);
             }
 
+            if (currentPr.mergeable === false) {
+              failures.push("GitHub reports PR is not mergeable.");
+            } else if (currentPr.mergeable === null) {
+              failures.push("GitHub mergeability is unknown after re-reading PR state.");
+            }
             if (failures.length > 0) {
               core.setFailed(`Docs-only auto-merge dry-run failed closed: ${failures.join(" ")}`);
               return;
