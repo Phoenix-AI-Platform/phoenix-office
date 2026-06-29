@@ -160,6 +160,15 @@ This dry-run gate does not add or authorize:
 - audit persistence
 - queueing, scheduling, retries, API behavior, MCP behavior, server behavior, worker behavior, or background behavior
 
+## Pilot Hardening Notes
+
+The first docs-only auto-merge pilot validation surfaced two dry-run gate hardening needs:
+
+- PR #158 taught the dry-run gate to accept actual GitHub check-run/job-name aliases when resolving required checks.
+- PR #159 taught the dry-run gate to re-read current PR state before evaluating mergeability, avoiding stale webhook payload values.
+
+Both fixes preserved the existing label gate and fail-closed behavior.
+
 ## Future Boundary
 
 Future auto-merge behavior must still be implemented in a separate reviewed PR.
