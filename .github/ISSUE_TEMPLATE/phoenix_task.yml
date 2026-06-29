@@ -1,5 +1,5 @@
 name: Phoenix Task
-description: Create a scoped implementation task for Codex/Copilot workers.
+description: Queue a scoped Phoenix Office task for Codex and human review.
 title: "[Phoenix Task]: "
 labels:
   - task
@@ -7,81 +7,131 @@ body:
   - type: markdown
     attributes:
       value: |
-        ## Phoenix Guardrails
-        - No orchestrator unless explicitly requested.
-        - No worker execution unless explicitly requested.
-        - No plugin runtime behavior unless explicitly requested.
-        - No proposal generation behavior changes unless explicitly requested.
-        - No CLI behavior changes unless explicitly requested.
-        - No DOCX rendering behavior changes unless explicitly requested.
-        - No unrelated code churn.
+        Use this form for repo-native Phoenix Office tasks that should become one narrow PR.
+
+        Uncertain risk means manual review and manual merge only. Execution/API/MCP/server/background behavior and DOCX/proposal/business-output behavior are manual-merge-only. Docs-only work is the first potential future auto-merge candidate, but this issue template does not implement auto-merge.
+
+        Required guardrails: no orchestrator, worker execution, plugin runtime behavior, proposal generation behavior, CLI behavior, or DOCX rendering behavior changes unless explicitly scoped.
   - type: input
-    id: task_title
+    id: task_summary
     attributes:
-      label: Task title
-      description: Short, implementation-ready task name.
-      placeholder: Add issue templates and workflow docs
+      label: Task title / summary
+      description: Provide the concise task title or one-sentence summary.
+      placeholder: chore: add Phoenix task issue template
+    validations:
+      required: true
+  - type: dropdown
+    id: risk_class
+    attributes:
+      label: Task type / risk class
+      description: Select the highest-risk class touched by the task. If uncertain, choose the closest higher-risk class and require manual merge.
+      options:
+        - docs-only
+        - tests-only
+        - fixtures/examples
+        - CLI/read-only
+        - runtime/model/schema
+        - execution/API/MCP/server/background
+        - DOCX/proposal/business-output
+    validations:
+      required: true
+  - type: input
+    id: source_context
+    attributes:
+      label: Source / preceding PR or issue
+      description: Link or name the merged PR, issue, design note, or project-state entry motivating this work.
+      placeholder: "After PR #142, merged at <commit SHA>"
     validations:
       required: true
   - type: textarea
-    id: goal
+    id: allowed_paths
     attributes:
-      label: Goal
-      description: What outcome should this task deliver?
+      label: Intended changed files or allowed paths
+      description: List the exact files or path patterns the PR may touch.
+      placeholder: |
+        - .github/ISSUE_TEMPLATE/phoenix_task.yml
+        - docs/process/phoenix-task-labels.md
+        - docs/development/project_state.md
     validations:
       required: true
   - type: textarea
-    id: scope
+    id: out_of_scope
     attributes:
-      label: Scope
-      description: What is in scope for this task?
-      placeholder: List exact files or areas to touch.
-    validations:
-      required: true
-  - type: textarea
-    id: forbidden_changes
-    attributes:
-      label: Explicitly forbidden changes
-      description: List what must not be changed.
-      value: |
-        - No orchestrator changes unless explicitly requested.
-        - No worker execution changes unless explicitly requested.
-        - No plugin runtime behavior changes unless explicitly requested.
-        - No proposal generation behavior changes unless explicitly requested.
-        - No CLI behavior changes unless explicitly requested.
-        - No DOCX rendering behavior changes unless explicitly requested.
-        - No unrelated code churn.
+      label: Explicit out-of-scope guardrails
+      description: List behavior, files, systems, or risk classes the PR must not touch.
+      placeholder: |
+        - Do not change runtime code.
+        - Do not add GitHub Actions workflows.
+        - Do not add auto-merge behavior.
+        - Do not add orchestrator, worker execution, plugin runtime behavior, API/MCP/server/background behavior, proposal generation behavior, CLI behavior, or DOCX rendering behavior unless explicitly scoped.
     validations:
       required: true
   - type: textarea
     id: acceptance_criteria
     attributes:
       label: Acceptance criteria
-      description: Define clear pass/fail outcomes.
+      description: Define clear pass/fail outcomes for the task.
+      placeholder: |
+        - The issue template collects risk class and guardrails.
+        - The PR body uses the required headings.
+        - No automation or execution behavior is added.
     validations:
       required: true
   - type: textarea
-    id: verification
+    id: validation_commands
     attributes:
-      label: Verification commands
-      description: Commands and checks required before merge.
+      label: Validation / verification commands
+      description: List expected verification commands, or explain why validation may be impractical.
       placeholder: |
         python -m pytest
-        ruff check .
+        python -m ruff check .
+      render: shell
     validations:
       required: true
-  - type: dropdown
-    id: risk
+  - type: input
+    id: expected_pr_title
     attributes:
-      label: Risk level
-      options:
-        - Low
-        - Medium
-        - High
+      label: Expected PR title
+      description: Provide the exact expected PR title.
+      placeholder: chore: add Phoenix task issue template
     validations:
       required: true
   - type: textarea
-    id: ai_worker_notes
+    id: required_pr_body_headings
     attributes:
-      label: Notes for AI worker
-      description: Extra implementation guidance or reviewer context.
+      label: Required PR body headings
+      description: List the exact required PR body headings.
+      placeholder: |
+        Summary
+        Scope
+        Changed files
+        Out-of-scope confirmation
+        Validation performed
+        Risks
+    validations:
+      required: true
+  - type: textarea
+    id: codex_notes
+    attributes:
+      label: Codex-ready implementation notes
+      description: Provide the implementation prompt, acceptance criteria details, and any sequencing constraints Codex should follow.
+      placeholder: |
+        Before making changes, summarize the intended files and approach.
+        Open one narrow PR.
+        Keep the PR inside the stated allowed paths and guardrails.
+    validations:
+      required: true
+  - type: checkboxes
+    id: human_merge_reminder
+    attributes:
+      label: Human-merge-only flag / risk reminder
+      description: Confirm merge authority expectations for this task.
+      options:
+        - label: I understand uncertain risk means manual review and manual merge only.
+          required: true
+        - label: I understand execution/API/MCP/server/background behavior is manual-merge-only.
+          required: true
+        - label: I understand DOCX/proposal/business-output behavior is manual-merge-only.
+          required: true
+        - label: I understand this issue template does not implement auto-merge or issue-to-Codex trigger behavior.
+          required: true
