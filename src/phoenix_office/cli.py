@@ -1221,6 +1221,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to serialized WorkflowPlanReview JSON",
     )
+    preflight_inspect_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the preflight report as JSON",
+    )
     preflight_inspect_parser.set_defaults(func=inspect_workflow_preflight)
     return parser
 
@@ -1258,7 +1263,10 @@ def inspect_workflow_preflight(args: argparse.Namespace) -> int:
     from phoenix_office.orchestration import run_orchestration_preflight
 
     report = run_orchestration_preflight(plan, review)
-    _print_workflow_preflight_summary(report)
+    if args.json:
+        print(json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True))
+    else:
+        _print_workflow_preflight_summary(report)
     return 0
 
 
