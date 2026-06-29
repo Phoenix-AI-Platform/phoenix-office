@@ -9,6 +9,7 @@ from phoenix_office.orchestration import (
     WorkflowPlanApprovalDecision,
     WorkflowPlanReview,
     run_orchestration_preflight,
+    workflow_plan_fingerprint,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -29,9 +30,24 @@ def _load_review(path: Path) -> WorkflowPlanReview:
     return WorkflowPlanReview.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def test_workflow_plan_fingerprint_is_stable_across_repeated_calls() -> None:
+    plan = _load_plan()
+
+    assert workflow_plan_fingerprint(plan) == workflow_plan_fingerprint(plan)
+    assert workflow_plan_fingerprint(plan) == workflow_plan_fingerprint(_load_plan())
+
+
+def test_workflow_plan_fingerprint_changes_when_plan_content_changes() -> None:
+    plan = _load_plan()
+    changed_plan = plan.model_copy(update={"workflow_name": "changed_workflow"})
+
+    assert workflow_plan_fingerprint(changed_plan) != workflow_plan_fingerprint(plan)
+
+
 def test_preflight_approved_review_is_deterministic_but_execution_unavailable() -> None:
+    plan = _load_plan()
     report = run_orchestration_preflight(
-        _load_plan(),
+        plan,
         _load_review(APPROVED_REVIEW_FIXTURE),
     )
 
@@ -43,6 +59,7 @@ def test_preflight_approved_review_is_deterministic_but_execution_unavailable() 
             "does not implement execution."
         ),
         "issues": [],
+        "plan_fingerprint": workflow_plan_fingerprint(plan),
         "plan_valid": True,
         "plan_workflow_name": "a1_proposal_manual_workflow",
         "review_decision": "approved",
@@ -50,6 +67,7 @@ def test_preflight_approved_review_is_deterministic_but_execution_unavailable() 
         "review_workflow_name": "a1_proposal_manual_workflow",
         "safe_to_consider_for_future_execution": True,
     }
+    assert report.plan_fingerprint == workflow_plan_fingerprint(plan)
     assert report.has_blocking_issues is False
 
 
