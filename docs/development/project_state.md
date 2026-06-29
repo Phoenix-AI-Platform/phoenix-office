@@ -147,6 +147,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #128 docs: clarify record-backed proposal inspection (documents human-readable and machine-readable `proposal inspect` review commands after record-backed ProposalInput composition; rendering still requires explicit `proposal generate`)
 #129 docs: document proposal inspect JSON contract (adds `docs/proposals/proposal-inspect-json-contract.md` describing read-only `proposal inspect --json` inputs, normalized JSON output, failure behavior, consumer guidance, and stability expectations)
 #130 test: cover proposal inspect JSON optional fields (adds deterministic `proposal inspect --json` coverage for `company_config`, provided notes, and omitted notes defaulting to an empty list)
+#134 feat: add non-executing orchestration preflight skeleton (adds read-only WorkflowPlan/WorkflowPlanReview preflight reports with blocking issues for rejected or needs_changes reviews; execution remains unavailable)
 ```
 
 ## Current Manual A-1 Proposal Workflow
