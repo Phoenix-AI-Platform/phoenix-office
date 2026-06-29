@@ -8,6 +8,7 @@ from phoenix_office.orchestration import (
     WorkflowPlan,
     WorkflowPlanApprovalDecision,
     WorkflowPlanReview,
+    create_workflow_plan_review,
     run_orchestration_preflight,
     workflow_plan_fingerprint,
 )
@@ -44,6 +45,29 @@ def test_workflow_plan_fingerprint_changes_when_plan_content_changes() -> None:
     assert workflow_plan_fingerprint(changed_plan) != workflow_plan_fingerprint(plan)
 
 
+def test_workflow_plan_review_accepts_reviewed_plan_fingerprint() -> None:
+    review = WorkflowPlanReview(
+        workflow_name="a1_proposal_manual_workflow",
+        decision=WorkflowPlanApprovalDecision.APPROVED,
+        reviewed_by="human:sample-operator",
+        approved_for_execution=True,
+        reviewed_plan_fingerprint="abc123",
+    )
+
+    assert review.reviewed_plan_fingerprint == "abc123"
+
+
+def test_create_workflow_plan_review_preserves_reviewed_plan_fingerprint() -> None:
+    review = create_workflow_plan_review(
+        workflow_name="a1_proposal_manual_workflow",
+        decision=WorkflowPlanApprovalDecision.APPROVED,
+        reviewed_by="human:sample-operator",
+        reviewed_plan_fingerprint="abc123",
+    )
+
+    assert review.reviewed_plan_fingerprint == "abc123"
+
+
 def test_preflight_approved_review_is_deterministic_but_execution_unavailable() -> None:
     plan = _load_plan()
     report = run_orchestration_preflight(
@@ -60,15 +84,51 @@ def test_preflight_approved_review_is_deterministic_but_execution_unavailable() 
         ),
         "issues": [],
         "plan_fingerprint": workflow_plan_fingerprint(plan),
+        "plan_fingerprint_matches_review": True,
         "plan_valid": True,
         "plan_workflow_name": "a1_proposal_manual_workflow",
         "review_decision": "approved",
         "review_valid": True,
         "review_workflow_name": "a1_proposal_manual_workflow",
+        "reviewed_plan_fingerprint": workflow_plan_fingerprint(plan),
         "safe_to_consider_for_future_execution": True,
     }
     assert report.plan_fingerprint == workflow_plan_fingerprint(plan)
     assert report.has_blocking_issues is False
+
+
+def test_preflight_missing_reviewed_plan_fingerprint_returns_blocking_issue() -> None:
+    review = _load_review(APPROVED_REVIEW_FIXTURE).model_copy(
+        update={"reviewed_plan_fingerprint": None}
+    )
+
+    report = run_orchestration_preflight(_load_plan(), review)
+
+    assert report.safe_to_consider_for_future_execution is False
+    assert report.has_blocking_issues is True
+    assert report.reviewed_plan_fingerprint is None
+    assert report.plan_fingerprint_matches_review is None
+    assert [issue.code for issue in report.issues] == [
+        "review_plan_fingerprint_missing"
+    ]
+    assert report.issues[0].blocking is True
+
+
+def test_preflight_mismatched_reviewed_plan_fingerprint_returns_blocking_issue() -> None:
+    review = _load_review(APPROVED_REVIEW_FIXTURE).model_copy(
+        update={"reviewed_plan_fingerprint": "not-the-current-plan"}
+    )
+
+    report = run_orchestration_preflight(_load_plan(), review)
+
+    assert report.safe_to_consider_for_future_execution is False
+    assert report.has_blocking_issues is True
+    assert report.reviewed_plan_fingerprint == "not-the-current-plan"
+    assert report.plan_fingerprint_matches_review is False
+    assert [issue.code for issue in report.issues] == [
+        "review_plan_fingerprint_mismatch"
+    ]
+    assert report.issues[0].blocking is True
 
 
 def test_preflight_rejected_review_returns_blocking_issue() -> None:
@@ -80,6 +140,7 @@ def test_preflight_rejected_review_returns_blocking_issue() -> None:
     assert report.safe_to_consider_for_future_execution is False
     assert report.has_blocking_issues is True
     assert report.review_decision == WorkflowPlanApprovalDecision.REJECTED
+    assert report.plan_fingerprint_matches_review is True
     assert [issue.code for issue in report.issues] == [
         "review_not_approved",
         "review_not_marked_approved_for_execution",
@@ -96,6 +157,7 @@ def test_preflight_needs_changes_review_returns_blocking_issue() -> None:
     assert report.safe_to_consider_for_future_execution is False
     assert report.has_blocking_issues is True
     assert report.review_decision == WorkflowPlanApprovalDecision.NEEDS_CHANGES
+    assert report.plan_fingerprint_matches_review is True
     assert [issue.code for issue in report.issues] == [
         "review_not_approved",
         "review_not_marked_approved_for_execution",
