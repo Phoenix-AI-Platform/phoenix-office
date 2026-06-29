@@ -129,7 +129,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #89 Orchestration plan/review binding design notes
 #91 Orchestration validation/preflight design notes
 #93 Orchestration operator confirmation design notes
-#95 Orchestration output artifact policy design notes
+#95 Orchestration output/artifact policy design notes
 #96 Batched orchestration execution gate design notes
 #101 cli: improve proposal validation error readability (operator-facing invalid ProposalInput errors + focused tests)
 #103 test: add invalid ProposalInput fixture (sanitized invalid fixture reused in focused validation-error tests)
@@ -148,6 +148,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #129 docs: document proposal inspect JSON contract (adds `docs/proposals/proposal-inspect-json-contract.md` describing read-only `proposal inspect --json` inputs, normalized JSON output, failure behavior, consumer guidance, and stability expectations)
 #130 test: cover proposal inspect JSON optional fields (adds deterministic `proposal inspect --json` coverage for `company_config`, provided notes, and omitted notes defaulting to an empty list)
 #134 feat: add non-executing orchestration preflight skeleton (adds read-only WorkflowPlan/WorkflowPlanReview preflight reports with blocking issues for rejected or needs_changes reviews; execution remains unavailable)
+#135 cli: add read-only orchestration preflight inspect (`orchestration preflight inspect` prints deterministic non-executing WorkflowPlan/WorkflowPlanReview preflight summaries; execution remains unavailable)
 ```
 
 ## Current Manual A-1 Proposal Workflow
