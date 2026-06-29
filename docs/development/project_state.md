@@ -20,6 +20,8 @@ For docs-only autopilot eligibility guidance, see [docs-only autopilot eligibili
 
 For the docs-only auto-merge implementation plan, see [docs-only auto-merge implementation plan](../process/docs-only-auto-merge-implementation-plan.md).
 
+For the docs-only auto-merge dry-run gate, see [docs-only auto-merge dry-run gate](../process/docs-only-auto-merge-dry-run.md).
+
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
 For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
@@ -170,6 +172,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #146 docs/process: evaluate issue-to-Codex trigger path (adds `docs/process/issue-to-codex-trigger-evaluation.md` documenting candidate issue-to-Codex trigger paths, observed access separation, safety gates, and manual fallback recommendation; no trigger behavior added)
 #148 ci: add docs-only autopilot eligibility check (adds read-only `.github/workflows/docs_only_autopilot_eligibility.yml` and `docs/process/docs-only-autopilot-eligibility.md` for future docs-only eligibility signaling; no auto-merge or mutation behavior added)
 #150 docs/process: define docs-only auto-merge implementation plan (adds `docs/process/docs-only-auto-merge-implementation-plan.md` documenting the future docs-only auto-merge eligible class, permission model, checks, fail-closed behavior, and implementation checklist; no auto-merge behavior added)
+#152 ci: add docs-only auto-merge dry-run gate (adds read-only `.github/workflows/docs_only_auto_merge_dry_run.yml` and `docs/process/docs-only-auto-merge-dry-run.md` to evaluate future docs-only auto-merge gates without merge, approval, labels, comments, or repository writes)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -234,6 +237,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - an issue-to-Codex trigger evaluation
 - docs-only autopilot eligibility guidance
 - a docs-only auto-merge implementation plan
+- a docs-only auto-merge dry-run gate
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes

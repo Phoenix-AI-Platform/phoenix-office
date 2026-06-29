@@ -1,0 +1,181 @@
+name: Docs-only auto-merge dry-run
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+      - ready_for_review
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  dry-run:
+    name: Check docs-only auto-merge dry-run
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Evaluate dry-run gates
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labelName = "phoenix-automerge-docs";
+            const requiredCheckNames = [
+              "Tests",
+              "Pull request body guard",
+              "Docs-only autopilot eligibility",
+            ];
+            const requiredBodyHeadings = [
+              "Summary",
+              "Scope",
+              "Changed files",
+              "Out-of-scope confirmation",
+              "Validation performed",
+              "Risks",
+            ];
+
+            const pr = context.payload.pull_request;
+            const labels = pr.labels.map((label) => label.name);
+
+            if (!labels.includes(labelName)) {
+              core.notice(`${labelName} label absent; docs-only auto-merge dry-run not requested.`);
+              return;
+            }
+
+            const failures = [];
+            const headSha = pr.head.sha;
+
+            core.notice(`Dry-run only. No merge, approval, label, comment, or repository write will be attempted.`);
+            core.notice(`Evaluating PR #${pr.number} at ${headSha} targeting ${pr.base.ref}.`);
+
+            if (pr.base.ref !== "main") {
+              failures.push(`Base branch is ${pr.base.ref}, expected main.`);
+            }
+
+            if (pr.head.ref === pr.base.ref) {
+              failures.push("Head branch matches base branch.");
+            }
+
+            if (pr.draft) {
+              failures.push("PR is draft.");
+            }
+
+            if (!pr.body) {
+              failures.push("PR body is empty.");
+            } else {
+              for (const heading of requiredBodyHeadings) {
+                if (!pr.body.includes(`## ${heading}`)) {
+                  failures.push(`Missing PR body heading: ${heading}.`);
+                }
+              }
+
+              const issueReferencePattern = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+|https:\/\/github\.com\/Phoenix-AI-Platform\/phoenix-office\/issues\/\d+|Issue:\s*#\d+/i;
+              if (!issueReferencePattern.test(pr.body)) {
+                failures.push("PR body does not link to a Phoenix task issue.");
+              }
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const allowedMarkdownPatterns = [
+              /^docs\/process\/.+\.md$/,
+              /^docs\/development\/.+\.md$/,
+            ];
+            const deniedFiles = [];
+
+            for (const file of files) {
+              const path = file.filename;
+              const isAllowedMarkdown = allowedMarkdownPatterns.some((pattern) => pattern.test(path));
+
+              if (!isAllowedMarkdown) {
+                deniedFiles.push(path);
+              }
+            }
+
+            if (deniedFiles.length > 0) {
+              failures.push(
+                `Changed files outside docs/process/**/*.md or docs/development/**/*.md: ${deniedFiles.join(", ")}`,
+              );
+            }
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            const latestReviewByUser = new Map();
+            for (const review of reviews) {
+              if (review.user && review.state !== "COMMENTED") {
+                latestReviewByUser.set(review.user.login, review.state);
+              }
+            }
+            const requestedChanges = [...latestReviewByUser.values()].includes("CHANGES_REQUESTED");
+            if (requestedChanges) {
+              failures.push("A current review requests changes.");
+            }
+
+            const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: headSha,
+              per_page: 100,
+            });
+            const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: headSha,
+            });
+
+            for (const requiredName of requiredCheckNames) {
+              const matchingChecks = checkRuns
+                .filter((check) => check.name === requiredName)
+                .sort((a, b) => new Date(b.started_at || b.created_at) - new Date(a.started_at || a.created_at));
+              const matchingStatuses = combinedStatus.data.statuses
+                .filter((status) => status.context === requiredName)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const latestCheck = matchingChecks[0];
+              const latestStatus = matchingStatuses[0];
+
+              if (latestCheck) {
+                core.notice(`${requiredName}: check_run ${latestCheck.status}/${latestCheck.conclusion}`);
+                if (latestCheck.status !== "completed" || latestCheck.conclusion !== "success") {
+                  failures.push(`${requiredName} is not successful for ${headSha}.`);
+                }
+              } else if (latestStatus) {
+                core.notice(`${requiredName}: status ${latestStatus.state}`);
+                if (latestStatus.state !== "success") {
+                  failures.push(`${requiredName} is not successful for ${headSha}.`);
+                }
+              } else {
+                failures.push(`${requiredName} is missing for ${headSha}.`);
+              }
+            }
+
+            if (pr.mergeable === false) {
+              failures.push("GitHub reports PR is not mergeable.");
+            } else if (pr.mergeable === null) {
+              failures.push("GitHub mergeability is unknown.");
+            }
+
+            if (failures.length > 0) {
+              core.setFailed(`Docs-only auto-merge dry-run failed closed: ${failures.join(" ")}`);
+              return;
+            }
+
+            core.notice(
+              `Docs-only auto-merge dry-run passed for ${headSha}. This is not merge approval and no merge was performed.`,
+            );
