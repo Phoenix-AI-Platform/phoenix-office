@@ -51,6 +51,8 @@ class PreflightReport(BaseModel):
 
     plan_workflow_name: str
     plan_fingerprint: str
+    reviewed_plan_fingerprint: str | None
+    plan_fingerprint_matches_review: bool | None
     review_workflow_name: str
     review_decision: WorkflowPlanApprovalDecision
     approved_for_execution: bool
@@ -75,6 +77,8 @@ def run_orchestration_preflight(
     """Inspect a plan/review pair without executing or mutating anything."""
 
     issues: list[PreflightIssue] = []
+    plan_fingerprint = workflow_plan_fingerprint(plan)
+    reviewed_plan_fingerprint = review.reviewed_plan_fingerprint
 
     if review.decision != WorkflowPlanApprovalDecision.APPROVED:
         issues.append(
@@ -109,10 +113,36 @@ def run_orchestration_preflight(
             )
         )
 
+    if reviewed_plan_fingerprint is None:
+        plan_fingerprint_matches_review = None
+        issues.append(
+            PreflightIssue(
+                code="review_plan_fingerprint_missing",
+                message=(
+                    "WorkflowPlanReview reviewed_plan_fingerprint must be set "
+                    "before the pair can be considered together."
+                ),
+            )
+        )
+    else:
+        plan_fingerprint_matches_review = reviewed_plan_fingerprint == plan_fingerprint
+        if not plan_fingerprint_matches_review:
+            issues.append(
+                PreflightIssue(
+                    code="review_plan_fingerprint_mismatch",
+                    message=(
+                        "WorkflowPlanReview reviewed_plan_fingerprint must match "
+                        "the current WorkflowPlan fingerprint."
+                    ),
+                )
+            )
+
     has_blocking_issues = any(issue.blocking for issue in issues)
     return PreflightReport(
         plan_workflow_name=plan.workflow_name,
-        plan_fingerprint=workflow_plan_fingerprint(plan),
+        plan_fingerprint=plan_fingerprint,
+        reviewed_plan_fingerprint=reviewed_plan_fingerprint,
+        plan_fingerprint_matches_review=plan_fingerprint_matches_review,
         review_workflow_name=review.workflow_name,
         review_decision=review.decision,
         approved_for_execution=review.approved_for_execution,
