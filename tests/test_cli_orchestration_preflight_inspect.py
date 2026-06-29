@@ -17,6 +17,10 @@ REJECTED_REVIEW_FIXTURE = ORCHESTRATION_EXAMPLES / "a1_proposal_review_rejected.
 NEEDS_CHANGES_REVIEW_FIXTURE = (
     ORCHESTRATION_EXAMPLES / "a1_proposal_review_needs_changes.json"
 )
+EXECUTION_UNAVAILABLE_MESSAGE = (
+    "Execution is unavailable: orchestration preflight is read-only and "
+    "does not implement execution."
+)
 
 
 def test_cli_orchestration_preflight_inspect_outputs_approved_summary(capsys) -> None:
@@ -109,6 +113,109 @@ def test_cli_orchestration_preflight_inspect_outputs_workflow_mismatch_issue(
     assert "Review workflow: other_workflow" in captured.out
     assert "Blocking issues: yes" in captured.out
     assert "workflow_name_mismatch" in captured.out
+
+
+def test_cli_orchestration_preflight_inspect_json_outputs_approved_report(capsys) -> None:
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(APPROVED_REVIEW_FIXTURE),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload == {
+        "approved_for_execution": True,
+        "execution_available": False,
+        "execution_message": EXECUTION_UNAVAILABLE_MESSAGE,
+        "issues": [],
+        "plan_valid": True,
+        "plan_workflow_name": "a1_proposal_manual_workflow",
+        "review_decision": "approved",
+        "review_valid": True,
+        "review_workflow_name": "a1_proposal_manual_workflow",
+        "safe_to_consider_for_future_execution": True,
+    }
+    assert captured.out.endswith("\n")
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("review_fixture", "decision"),
+    [
+        (REJECTED_REVIEW_FIXTURE, "rejected"),
+        (NEEDS_CHANGES_REVIEW_FIXTURE, "needs_changes"),
+    ],
+)
+def test_cli_orchestration_preflight_inspect_json_outputs_blocking_issue_codes(
+    review_fixture: Path,
+    decision: str,
+    capsys,
+) -> None:
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(review_fixture),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["review_decision"] == decision
+    assert payload["execution_available"] is False
+    assert payload["safe_to_consider_for_future_execution"] is False
+    assert [issue["code"] for issue in payload["issues"]] == [
+        "review_not_approved",
+        "review_not_marked_approved_for_execution",
+    ]
+    assert all(issue["blocking"] for issue in payload["issues"])
+    assert captured.err == ""
+
+
+def test_cli_orchestration_preflight_inspect_json_outputs_workflow_mismatch_issue(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    review_payload = json.loads(APPROVED_REVIEW_FIXTURE.read_text(encoding="utf-8"))
+    review_payload["workflow_name"] = "other_workflow"
+    mismatched_review = tmp_path / "mismatched-review.json"
+    mismatched_review.write_text(
+        f"{json.dumps(review_payload, indent=2, sort_keys=True)}\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(mismatched_review),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["review_workflow_name"] == "other_workflow"
+    assert payload["safe_to_consider_for_future_execution"] is False
+    assert [issue["code"] for issue in payload["issues"]] == [
+        "workflow_name_mismatch"
+    ]
+    assert payload["issues"][0]["blocking"] is True
+    assert captured.err == ""
 
 
 def test_cli_orchestration_preflight_inspect_fails_cleanly_for_missing_plan(
@@ -227,6 +334,30 @@ def test_cli_orchestration_preflight_inspect_fails_cleanly_for_invalid_model(
     assert "Invalid WorkflowPlanReview" in captured.err
 
 
+def test_cli_orchestration_preflight_inspect_json_invalid_input_emits_no_partial_json(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    invalid_review = tmp_path / "invalid-review.json"
+    invalid_review.write_text("{not valid json", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(invalid_review),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code != 0
+    assert captured.out == ""
+    assert "Invalid JSON" in captured.err
+
+
 def test_cli_orchestration_preflight_inspect_does_not_create_artifacts(
     tmp_path: Path,
     capsys,
@@ -245,6 +376,30 @@ def test_cli_orchestration_preflight_inspect_does_not_create_artifacts(
 
     captured = capsys.readouterr()
     assert exit_code == 0
+    assert captured.err == ""
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_orchestration_preflight_inspect_json_does_not_create_artifacts(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    assert list(tmp_path.iterdir()) == []
+
+    exit_code = main(
+        [
+            "orchestration",
+            "preflight",
+            "inspect",
+            str(PLAN_FIXTURE),
+            str(APPROVED_REVIEW_FIXTURE),
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["execution_available"] is False
     assert captured.err == ""
     assert list(tmp_path.iterdir()) == []
 
