@@ -12,6 +12,8 @@ For the recommended human-controlled development process, see [development loop 
 
 For the repo-native issue-driven autopilot process direction, see [Phoenix autopilot loop](../process/phoenix-autopilot-loop.md).
 
+For Phoenix task issue classification guidance, see [Phoenix task labels](../process/phoenix-task-labels.md).
+
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
 For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
@@ -158,6 +160,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #138 feat: add deterministic plan fingerprint to orchestration preflight (adds SHA-256 WorkflowPlan fingerprints to read-only PreflightReport output, human preflight inspect output, and JSON preflight inspect output; execution remains unavailable)
 #139 feat: bind orchestration reviews to plan fingerprints (adds optional reviewed WorkflowPlan fingerprints to WorkflowPlanReview fixtures and read-only preflight reports, with blocking issues for missing or mismatched bindings; execution remains unavailable)
 #142 docs/process: define Phoenix autopilot loop (adds `docs/process/phoenix-autopilot-loop.md` documenting the issue-driven, review-gated Phoenix autopilot process direction; no automation or execution behavior added)
+#144 chore: add Phoenix task issue template (updates `.github/ISSUE_TEMPLATE/phoenix_task.yml` and adds `docs/process/phoenix-task-labels.md` for repo-native Phoenix task intake, risk classification, and merge-authority guidance; no automation behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -218,6 +221,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a project-state handoff
 - a development loop runbook
 - a Phoenix autopilot loop process direction
+- Phoenix task issue classification guidance
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
