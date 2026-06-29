@@ -1,0 +1,249 @@
+name: Docs-only auto-merge pilot
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+      - ready_for_review
+
+permissions:
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: read
+
+concurrency:
+  group: docs-only-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    name: Check docs-only auto-merge pilot
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Evaluate and merge eligible docs-only PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labelName = "phoenix-automerge-docs";
+            const requiredCheckNames = [
+              "Tests",
+              "Pull request body guard",
+              "Docs-only autopilot eligibility",
+              "Docs-only auto-merge dry-run",
+            ];
+            const requiredBodyHeadings = [
+              "Summary",
+              "Scope",
+              "Changed files",
+              "Out-of-scope confirmation",
+              "Validation performed",
+              "Risks",
+            ];
+
+            const pr = context.payload.pull_request;
+            const labels = pr.labels.map((label) => label.name);
+
+            if (!labels.includes(labelName)) {
+              core.notice(`${labelName} label absent; docs-only auto-merge pilot not requested.`);
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pullNumber = pr.number;
+            const evaluatedHeadSha = pr.head.sha;
+
+            core.notice(`Docs-only auto-merge pilot evaluating PR #${pullNumber} at ${evaluatedHeadSha}.`);
+            core.notice("Only a final eligible squash merge is allowed; no approvals, labels, comments, branch updates, or artifacts will be created.");
+
+            const hardFailures = [];
+            const deferrals = [];
+
+            if (pr.state !== "open") {
+              hardFailures.push(`PR state is ${pr.state}, expected open.`);
+            }
+
+            if (pr.base.ref !== "main") {
+              hardFailures.push(`Base branch is ${pr.base.ref}, expected main.`);
+            }
+
+            if (pr.head.ref === "main") {
+              hardFailures.push("Head branch is main.");
+            }
+
+            if (pr.draft) {
+              hardFailures.push("PR is draft.");
+            }
+
+            if (!pr.body) {
+              hardFailures.push("PR body is empty.");
+            } else {
+              for (const heading of requiredBodyHeadings) {
+                if (!pr.body.includes(`## ${heading}`)) {
+                  hardFailures.push(`Missing PR body heading: ${heading}.`);
+                }
+              }
+
+              const issueReferencePattern = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+|https:\/\/github\.com\/Phoenix-AI-Platform\/phoenix-office\/issues\/\d+|Issue:\s*#\d+/i;
+              if (!issueReferencePattern.test(pr.body)) {
+                hardFailures.push("PR body does not link to a Phoenix task issue.");
+              }
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+
+            const allowedMarkdownPatterns = [
+              /^docs\/process\/.+\.md$/,
+              /^docs\/development\/.+\.md$/,
+            ];
+            const deniedFiles = [];
+
+            for (const file of files) {
+              const path = file.filename;
+              const isAllowedMarkdown = allowedMarkdownPatterns.some((pattern) => pattern.test(path));
+
+              if (!isAllowedMarkdown) {
+                deniedFiles.push(path);
+              }
+            }
+
+            if (deniedFiles.length > 0) {
+              hardFailures.push(
+                `Changed files outside docs/process/**/*.md or docs/development/**/*.md: ${deniedFiles.join(", ")}`,
+              );
+            }
+
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+            const latestReviewByUser = new Map();
+            for (const review of reviews) {
+              if (review.user && review.state !== "COMMENTED") {
+                latestReviewByUser.set(review.user.login, review.state);
+              }
+            }
+            const requestedChanges = [...latestReviewByUser.values()].includes("CHANGES_REQUESTED");
+            if (requestedChanges) {
+              hardFailures.push("A current review requests changes.");
+            }
+
+            const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+              owner,
+              repo,
+              ref: evaluatedHeadSha,
+              per_page: 100,
+            });
+            const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
+              owner,
+              repo,
+              ref: evaluatedHeadSha,
+            });
+
+            for (const requiredName of requiredCheckNames) {
+              const matchingChecks = checkRuns
+                .filter((check) => check.name === requiredName)
+                .sort((a, b) => new Date(b.started_at || b.created_at) - new Date(a.started_at || a.created_at));
+              const matchingStatuses = combinedStatus.data.statuses
+                .filter((status) => status.context === requiredName)
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+              const latestCheck = matchingChecks[0];
+              const latestStatus = matchingStatuses[0];
+
+              if (latestCheck) {
+                core.notice(`${requiredName}: check_run ${latestCheck.status}/${latestCheck.conclusion}`);
+                if (latestCheck.status !== "completed" || latestCheck.conclusion === null) {
+                  deferrals.push(`${requiredName} is still ${latestCheck.status}.`);
+                } else if (latestCheck.conclusion !== "success") {
+                  hardFailures.push(`${requiredName} concluded ${latestCheck.conclusion}.`);
+                }
+              } else if (latestStatus) {
+                core.notice(`${requiredName}: status ${latestStatus.state}`);
+                if (latestStatus.state === "pending") {
+                  deferrals.push(`${requiredName} is still pending.`);
+                } else if (latestStatus.state !== "success") {
+                  hardFailures.push(`${requiredName} state is ${latestStatus.state}.`);
+                }
+              } else {
+                deferrals.push(`${requiredName} is missing for ${evaluatedHeadSha}.`);
+              }
+            }
+
+            if (pr.mergeable === false) {
+              hardFailures.push("GitHub reports PR is not mergeable.");
+            } else if (pr.mergeable === null) {
+              deferrals.push("GitHub mergeability is unknown.");
+            }
+
+            if (hardFailures.length > 0) {
+              core.setFailed(`Docs-only auto-merge pilot failed closed: ${hardFailures.join(" ")}`);
+              return;
+            }
+
+            if (deferrals.length > 0) {
+              core.notice(`Docs-only auto-merge pilot deferred without merging: ${deferrals.join(" ")}`);
+              return;
+            }
+
+            const reread = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            const currentPr = reread.data;
+            const currentLabels = currentPr.labels.map((label) => label.name);
+
+            if (!currentLabels.includes(labelName)) {
+              core.notice(`${labelName} label was removed before merge; deferred without merging.`);
+              return;
+            }
+
+            if (currentPr.state !== "open") {
+              core.setFailed(`PR state changed to ${currentPr.state}; refusing to merge.`);
+              return;
+            }
+
+            if (currentPr.draft) {
+              core.setFailed("PR became draft before merge; refusing to merge.");
+              return;
+            }
+
+            if (currentPr.head.sha !== evaluatedHeadSha) {
+              core.setFailed(`Head SHA changed from ${evaluatedHeadSha} to ${currentPr.head.sha}; refusing to merge.`);
+              return;
+            }
+
+            if (currentPr.base.ref !== "main" || currentPr.head.ref === "main") {
+              core.setFailed("Branch conditions changed before merge; refusing to merge.");
+              return;
+            }
+
+            if (currentPr.mergeable !== true) {
+              core.notice(`GitHub mergeability is ${currentPr.mergeable}; deferred without merging.`);
+              return;
+            }
+
+            core.notice(`Docs-only auto-merge pilot merging PR #${pullNumber} at ${evaluatedHeadSha} with squash merge.`);
+            await github.rest.pulls.merge({
+              owner,
+              repo,
+              pull_number: pullNumber,
+              commit_title: currentPr.title,
+              commit_message: `Docs-only auto-merge pilot merged PR #${pullNumber} after required gates passed.`,
+              merge_method: "squash",
+              sha: evaluatedHeadSha,
+            });

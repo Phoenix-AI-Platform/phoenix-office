@@ -22,6 +22,8 @@ For the docs-only auto-merge implementation plan, see [docs-only auto-merge impl
 
 For the docs-only auto-merge dry-run gate, see [docs-only auto-merge dry-run gate](../process/docs-only-auto-merge-dry-run.md).
 
+For the docs-only auto-merge pilot, see [docs-only auto-merge pilot](../process/docs-only-auto-merge-pilot.md).
+
 For choosing the next narrow PR, see [next-brick planning guide](next_brick_planning_guide.md).
 
 For documentation-only gates before any future orchestration execution work may be considered, see [orchestration execution readiness checklist](orchestration_execution_readiness_checklist.md).
@@ -173,6 +175,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #148 ci: add docs-only autopilot eligibility check (adds read-only `.github/workflows/docs_only_autopilot_eligibility.yml` and `docs/process/docs-only-autopilot-eligibility.md` for future docs-only eligibility signaling; no auto-merge or mutation behavior added)
 #150 docs/process: define docs-only auto-merge implementation plan (adds `docs/process/docs-only-auto-merge-implementation-plan.md` documenting the future docs-only auto-merge eligible class, permission model, checks, fail-closed behavior, and implementation checklist; no auto-merge behavior added)
 #152 ci: add docs-only auto-merge dry-run gate (adds read-only `.github/workflows/docs_only_auto_merge_dry_run.yml` and `docs/process/docs-only-auto-merge-dry-run.md` to evaluate future docs-only auto-merge gates without merge, approval, labels, comments, or repository writes)
+#154 ci: implement docs-only auto-merge pilot workflow (adds `.github/workflows/docs_only_auto_merge.yml` and `docs/process/docs-only-auto-merge-pilot.md` for label-gated docs-only squash merge after required gates pass; no approval, label, comment, branch-update, trigger, or background behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -238,6 +241,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - docs-only autopilot eligibility guidance
 - a docs-only auto-merge implementation plan
 - a docs-only auto-merge dry-run gate
+- a docs-only auto-merge pilot workflow
 - a next-brick planning guide
 - an orchestration execution readiness checklist
 - orchestration audit logging design notes
