@@ -1273,6 +1273,7 @@ def inspect_workflow_preflight(args: argparse.Namespace) -> int:
 def _print_workflow_preflight_summary(report: Any) -> None:
     print(f"Orchestration preflight: {report.plan_workflow_name}")
     print(f"Plan workflow: {report.plan_workflow_name}")
+    print(f"Plan fingerprint: {report.plan_fingerprint}")
     print(f"Review workflow: {report.review_workflow_name}")
     print(f"Review decision: {report.review_decision.value}")
     print(f"Approved for execution: {_format_yes_no(report.approved_for_execution)}")
