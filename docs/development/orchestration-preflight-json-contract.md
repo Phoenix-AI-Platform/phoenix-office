@@ -35,6 +35,7 @@ Blocking preflight issues are represented inside the JSON report. They do not ma
 Current top-level fields emitted by `PreflightReport` are:
 
 - `plan_workflow_name`: string
+- `plan_fingerprint`: string
 - `review_workflow_name`: string
 - `review_decision`: string
 - `approved_for_execution`: boolean
@@ -44,6 +45,8 @@ Current top-level fields emitted by `PreflightReport` are:
 - `execution_message`: string
 - `safe_to_consider_for_future_execution`: boolean
 - `issues`: array
+
+`plan_fingerprint` is a lowercase SHA-256 hex digest of the loaded `WorkflowPlan` serialized from normalized JSON using sorted keys and compact separators. The same plan content produces the same fingerprint across runs, and meaningful plan content changes should change the fingerprint.
 
 `plan_valid` and `review_valid` currently indicate that the loaded model objects were structurally valid before preflight reporting.
 
@@ -74,6 +77,8 @@ This means Phoenix Office can inspect the plan/review pair but still cannot exec
 `safe_to_consider_for_future_execution` is `true` only when the current preflight checks find no blocking issues.
 
 This field means the pair passed the current read-only preflight checks. It does not mean execution exists, is authorized, or should occur. Future execution remains unavailable unless explicitly implemented and reviewed in later dedicated PRs.
+
+`plan_fingerprint` is a stable identifier for the exact plan content being inspected. It is not a review binding check, approval signal, execution authorization, audit record, or mutation permission.
 
 ## Read-Only Behavior
 
@@ -110,6 +115,8 @@ On failure, errors are written to stderr and no partial JSON report is emitted.
 ## Consumer Guidance
 
 Consumers may inspect, display, summarize, or block future workflow consideration based on report fields.
+
+Consumers may show `plan_fingerprint` to help operators identify the exact `WorkflowPlan` content under review, but consumers must not treat the fingerprint as proof of approval or permission to act.
 
 Consumers must not treat this JSON as permission to:
 
