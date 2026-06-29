@@ -10,6 +10,8 @@ body:
         Use this form for repo-native Phoenix Office tasks that should become one narrow PR.
 
         Uncertain risk means manual review and manual merge only. Execution/API/MCP/server/background behavior and DOCX/proposal/business-output behavior are manual-merge-only. Docs-only work is the first potential future auto-merge candidate, but this issue template does not implement auto-merge.
+
+        Required guardrails: no orchestrator, worker execution, plugin runtime behavior, proposal generation behavior, CLI behavior, or DOCX rendering behavior changes unless explicitly scoped.
   - type: input
     id: task_summary
     attributes:
@@ -61,14 +63,25 @@ body:
         - Do not change runtime code.
         - Do not add GitHub Actions workflows.
         - Do not add auto-merge behavior.
-        - Do not add execution/API/MCP/server/background behavior.
+        - Do not add orchestrator, worker execution, plugin runtime behavior, API/MCP/server/background behavior, proposal generation behavior, CLI behavior, or DOCX rendering behavior unless explicitly scoped.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Define clear pass/fail outcomes for the task.
+      placeholder: |
+        - The issue template collects risk class and guardrails.
+        - The PR body uses the required headings.
+        - No automation or execution behavior is added.
     validations:
       required: true
   - type: textarea
     id: validation_commands
     attributes:
-      label: Validation commands
-      description: List expected validation commands, or explain why validation may be impractical.
+      label: Validation / verification commands
+      description: List expected verification commands, or explain why validation may be impractical.
       placeholder: |
         python -m pytest
         python -m ruff check .
@@ -101,7 +114,7 @@ body:
     id: codex_notes
     attributes:
       label: Codex-ready implementation notes
-      description: Provide the implementation prompt, acceptance criteria, and any sequencing constraints Codex should follow.
+      description: Provide the implementation prompt, acceptance criteria details, and any sequencing constraints Codex should follow.
       placeholder: |
         Before making changes, summarize the intended files and approach.
         Open one narrow PR.
