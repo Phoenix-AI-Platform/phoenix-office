@@ -54,3 +54,35 @@ def test_cli_proposal_draft_json_creates_normalizable_a1_intake(
     assert proposal.pricing.amount == 3000
     assert proposal.pricing.is_starting_at is True
     assert proposal.notes == ["Customer is responsible for access to the tank area."]
+
+
+def test_cli_proposal_draft_json_refuses_existing_file(tmp_path: Path, capsys) -> None:
+    draft_path = tmp_path / "a1_proposal_intake.json"
+    original_content = "do not replace me\n"
+    draft_path.write_text(original_content, encoding="utf-8")
+
+    exit_code = main(["proposal", "draft-json", str(draft_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "Error: proposal draft JSON already exists:" in captured.err
+    assert "Use --force to overwrite it." in captured.err
+    assert draft_path.read_text(encoding="utf-8") == original_content
+
+
+def test_cli_proposal_draft_json_force_overwrites_existing_file(
+    tmp_path: Path, capsys
+) -> None:
+    draft_path = tmp_path / "a1_proposal_intake.json"
+    draft_path.write_text("replace me\n", encoding="utf-8")
+
+    exit_code = main(["proposal", "draft-json", str(draft_path), "--force"])
+
+    captured = capsys.readouterr()
+    draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "Wrote proposal draft JSON" in captured.out
+    assert captured.err == ""
+    assert draft_payload["customer_name"] == "Jane Customer"
+    assert draft_payload["pricing_lines"][0]["amount"] == "3000.00"
