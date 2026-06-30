@@ -193,6 +193,8 @@ Reviewers should confirm the PR changes only eligible Markdown paths, verify all
 
 Applying the label remains a human-controlled decision.
 
+This validation PR records the live docs-only auto-merge validation after PR #173. PR #173 added pending-check defer behavior and the dry-run eligibility confirmation gate before the pilot treats a dry-run as merge-eligible.
+
 ## Pilot Result
 
 PR #156 completed the first successful human-controlled docs-only auto-merge pilot.
