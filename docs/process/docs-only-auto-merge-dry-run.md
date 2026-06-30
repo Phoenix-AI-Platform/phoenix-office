@@ -185,6 +185,8 @@ PR #168 made the label-triggered path self-contained for already-green docs-only
 
 PR #172 taught the dry-run gate to defer safely while required checks are pending. Only a dry-run that reaches confirmed eligibility runs the confirmation job that can wake the pilot.
 
+PR #173 recorded the pending-check defer and eligibility confirmation behavior in the live docs-only PR path, confirming that a deferred dry-run does not run the eligibility confirmation job and the pilot correctly distinguishes a safe wait from a confirmed eligibility pass.
+
 ## Future Boundary
 
 Future auto-merge behavior must still be implemented in a separate reviewed PR.
