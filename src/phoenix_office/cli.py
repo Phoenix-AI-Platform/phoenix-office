@@ -120,6 +120,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for normalized ProposalInput JSON output",
     )
     intake_normalize_parser.set_defaults(func=normalize_proposal_intake)
+    generate_from_intake_parser = proposal_subparsers.add_parser(
+        "generate-from-intake",
+        help="Generate a proposal DOCX from explicit A-1 intake JSON",
+    )
+    generate_from_intake_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to A-1 proposal intake JSON input",
+    )
+    generate_from_intake_parser.add_argument(
+        "output_docx",
+        type=Path,
+        help="Path for the generated DOCX",
+    )
+    generate_from_intake_parser.add_argument(
+        "--template",
+        type=Path,
+        required=True,
+        help="Path to the DOCX template",
+    )
+    generate_from_intake_parser.set_defaults(func=generate_proposal_from_intake)
 
     intake_parser = proposal_subparsers.add_parser(
         "intake",
@@ -534,6 +555,22 @@ def load_proposal(path: Path) -> ProposalInput:
         raise ValueError(f"Invalid proposal input in {path}: {exc}") from exc
 
 
+
+def load_a1_proposal_intake(path: Path) -> Any:
+    try:
+        with path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"A-1 proposal intake JSON must be an object: {path}")
+
+    try:
+        return a1_proposal_intake_from_dict(data)
+    except ValidationError as exc:
+        raise ValueError(f"Invalid A-1 proposal intake in {path}: {exc}") from exc
+
 def generate_proposal(args: argparse.Namespace) -> int:
     input_path = args.input_json
     template_path = args.template
@@ -561,6 +598,44 @@ def generate_proposal(args: argparse.Namespace) -> int:
     print(f"Generated proposal DOCX: {result}")
     return 0
 
+
+
+def generate_proposal_from_intake(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+    template_path = args.template
+    output_path = args.output_docx
+
+    if not input_path.exists():
+        print(
+            f"Error: intake JSON input file does not exist: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not input_path.is_file():
+        print(
+            f"Error: intake JSON input path is not a file: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not _template_is_valid(template_path):
+        return 1
+
+    try:
+        intake = load_a1_proposal_intake(input_path)
+        proposal = intake.to_proposal_input()
+        result = DocxProposalRenderer().render(proposal, template_path, output_path)
+    except ValueError as exc:
+        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(
+            f"Error: failed to render proposal DOCX from intake: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Generated proposal DOCX: {result}")
+    return 0
 
 def validate_proposal(args: argparse.Namespace) -> int:
     input_path = args.input_json
@@ -654,21 +729,10 @@ def normalize_proposal_intake(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        with input_path.open(encoding="utf-8") as file:
-            data: Any = json.load(file)
-        if not isinstance(data, dict):
-            raise ValueError(f"A-1 proposal intake JSON must be an object: {input_path}")
-        intake = a1_proposal_intake_from_dict(data)
+        intake = load_a1_proposal_intake(input_path)
         proposal = intake.to_proposal_input()
         _write_proposal_input_json(proposal, output_path)
-    except json.JSONDecodeError as exc:
-        print(
-            f"Error: invalid A-1 proposal intake JSON: Invalid JSON in "
-            f"{input_path}: {exc.msg}",
-            file=sys.stderr,
-        )
-        return 1
-    except (ValueError, ValidationError) as exc:
+    except ValueError as exc:
         print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
