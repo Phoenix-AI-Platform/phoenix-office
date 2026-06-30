@@ -214,6 +214,8 @@ PR #168 made the label-triggered path self-contained for already-green docs-only
 
 PR #172 made pending required checks a dry-run defer state instead of a hard failure. Deferred dry-runs do not run the eligibility confirmation job, so the pilot can distinguish a safe wait from a true eligibility pass.
 
+PR #179 confirmed the pilot can auto-merge a fresh docs-only validation branch after the human-applied label once the dry-run reports confirmed eligibility.
+
 ## Future Boundary
 
 Future expansion requires a separate reviewed PR.

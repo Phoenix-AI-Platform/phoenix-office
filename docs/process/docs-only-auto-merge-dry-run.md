@@ -185,6 +185,8 @@ PR #168 made the label-triggered path self-contained for already-green docs-only
 
 PR #172 taught the dry-run gate to defer safely while required checks are pending. Only a dry-run that reaches confirmed eligibility runs the confirmation job that can wake the pilot.
 
+PR #179 validated the explicit dry-run decision path from a fresh branch after PR #178 made the decision auditable; future validation branches should start from current `main` after workflow changes land.
+
 ## Future Boundary
 
 Future auto-merge behavior must still be implemented in a separate reviewed PR.
