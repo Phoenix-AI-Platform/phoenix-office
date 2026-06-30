@@ -55,18 +55,43 @@ jobs:
             const repo = context.repo.repo;
             const workflowRun = context.payload.workflow_run;
 
+            async function resolvePullNumberFromWorkflowRun() {
+              const pullRequests = workflowRun.pull_requests || [];
+              if (pullRequests.length > 0) {
+                return pullRequests[0].number;
+              }
+
+              const associatedPrs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                owner,
+                repo,
+                commit_sha: workflowRun.head_sha,
+                per_page: 100,
+              });
+              const matchingPrs = associatedPrs.filter(
+                (candidate) => candidate.state === "open" && candidate.head.sha === workflowRun.head_sha,
+              );
+
+              if (matchingPrs.length === 1) {
+                core.notice(`Resolved PR #${matchingPrs[0].number} from dry-run head SHA ${workflowRun.head_sha}.`);
+                return matchingPrs[0].number;
+              }
+
+              core.notice(
+                `Could not resolve exactly one open PR for dry-run head SHA ${workflowRun.head_sha}; found ${matchingPrs.length}. Skipping.`,
+              );
+              return null;
+            }
+
             if (workflowRun.conclusion !== "success") {
               core.notice(`Dry-run workflow concluded ${workflowRun.conclusion}; docs-only auto-merge pilot not requested.`);
               return;
             }
 
-            const pullRequests = workflowRun.pull_requests || [];
-            if (pullRequests.length === 0) {
-              core.notice("Successful dry-run workflow run is not associated with a pull request; skipping.");
+            const pullNumber = await resolvePullNumberFromWorkflowRun();
+            if (!pullNumber) {
               return;
             }
 
-            const pullNumber = pullRequests[0].number;
             const evaluatedHeadSha = workflowRun.head_sha;
             const evaluationRead = await github.rest.pulls.get({
               owner,

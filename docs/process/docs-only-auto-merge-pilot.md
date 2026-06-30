@@ -18,7 +18,7 @@ The workflow is:
 
 It runs after the `Docs-only auto-merge dry-run` workflow completes.
 
-The pilot proceeds only when the dry-run conclusion is `success`. It resolves the associated PR from the dry-run workflow event, re-reads current PR state, and confirms the PR still has `phoenix-automerge-docs` before evaluating merge gates.
+The pilot proceeds only when the dry-run conclusion is `success`. It resolves the associated PR from the dry-run workflow event or, when GitHub omits that payload link, from the completed dry-run head SHA. It then re-reads current PR state and confirms the PR still has `phoenix-automerge-docs` before evaluating merge gates.
 
 If `phoenix-automerge-docs` is absent, the workflow exits successfully without action.
 
@@ -175,7 +175,7 @@ The workflow must not log:
 
 The dry-run gate evaluates the future merge rules and never mutates repository state.
 
-The pilot no longer races the dry-run from the same pull request event. It runs only after a successful dry-run workflow completion, then re-reads current PR state and confirms the head SHA, label, mergeability, and non-dry-run checks before the final eligible squash merge.
+The pilot no longer races the dry-run from the same pull request event. It runs only after a successful dry-run workflow completion, resolves the PR from the workflow-run payload or dry-run head SHA, then re-reads current PR state and confirms the head SHA, label, mergeability, and non-dry-run checks before the final eligible squash merge.
 
 The pilot uses the same narrow gates but may perform one mutation: squash-merging an eligible docs-only PR after all required checks pass.
 
@@ -209,6 +209,8 @@ Two hardening fixes were required before the pilot completed cleanly:
 ## Sequencing Hardening
 
 PR #164 changed the pilot sequence so the human-applied label remains the trigger switch, the dry-run can re-evaluate automatically after prerequisite checks complete, and the pilot only runs after a successful dry-run for the same PR head SHA.
+
+PR #168 made the label-triggered path self-contained for already-green docs-only PRs by letting the pilot resolve the PR from the successful dry-run head SHA when the workflow-run payload does not include a PR link. The pilot still merges only after the successful dry-run, label, head SHA, mergeability, requested-review, required-check, and docs-only file gates pass.
 
 ## Future Boundary
 
