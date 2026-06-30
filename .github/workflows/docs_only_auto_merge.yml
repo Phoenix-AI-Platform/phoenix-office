@@ -8,6 +8,7 @@ on:
       - completed
 
 permissions:
+  actions: read
   checks: read
   contents: write
   pull-requests: write
@@ -84,6 +85,20 @@ jobs:
 
             if (workflowRun.conclusion !== "success") {
               core.notice(`Dry-run workflow concluded ${workflowRun.conclusion}; docs-only auto-merge pilot not requested.`);
+              return;
+            }
+
+            const dryRunJobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner,
+              repo,
+              run_id: workflowRun.id,
+              per_page: 100,
+            });
+            const eligibilityJob = dryRunJobs.find(
+              (job) => job.name === "Confirm docs-only auto-merge dry-run eligibility",
+            );
+            if (!eligibilityJob || eligibilityJob.conclusion !== "success") {
+              core.notice("Dry-run completed without confirmed eligibility; docs-only auto-merge pilot not requested.");
               return;
             }
 
