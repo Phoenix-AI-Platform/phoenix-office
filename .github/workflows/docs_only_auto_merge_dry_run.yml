@@ -28,9 +28,9 @@ jobs:
     name: Check docs-only auto-merge dry-run
     runs-on: ubuntu-latest
     outputs:
-      decision: ${{ steps.evaluate.outputs.result }}
-      eligible: ${{ steps.evaluate.outputs.result == 'eligible' }}
-      deferred: ${{ steps.evaluate.outputs.result == 'deferred' }}
+      decision: ${{ steps.evaluate.outputs.decision }}
+      eligible: ${{ steps.evaluate.outputs.eligible }}
+      deferred: ${{ steps.evaluate.outputs.deferred }}
 
     steps:
       - name: Evaluate dry-run gates
@@ -67,11 +67,16 @@ jobs:
             const repo = context.repo.repo;
 
             function finalDecision(decision, details = {}) {
+              const eligible = decision === "eligible";
+              const deferred = decision === "deferred";
               const failuresCount = details.failuresCount ?? 0;
               const pendingCheckNames = details.pendingChecks?.join(", ") || "(none)";
               const requiredCheckStates = details.requiredCheckStates?.join(" | ") || "(none)";
+              core.setOutput("decision", decision);
+              core.setOutput("eligible", String(eligible));
+              core.setOutput("deferred", String(deferred));
               core.notice(
-                `Dry-run final decision: decision=${decision}; eligible=${decision === "eligible"}; deferred=${decision === "deferred"}; failures_count=${failuresCount}; pending_checks=${pendingCheckNames}; required_check_states=${requiredCheckStates}; output_source=actions/github-script result.`,
+                `Dry-run final decision: decision=${decision}; eligible=${eligible}; deferred=${deferred}; failures_count=${failuresCount}; pending_checks=${pendingCheckNames}; required_check_states=${requiredCheckStates}; output_source=core.setOutput decision.`,
               );
               return decision;
             }
@@ -341,6 +346,20 @@ jobs:
               `Docs-only auto-merge dry-run passed for ${headSha}. This is not merge approval and no merge was performed.`,
             );
             return finalDecision("eligible", { failuresCount: failures.length, pendingChecks, requiredCheckStates });
+
+  report-dry-run-outputs:
+    name: Report docs-only auto-merge dry-run outputs
+    needs: dry_run
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report resolved dry-run outputs
+        run: |
+          echo "dry_run_result=${{ needs.dry_run.result }}"
+          echo "decision=${{ needs.dry_run.outputs.decision }}"
+          echo "eligible=${{ needs.dry_run.outputs.eligible }}"
+          echo "deferred=${{ needs.dry_run.outputs.deferred }}"
 
   confirm-eligible:
     name: Confirm docs-only auto-merge dry-run eligibility
