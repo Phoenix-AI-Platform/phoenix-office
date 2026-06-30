@@ -114,6 +114,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for the starter A-1 proposal intake JSON",
     )
     draft_json_parser.add_argument(
+        "--customer-name",
+        help="Customer name to place in a customer-specific starter draft",
+    )
+    draft_json_parser.add_argument(
+        "--street-address",
+        help="Job street address to place in a customer-specific starter draft",
+    )
+    draft_json_parser.add_argument(
+        "--city-state-zip",
+        help="Job city, state, and ZIP to place in a customer-specific starter draft",
+    )
+    draft_json_parser.add_argument(
         "--force",
         action="store_true",
         help="Overwrite an existing starter proposal draft JSON file",
@@ -600,6 +612,50 @@ def starter_a1_proposal_intake_payload() -> dict[str, Any]:
     }
 
 
+def customer_specific_a1_proposal_intake_payload(
+    *,
+    customer_name: str,
+    street_address: str,
+    city_state_zip: str,
+) -> dict[str, Any]:
+    return {
+        "company_name": "A-1 Tank Removal LLC",
+        "customer_name": customer_name,
+        "item_description": "TODO: Replace with explicit item description.",
+        "job_address": {
+            "city_state_zip": city_state_zip,
+            "street_address": street_address,
+        },
+        "pricing_lines": [
+            {
+                "amount": "1.00",
+                "description": "TODO: Replace with explicit pricing description.",
+                "is_starting_at": False,
+                "pricing_note": "TODO: Replace with explicit pricing note or remove this note.",
+            }
+        ],
+        "proposal_date": "2026-07-01",
+        "scope_notes": ["TODO: Replace with explicit scope item."],
+        "special_notes": ["TODO: Replace with explicit special note or remove this note."],
+    }
+
+
+def proposal_draft_payload_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    customer_values = [args.customer_name, args.street_address, args.city_state_zip]
+    if any(value is not None for value in customer_values):
+        if not all(value is not None for value in customer_values):
+            raise ValueError(
+                "customer-specific draft requires --customer-name, "
+                "--street-address, and --city-state-zip together"
+            )
+        return customer_specific_a1_proposal_intake_payload(
+            customer_name=args.customer_name,
+            street_address=args.street_address,
+            city_state_zip=args.city_state_zip,
+        )
+    return starter_a1_proposal_intake_payload()
+
+
 def create_proposal_draft_json(args: argparse.Namespace) -> int:
     output_path = args.output_json
 
@@ -608,7 +664,7 @@ def create_proposal_draft_json(args: argparse.Namespace) -> int:
         print("Use --force to overwrite it.", file=sys.stderr)
         return 1
     try:
-        intake = a1_proposal_intake_from_dict(starter_a1_proposal_intake_payload())
+        intake = a1_proposal_intake_from_dict(proposal_draft_payload_from_args(args))
         payload = intake.model_dump(mode="json")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
@@ -621,7 +677,6 @@ def create_proposal_draft_json(args: argparse.Namespace) -> int:
 
     print(f"Wrote proposal draft JSON: {output_path}")
     return 0
-
 
 def load_a1_proposal_intake(path: Path) -> Any:
     try:

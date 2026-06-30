@@ -86,3 +86,84 @@ def test_cli_proposal_draft_json_force_overwrites_existing_file(
     assert captured.err == ""
     assert draft_payload["customer_name"] == "Jane Customer"
     assert draft_payload["pricing_lines"][0]["amount"] == "3000.00"
+
+
+def test_cli_proposal_draft_json_accepts_customer_specific_fields(
+    tmp_path: Path, capsys
+) -> None:
+    draft_path = tmp_path / "abby_hill_intake.json"
+    normalized_path = tmp_path / "abby_hill_proposal_input.json"
+
+    exit_code = main(
+        [
+            "proposal",
+            "draft-json",
+            str(draft_path),
+            "--customer-name",
+            "Abby Hill",
+            "--street-address",
+            "W3064 Piper Rd.",
+            "--city-state-zip",
+            "Whitewater, WI 53190",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    draft_payload = json.loads(draft_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert "Wrote proposal draft JSON" in captured.out
+    assert captured.err == ""
+    assert draft_payload["customer_name"] == "Abby Hill"
+    assert draft_payload["job_address"] == {
+        "city_state_zip": "Whitewater, WI 53190",
+        "street_address": "W3064 Piper Rd.",
+    }
+    assert draft_payload["item_description"] == (
+        "TODO: Replace with explicit item description."
+    )
+    assert draft_payload["scope_notes"] == ["TODO: Replace with explicit scope item."]
+    assert draft_payload["pricing_lines"] == [
+        {
+            "amount": "1.00",
+            "description": "TODO: Replace with explicit pricing description.",
+            "is_starting_at": False,
+            "pricing_note": "TODO: Replace with explicit pricing note or remove this note.",
+        }
+    ]
+
+    normalize_exit_code = main(
+        ["proposal", "intake-normalize", str(draft_path), str(normalized_path)]
+    )
+
+    normalize_output = capsys.readouterr()
+    normalized_payload = json.loads(normalized_path.read_text(encoding="utf-8"))
+    proposal = ProposalInput.model_validate(normalized_payload)
+    assert normalize_exit_code == 0
+    assert normalize_output.err == ""
+    assert proposal.customer_name == "Abby Hill"
+    assert proposal.street_address == "W3064 Piper Rd."
+    assert proposal.city_state_zip == "Whitewater, WI 53190"
+    assert proposal.pricing.amount == 1
+
+
+def test_cli_proposal_draft_json_requires_complete_customer_specific_fields(
+    tmp_path: Path, capsys
+) -> None:
+    draft_path = tmp_path / "incomplete_customer_intake.json"
+
+    exit_code = main(
+        [
+            "proposal",
+            "draft-json",
+            str(draft_path),
+            "--customer-name",
+            "Abby Hill",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "customer-specific draft requires --customer-name" in captured.err
+    assert "--street-address, and --city-state-zip together" in captured.err
+    assert not draft_path.exists()
