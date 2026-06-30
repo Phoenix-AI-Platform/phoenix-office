@@ -59,19 +59,45 @@ jobs:
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+
+            async function resolvePullNumberFromWorkflowRun(workflowRun) {
+              const pullRequests = workflowRun.pull_requests || [];
+              if (pullRequests.length > 0) {
+                return pullRequests[0].number;
+              }
+
+              const associatedPrs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
+                owner,
+                repo,
+                commit_sha: workflowRun.head_sha,
+                per_page: 100,
+              });
+              const matchingPrs = associatedPrs.filter(
+                (candidate) => candidate.state === "open" && candidate.head.sha === workflowRun.head_sha,
+              );
+
+              if (matchingPrs.length === 1) {
+                core.notice(`Resolved PR #${matchingPrs[0].number} from workflow-run head SHA ${workflowRun.head_sha}.`);
+                return matchingPrs[0].number;
+              }
+
+              core.notice(
+                `Could not resolve exactly one open PR for workflow-run head SHA ${workflowRun.head_sha}; found ${matchingPrs.length}. Skipping.`,
+              );
+              return null;
+            }
+
             let pullNumber;
             let triggeringHeadSha;
 
             if (context.eventName === "workflow_run") {
               const workflowRun = context.payload.workflow_run;
-              const pullRequests = workflowRun.pull_requests || [];
+              pullNumber = await resolvePullNumberFromWorkflowRun(workflowRun);
 
-              if (pullRequests.length === 0) {
-                core.notice("Completed prerequisite workflow run is not associated with a pull request; skipping.");
+              if (!pullNumber) {
                 return;
               }
 
-              pullNumber = pullRequests[0].number;
               triggeringHeadSha = workflowRun.head_sha;
               core.notice(
                 `Prerequisite workflow ${workflowRun.name} completed with ${workflowRun.conclusion}; re-evaluating PR #${pullNumber} at ${triggeringHeadSha}.`,

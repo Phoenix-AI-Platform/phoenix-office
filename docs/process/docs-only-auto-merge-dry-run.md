@@ -31,7 +31,7 @@ It also re-evaluates after these prerequisite workflows complete:
 - `Pull request body guard`
 - `Docs-only autopilot eligibility`
 
-For prerequisite workflow completions, the dry-run resolves the associated PR, re-reads current PR state, confirms `phoenix-automerge-docs` is still present, and skips stale workflow runs whose head SHA no longer matches the current PR head.
+For prerequisite workflow completions, the dry-run resolves the associated PR from the workflow-run payload or, when GitHub omits that payload link, from the workflow-run head SHA. It then re-reads current PR state, confirms `phoenix-automerge-docs` is still present, and skips stale workflow runs whose head SHA no longer matches the current PR head.
 
 The workflow uses read-only permissions:
 
@@ -178,6 +178,8 @@ The first docs-only auto-merge pilot validation surfaced two dry-run gate harden
 Both fixes preserved the existing label gate and fail-closed behavior.
 
 PR #164 taught the dry-run gate to re-evaluate automatically after prerequisite workflow completions and to ignore stale prerequisite runs whose head SHA no longer matches the current PR head. This preserves the human label switch while removing the need for manual reruns after prerequisite checks finish.
+
+PR #168 made the label-triggered path self-contained for already-green docs-only PRs by ensuring workflow-run consumers can resolve the PR from the completed dry-run head SHA when GitHub does not include the PR link directly in the workflow-run payload.
 
 ## Future Boundary
 
