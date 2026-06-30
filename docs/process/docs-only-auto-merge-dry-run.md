@@ -183,9 +183,9 @@ PR #164 taught the dry-run gate to re-evaluate automatically after prerequisite 
 
 PR #168 made the label-triggered path self-contained for already-green docs-only PRs by ensuring workflow-run consumers can resolve the PR from the completed dry-run head SHA when GitHub does not include the PR link directly in the workflow-run payload.
 
-PR #172 taught the dry-run gate to defer safely while required checks are pending. Only a dry-run that reaches confirmed eligibility runs the confirmation job that can wake the pilot.
+PR #173 taught the dry-run gate to defer safely while required checks are pending. Only a dry-run that reaches confirmed eligibility runs the confirmation job that can wake the pilot.
 
-PR #175 (Issue #174) is the live docs-only validation PR after PR #172, confirming that a deferred dry-run does not run the eligibility confirmation job and the pilot correctly distinguishes a safe wait from a confirmed eligibility pass.
+PR #175 (Issue #174) is the live docs-only validation PR after PR #173, confirming that a deferred dry-run does not run the eligibility confirmation job and the pilot correctly distinguishes a safe wait from a confirmed eligibility pass.
 
 ## Future Boundary
 

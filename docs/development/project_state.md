@@ -186,7 +186,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #166 docs/process: define issue-to-Codex preparation handoff (adds `docs/process/issue-to-codex-handoff.md` documenting the manual Codex-ready prompt handoff format, operator checklist, reusable template, safety boundaries, and wrong-workspace guardrails; no automation behavior added)
 #168 ci: make docs-only auto-merge label trigger self-contained (updates docs-only dry-run and pilot workflows so successful label-triggered dry-runs can wake the pilot even when GitHub omits PR links from workflow-run payloads; human label gate and final PR re-read preserved)
 #172 ci: defer docs-only dry-run while required checks are pending (updates docs-only dry-run to defer pending required checks without claiming eligibility, adds an eligibility confirmation job for the pilot, and preserves fail-closed behavior for hard gate failures)
-#175 docs/process: validate pending-check defer behavior in docs-only auto-merge (tiny docs-only validation PR for Issue #174 after PR #172; documentation only)
+#175 docs/process: validate pending-check defer behavior in docs-only auto-merge (tiny docs-only validation PR for Issue #174 after PR #173; documentation only)
 ```
 
 ## Current Manual A-1 Proposal Workflow

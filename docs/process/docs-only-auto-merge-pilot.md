@@ -212,9 +212,9 @@ PR #164 changed the pilot sequence so the human-applied label remains the trigge
 
 PR #168 made the label-triggered path self-contained for already-green docs-only PRs by letting the pilot resolve the PR from the successful dry-run head SHA when the workflow-run payload does not include a PR link. The pilot still merges only after the successful dry-run, label, head SHA, mergeability, requested-review, required-check, and docs-only file gates pass.
 
-PR #172 made pending required checks a dry-run defer state instead of a hard failure. Deferred dry-runs do not run the eligibility confirmation job, so the pilot can distinguish a safe wait from a true eligibility pass.
+PR #173 made pending required checks a dry-run defer state instead of a hard failure. Deferred dry-runs do not run the eligibility confirmation job, so the pilot can distinguish a safe wait from a true eligibility pass.
 
-PR #175 (Issue #174) is the live docs-only validation PR after PR #172, confirming that the pilot correctly gates on the eligibility confirmation job from the dry-run and does not treat a deferred dry-run as a merge-eligible pass.
+PR #175 (Issue #174) is the live docs-only validation PR after PR #173, confirming that the pilot correctly gates on the eligibility confirmation job from the dry-run and does not treat a deferred dry-run as a merge-eligible pass.
 
 ## Future Boundary
 
