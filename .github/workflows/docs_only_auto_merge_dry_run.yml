@@ -24,7 +24,7 @@ permissions:
   statuses: read
 
 jobs:
-  dry-run:
+  dry_run:
     name: Check docs-only auto-merge dry-run
     runs-on: ubuntu-latest
     outputs:
@@ -334,8 +334,8 @@ jobs:
 
   confirm-eligible:
     name: Confirm docs-only auto-merge dry-run eligibility
-    needs: dry-run
-    if: needs.dry-run.outputs.eligible == 'true'
+    needs: dry_run
+    if: ${{ needs.dry_run.outputs.eligible == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
