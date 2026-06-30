@@ -1,358 +1,53 @@
 name: Docs-only auto-merge dry-run
-
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - labeled
-      - unlabeled
-      - ready_for_review
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   workflow_run:
-    workflows:
-      - Tests
-      - Pull request body guard
-      - Docs-only autopilot eligibility
-    types:
-      - completed
-
+    workflows: [Tests, Pull request body guard, Docs-only autopilot eligibility]
+    types: [completed]
 permissions:
   checks: read
   contents: read
   pull-requests: read
   statuses: read
-
 jobs:
   dry_run:
     name: Check docs-only auto-merge dry-run
     runs-on: ubuntu-latest
     outputs:
-      decision: ${{ steps.evaluate.outputs.decision }}
-      eligible: ${{ steps.evaluate.outputs.eligible }}
-      deferred: ${{ steps.evaluate.outputs.deferred }}
-
+      decision: ${{ steps.e.outputs.decision }}
+      eligible: ${{ steps.e.outputs.eligible }}
+      deferred: ${{ steps.e.outputs.deferred }}
     steps:
       - name: Evaluate dry-run gates
-        id: evaluate
+        id: e
         uses: actions/github-script@v7
         with:
           result-encoding: string
           script: |
-            const labelName = "phoenix-automerge-docs";
-            const requiredCheckGroups = [
-              {
-                label: "Tests",
-                aliases: ["Tests", "Test and lint"],
-              },
-              {
-                label: "Pull request body guard",
-                aliases: ["Pull request body guard", "Validate PR body sections"],
-              },
-              {
-                label: "Docs-only autopilot eligibility",
-                aliases: ["Docs-only autopilot eligibility", "Check docs-only autopilot eligibility"],
-              },
-            ];
-            const requiredBodyHeadings = [
-              "Summary",
-              "Scope",
-              "Changed files",
-              "Out-of-scope confirmation",
-              "Validation performed",
-              "Risks",
-            ];
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-
-            function finalDecision(decision, details = {}) {
-              const eligible = decision === "eligible";
-              const deferred = decision === "deferred";
-              const failuresCount = details.failuresCount ?? 0;
-              const pendingCheckNames = details.pendingChecks?.join(", ") || "(none)";
-              const requiredCheckStates = details.requiredCheckStates?.join(" | ") || "(none)";
-              core.setOutput("decision", decision);
-              core.setOutput("eligible", String(eligible));
-              core.setOutput("deferred", String(deferred));
-              core.notice(
-                `Dry-run final decision: decision=${decision}; eligible=${eligible}; deferred=${deferred}; failures_count=${failuresCount}; pending_checks=${pendingCheckNames}; required_check_states=${requiredCheckStates}; output_source=core.setOutput decision.`,
-              );
-              return decision;
-            }
-            async function resolvePullNumberFromWorkflowRun(workflowRun) {
-              const pullRequests = workflowRun.pull_requests || [];
-              if (pullRequests.length > 0) {
-                return pullRequests[0].number;
-              }
-
-              const associatedPrs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, {
-                owner,
-                repo,
-                commit_sha: workflowRun.head_sha,
-                per_page: 100,
-              });
-              const matchingPrs = associatedPrs.filter(
-                (candidate) => candidate.state === "open" && candidate.head.sha === workflowRun.head_sha,
-              );
-
-              if (matchingPrs.length === 1) {
-                core.notice(`Resolved PR #${matchingPrs[0].number} from workflow-run head SHA ${workflowRun.head_sha}.`);
-                return matchingPrs[0].number;
-              }
-
-              core.notice(
-                `Could not resolve exactly one open PR for workflow-run head SHA ${workflowRun.head_sha}; found ${matchingPrs.length}. Skipping.`,
-              );
-              return null;
-            }
-
-            let pullNumber;
-            let triggeringHeadSha;
-
-            if (context.eventName === "workflow_run") {
-              const workflowRun = context.payload.workflow_run;
-              pullNumber = await resolvePullNumberFromWorkflowRun(workflowRun);
-
-              if (!pullNumber) {
-                return finalDecision("not_applicable");
-              }
-
-              triggeringHeadSha = workflowRun.head_sha;
-              core.notice(
-                `Prerequisite workflow ${workflowRun.name} completed with ${workflowRun.conclusion}; re-evaluating PR #${pullNumber} at ${triggeringHeadSha}.`,
-              );
-            } else {
-              const eventPr = context.payload.pull_request;
-              pullNumber = eventPr.number;
-              triggeringHeadSha = eventPr.head.sha;
-            }
-
-            const currentRead = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: pullNumber,
-            });
-            const pr = currentRead.data;
-            const labels = pr.labels.map((label) => label.name);
-
-            if (!labels.includes(labelName)) {
-              core.notice(`${labelName} label absent; docs-only auto-merge dry-run not requested.`);
-              return finalDecision("not_requested");
-            }
-
-            if (context.eventName === "workflow_run" && pr.head.sha !== triggeringHeadSha) {
-              core.notice(
-                `Workflow-run head SHA ${triggeringHeadSha} is stale; current PR head is ${pr.head.sha}. Skipping without evaluating.`,
-              );
-              return finalDecision("stale");
-            }
-
-            const failures = [];
-            const pendingChecks = [];
-            const requiredCheckStates = [];
-            const headSha = pr.head.sha;
-
-            core.notice(`Dry-run only. No merge, approval, label, comment, or repository write will be attempted.`);
-            core.notice(`Evaluating PR #${pr.number} at ${headSha} targeting ${pr.base.ref}.`);
-
-            if (pr.base.ref !== "main") {
-              failures.push(`Base branch is ${pr.base.ref}, expected main.`);
-            }
-
-            if (pr.head.ref === pr.base.ref) {
-              failures.push("Head branch matches base branch.");
-            }
-
-            if (pr.draft) {
-              failures.push("PR is draft.");
-            }
-
-            if (!pr.body) {
-              failures.push("PR body is empty.");
-            } else {
-              for (const heading of requiredBodyHeadings) {
-                if (!pr.body.includes(`## ${heading}`)) {
-                  failures.push(`Missing PR body heading: ${heading}.`);
-                }
-              }
-
-              const issueReferencePattern = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+|https:\/\/github\.com\/Phoenix-AI-Platform\/phoenix-office\/issues\/\d+|Issue:\s*#\d+/i;
-              if (!issueReferencePattern.test(pr.body)) {
-                failures.push("PR body does not link to a Phoenix task issue.");
-              }
-            }
-
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner,
-              repo,
-              pull_number: pr.number,
-              per_page: 100,
-            });
-
-            const allowedMarkdownPatterns = [
-              /^docs\/process\/.+\.md$/,
-              /^docs\/development\/.+\.md$/,
-            ];
-            const deniedFiles = [];
-
-            for (const file of files) {
-              const path = file.filename;
-              const isAllowedMarkdown = allowedMarkdownPatterns.some((pattern) => pattern.test(path));
-
-              if (!isAllowedMarkdown) {
-                deniedFiles.push(path);
-              }
-            }
-
-            if (deniedFiles.length > 0) {
-              failures.push(
-                `Changed files outside docs/process/**/*.md or docs/development/**/*.md: ${deniedFiles.join(", ")}`,
-              );
-            }
-
-            const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              owner,
-              repo,
-              pull_number: pr.number,
-              per_page: 100,
-            });
-            const latestReviewByUser = new Map();
-            for (const review of reviews) {
-              if (review.user && review.state !== "COMMENTED") {
-                latestReviewByUser.set(review.user.login, review.state);
-              }
-            }
-            const requestedChanges = [...latestReviewByUser.values()].includes("CHANGES_REQUESTED");
-            if (requestedChanges) {
-              failures.push("A current review requests changes.");
-            }
-
-            const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-              owner,
-              repo,
-              ref: headSha,
-              per_page: 100,
-            });
-            const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
-              owner,
-              repo,
-              ref: headSha,
-            });
-
-            const discoveredCheckNames = [...new Set(checkRuns.map((check) => check.name))].sort();
-            const discoveredStatusContexts = [...new Set(combinedStatus.data.statuses.map((status) => status.context))].sort();
-
-            function latestByDate(items, dateSelector) {
-              return items.sort((a, b) => new Date(dateSelector(b)) - new Date(dateSelector(a)))[0];
-            }
-
-            function resolveRequiredCheckGroup(group) {
-              const candidates = [];
-
-              for (const alias of group.aliases) {
-                const latestCheck = latestByDate(
-                  checkRuns.filter((check) => check.name === alias),
-                  (check) => check.started_at || check.created_at,
-                );
-                if (latestCheck) {
-                  candidates.push({
-                    kind: "check_run",
-                    name: alias,
-                    state: `${latestCheck.status}/${latestCheck.conclusion}`,
-                    successful: latestCheck.status === "completed" && latestCheck.conclusion === "success",
-                    pending: latestCheck.status !== "completed" || latestCheck.conclusion === null,
-                  });
-                }
-
-                const latestStatus = latestByDate(
-                  combinedStatus.data.statuses.filter((status) => status.context === alias),
-                  (status) => status.created_at,
-                );
-                if (latestStatus) {
-                  candidates.push({
-                    kind: "status",
-                    name: alias,
-                    state: latestStatus.state,
-                    successful: latestStatus.state === "success",
-                    pending: latestStatus.state === "pending",
-                  });
-                }
-              }
-
-              if (candidates.some((candidate) => candidate.successful)) {
-                return { state: "success", candidates };
-              }
-
-              if (candidates.some((candidate) => !candidate.pending)) {
-                return { state: "failed", candidates };
-              }
-
-              if (candidates.some((candidate) => candidate.pending)) {
-                return { state: "pending", candidates };
-              }
-
-              core.notice(`Missing ${group.label}. Accepted aliases: ${group.aliases.join(", ")}`);
-              core.notice(`Discovered check-run names: ${discoveredCheckNames.join(", ") || "(none)"}`);
-              core.notice(`Discovered status contexts: ${discoveredStatusContexts.join(", ") || "(none)"}`);
-              return { state: "missing", candidates };
-            }
-
-            for (const group of requiredCheckGroups) {
-              const result = resolveRequiredCheckGroup(group);
-              const candidateSummary = result.candidates
-                .map((candidate) => `${candidate.kind} ${candidate.name} ${candidate.state}`)
-                .join("; ");
-              const checkStateSummary = `${group.label}: ${result.state}${candidateSummary ? ` (${candidateSummary})` : ""}`;
-              requiredCheckStates.push(checkStateSummary);
-              core.notice(checkStateSummary);
-
-              if (result.state === "failed" || result.state === "missing") {
-                failures.push(`${group.label} is ${result.state} for ${headSha}.`);
-              } else if (result.state === "pending") {
-                pendingChecks.push(group.label);
-              }
-            }
-            const mergeabilityRead = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: pr.number,
-            });
-            const currentPr = mergeabilityRead.data;
-            core.notice(`Fresh GitHub mergeability is ${currentPr.mergeable}.`);
-
-            if (currentPr.head.sha !== headSha) {
-              failures.push(`Head SHA changed from ${headSha} to ${currentPr.head.sha}.`);
-            }
-
-            if (currentPr.mergeable === false) {
-              failures.push("GitHub reports PR is not mergeable.");
-            } else if (currentPr.mergeable === null) {
-              failures.push("GitHub mergeability is unknown after re-reading PR state.");
-            }
-            if (failures.length > 0) {
-              core.setFailed(`Docs-only auto-merge dry-run failed closed: ${failures.join(" ")}`);
-              return finalDecision("failed", { failuresCount: failures.length, pendingChecks, requiredCheckStates });
-            }
-
-            if (pendingChecks.length > 0) {
-              core.notice(
-                `Docs-only auto-merge dry-run deferred: required checks are still pending for ${headSha}: ${pendingChecks.join(", ")}.`,
-              );
-              return finalDecision("deferred", { failuresCount: failures.length, pendingChecks, requiredCheckStates });
-            }
-
-            core.notice(
-              `Docs-only auto-merge dry-run passed for ${headSha}. This is not merge approval and no merge was performed.`,
-            );
-            return finalDecision("eligible", { failuresCount: failures.length, pendingChecks, requiredCheckStates });
-
+            const O=context.repo.owner,R=context.repo.repo,L="phoenix-automerge-docs";
+            const G=[{l:"Tests",a:["Tests","Test and lint"]},{l:"Pull request body guard",a:["Pull request body guard","Validate PR body sections"]},{l:"Docs-only autopilot eligibility",a:["Docs-only autopilot eligibility","Check docs-only autopilot eligibility"]}];
+            const H=["Summary","Scope","Changed files","Out-of-scope confirmation","Validation performed","Risks"];
+            const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+            const latest=(xs,f)=>xs.sort((a,b)=>new Date(f(b))-new Date(f(a)))[0];
+            function done(d,x={}){const e=d==="eligible",q=d==="deferred",p=x.p||[],s=x.s||[];core.setOutput("decision",d);core.setOutput("eligible",String(e));core.setOutput("deferred",String(q));core.notice(`decision=${d}; eligible=${e}; deferred=${q}; failures=${x.f||0}; pending=${p.join(", ")||"(none)"}; states=${s.join(" | ")||"(none)"}`);return d;}
+            async function pr(n){return (await github.rest.pulls.get({owner:O,repo:R,pull_number:n})).data;}
+            async function prFromRun(w){if(w.pull_requests?.length)return w.pull_requests[0].number;const ps=await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit,{owner:O,repo:R,commit_sha:w.head_sha,per_page:100});const m=ps.filter(p=>p.state==="open"&&p.head.sha===w.head_sha);return m.length===1?m[0].number:null;}
+            async function checks(sha,tag){const cr=await github.paginate(github.rest.checks.listForRef,{owner:O,repo:R,ref:sha,per_page:100});const cs=(await github.rest.repos.getCombinedStatusForRef({owner:O,repo:R,ref:sha})).data.statuses;const f=[],p=[],s=[];for(const g of G){const c=[];for(const a of g.a){const k=latest(cr.filter(r=>r.name===a),r=>r.started_at||r.created_at);if(k)c.push({t:"check",n:a,st:`${k.status}/${k.conclusion}`,ok:k.status==="completed"&&k.conclusion==="success",wait:k.status!=="completed"||k.conclusion===null});const v=latest(cs.filter(r=>r.context===a),r=>r.created_at);if(v)c.push({t:"status",n:a,st:v.state,ok:v.state==="success",wait:v.state==="pending"});}let z="missing";if(c.some(x=>x.ok))z="success";else if(c.some(x=>!x.wait))z="failed";else if(c.some(x=>x.wait))z="pending";const line=`[${tag}] ${g.l}: ${z}${c.length?` (${c.map(x=>`${x.t} ${x.n} ${x.st}`).join("; ")})`:""}`;core.notice(line);s.push(line);if(z==="pending")p.push(g.l);if(z==="failed"||z==="missing")f.push(`${g.l} is ${z}.`);}return{f,p,s};}
+            async function mergeable(n,sha,tag){const x=await pr(n),f=[];core.notice(`[${tag}] mergeable=${x.mergeable}`);if(x.head.sha!==sha)f.push(`Head SHA changed from ${sha} to ${x.head.sha}.`);if(x.mergeable===false)f.push("GitHub reports PR is not mergeable.");if(x.mergeable===null)f.push("GitHub mergeability is unknown.");return f;}
+            let n,trigger;if(context.eventName==="workflow_run"){const w=context.payload.workflow_run;n=await prFromRun(w);if(!n)return done("not_applicable");trigger=w.head_sha;}else{n=context.payload.pull_request.number;trigger=context.payload.pull_request.head.sha;}
+            const P=await pr(n),sha=P.head.sha;if(!P.labels.map(x=>x.name).includes(L))return done("not_requested");if(context.eventName==="workflow_run"&&sha!==trigger)return done("stale");
+            const sf=[];if(P.base.ref!=="main")sf.push(`Base branch is ${P.base.ref}, expected main.`);if(P.head.ref===P.base.ref)sf.push("Head branch matches base branch.");if(P.draft)sf.push("PR is draft.");if(!P.body)sf.push("PR body is empty.");else{for(const h of H)if(!P.body.includes(`## ${h}`))sf.push(`Missing PR body heading: ${h}.`);if(!/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+|https:\/\/github\.com\/Phoenix-AI-Platform\/phoenix-office\/issues\/\d+|Issue:\s*#\d+/i.test(P.body))sf.push("PR body does not link to a Phoenix task issue.");}
+            const files=await github.paginate(github.rest.pulls.listFiles,{owner:O,repo:R,pull_number:n,per_page:100});const bad=files.map(x=>x.filename).filter(x=>![/^docs\/process\/.+\.md$/,/^docs\/development\/.+\.md$/].some(r=>r.test(x)));if(bad.length)sf.push(`Changed files outside docs/process/**/*.md or docs/development/**/*.md: ${bad.join(", ")}`);
+            const rev=await github.paginate(github.rest.pulls.listReviews,{owner:O,repo:R,pull_number:n,per_page:100});const m=new Map();for(const r of rev)if(r.user&&r.state!=="COMMENTED")m.set(r.user.login,r.state);if([...m.values()].includes("CHANGES_REQUESTED"))sf.push("A current review requests changes.");
+            let c=await checks(sha,"initial"),f=[...sf,...c.f,...await mergeable(n,sha,"initial")];if(f.length){core.setFailed(f.join(" "));return done("failed",{f:f.length,p:c.p,s:c.s});}
+            for(let i=1;i<=4&&c.p.length;i++){core.notice(`settling attempt ${i}/4 for ${c.p.join(", ")}`);await sleep(15000);c=await checks(sha,`settle ${i}`);f=[...sf,...c.f,...await mergeable(n,sha,`settle ${i}`)];if(f.length){core.setFailed(f.join(" "));return done("failed",{f:f.length,p:c.p,s:c.s});}}
+            return c.p.length?done("deferred",{p:c.p,s:c.s}):done("eligible",{p:[],s:c.s});
   report-dry-run-outputs:
     name: Report docs-only auto-merge dry-run outputs
     needs: dry_run
     if: ${{ always() }}
     runs-on: ubuntu-latest
-
     steps:
       - name: Report resolved dry-run outputs
         run: |
@@ -360,13 +55,11 @@ jobs:
           echo "decision=${{ needs.dry_run.outputs.decision }}"
           echo "eligible=${{ needs.dry_run.outputs.eligible }}"
           echo "deferred=${{ needs.dry_run.outputs.deferred }}"
-
   confirm-eligible:
     name: Confirm docs-only auto-merge dry-run eligibility
     needs: dry_run
     if: ${{ needs.dry_run.outputs.decision == 'eligible' }}
     runs-on: ubuntu-latest
-
     steps:
       - name: Confirm eligible dry-run
         run: echo "Docs-only auto-merge dry-run eligibility was confirmed."
