@@ -16,14 +16,9 @@ The workflow is:
 .github/workflows/docs_only_auto_merge.yml
 ```
 
-It runs on pull request events including:
+It runs after the `Docs-only auto-merge dry-run` workflow completes.
 
-- opened
-- synchronize
-- reopened
-- labeled
-- unlabeled
-- ready_for_review
+The pilot proceeds only when the dry-run conclusion is `success`. It resolves the associated PR from the dry-run workflow event, re-reads current PR state, and confirms the PR still has `phoenix-automerge-docs` before evaluating merge gates.
 
 If `phoenix-automerge-docs` is absent, the workflow exits successfully without action.
 
@@ -61,25 +56,25 @@ The pilot only considers PRs that satisfy all of these conditions:
 
 ## Required Checks
 
-The pilot requires these checks to pass before merging:
+The pilot is triggered only by a successful `Docs-only auto-merge dry-run` workflow for the same PR head SHA.
+
+It then requires these non-dry-run checks to pass before merging:
 
 - `Tests`
 - `Pull request body guard`
 - `Docs-only autopilot eligibility`
-- `Docs-only auto-merge dry-run`
 
 Each required check may be satisfied by either the workflow display name or the current GitHub check-run/job name:
 
 - `Tests` or `Test and lint`
 - `Pull request body guard` or `Validate PR body sections`
 - `Docs-only autopilot eligibility` or `Check docs-only autopilot eligibility`
-- `Docs-only auto-merge dry-run` or `Check docs-only auto-merge dry-run`
 
 If a required check group is missing, the workflow logs the discovered check-run names and status contexts for debugging.
 
 This alias matching does not weaken the gate. The pilot still defers safely when required groups are missing or pending, and fails closed when a matched required check fails.
 
-Pending or missing checks defer the merge without failing the workflow.
+Pending or missing non-dry-run checks defer the merge without failing the workflow.
 
 Failed required checks fail closed and do not merge.
 
@@ -127,8 +122,9 @@ The workflow must not:
 
 The workflow defers without merging when:
 
+- the dry-run workflow did not conclude successfully
 - `phoenix-automerge-docs` is absent
-- required checks are pending or missing
+- required non-dry-run checks are pending or missing
 - GitHub mergeability is unknown
 - the label is removed before merge
 - GitHub no longer reports the PR as mergeable immediately before merge
@@ -179,6 +175,8 @@ The workflow must not log:
 
 The dry-run gate evaluates the future merge rules and never mutates repository state.
 
+The pilot no longer races the dry-run from the same pull request event. It runs only after a successful dry-run workflow completion, then re-reads current PR state and confirms the head SHA, label, mergeability, and non-dry-run checks before the final eligible squash merge.
+
 The pilot uses the same narrow gates but may perform one mutation: squash-merging an eligible docs-only PR after all required checks pass.
 
 ## Rollback And Revert
@@ -207,6 +205,10 @@ Two hardening fixes were required before the pilot completed cleanly:
 
 - PR #158 fixed required-check detection by accepting actual GitHub check-run/job-name aliases instead of matching only workflow display names.
 - PR #159 fixed stale webhook mergeability by re-reading current PR state before evaluating mergeability.
+
+## Sequencing Hardening
+
+PR #164 changed the pilot sequence so the human-applied label remains the trigger switch, the dry-run can re-evaluate automatically after prerequisite checks complete, and the pilot only runs after a successful dry-run for the same PR head SHA.
 
 ## Future Boundary
 

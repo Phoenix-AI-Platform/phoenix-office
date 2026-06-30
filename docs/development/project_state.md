@@ -179,6 +179,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #158 ci: fix docs-only auto-merge required check detection (updates docs-only dry-run and pilot workflows to resolve required checks by accepted workflow/check-run aliases while preserving fail-closed and defer behavior; docs updated for alias diagnostics)
 #159 ci: re-read PR mergeability in docs-only auto-merge gates (updates docs-only dry-run and pilot workflows to avoid stale webhook mergeability values by using freshly re-read PR state while preserving fail-closed/defer behavior)
 #161 docs/process: capture docs-only auto-merge pilot results (records PR #156 as the first successful human-controlled docs-only auto-merge pilot and captures hardening lessons from PRs #158 and #159; documentation only)
+#164 ci: sequence docs-only auto-merge pilot after dry-run success (updates docs-only dry-run and pilot workflows so dry-run re-evaluates after prerequisite workflow completions and the pilot runs only after successful dry-run for the same PR head SHA; label gate and final PR re-read preserved)
 ```
 
 ## Current Manual A-1 Proposal Workflow

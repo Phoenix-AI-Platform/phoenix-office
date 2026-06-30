@@ -9,6 +9,13 @@ on:
       - labeled
       - unlabeled
       - ready_for_review
+  workflow_run:
+    workflows:
+      - Tests
+      - Pull request body guard
+      - Docs-only autopilot eligibility
+    types:
+      - completed
 
 permissions:
   checks: read
@@ -50,11 +57,48 @@ jobs:
               "Risks",
             ];
 
-            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            let pullNumber;
+            let triggeringHeadSha;
+
+            if (context.eventName === "workflow_run") {
+              const workflowRun = context.payload.workflow_run;
+              const pullRequests = workflowRun.pull_requests || [];
+
+              if (pullRequests.length === 0) {
+                core.notice("Completed prerequisite workflow run is not associated with a pull request; skipping.");
+                return;
+              }
+
+              pullNumber = pullRequests[0].number;
+              triggeringHeadSha = workflowRun.head_sha;
+              core.notice(
+                `Prerequisite workflow ${workflowRun.name} completed with ${workflowRun.conclusion}; re-evaluating PR #${pullNumber} at ${triggeringHeadSha}.`,
+              );
+            } else {
+              const eventPr = context.payload.pull_request;
+              pullNumber = eventPr.number;
+              triggeringHeadSha = eventPr.head.sha;
+            }
+
+            const currentRead = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pullNumber,
+            });
+            const pr = currentRead.data;
             const labels = pr.labels.map((label) => label.name);
 
             if (!labels.includes(labelName)) {
               core.notice(`${labelName} label absent; docs-only auto-merge dry-run not requested.`);
+              return;
+            }
+
+            if (context.eventName === "workflow_run" && pr.head.sha !== triggeringHeadSha) {
+              core.notice(
+                `Workflow-run head SHA ${triggeringHeadSha} is stale; current PR head is ${pr.head.sha}. Skipping without evaluating.`,
+              );
               return;
             }
 
@@ -92,8 +136,8 @@ jobs:
             }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               pull_number: pr.number,
               per_page: 100,
             });
@@ -120,8 +164,8 @@ jobs:
             }
 
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               pull_number: pr.number,
               per_page: 100,
             });
@@ -137,14 +181,14 @@ jobs:
             }
 
             const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               ref: headSha,
               per_page: 100,
             });
             const combinedStatus = await github.rest.repos.getCombinedStatusForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               ref: headSha,
             });
 
@@ -218,8 +262,8 @@ jobs:
               }
             }
             const mergeabilityRead = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner,
+              repo,
               pull_number: pr.number,
             });
             const currentPr = mergeabilityRead.data;
