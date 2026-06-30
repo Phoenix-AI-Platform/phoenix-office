@@ -25,6 +25,14 @@ It runs on pull request events including:
 - unlabeled
 - ready_for_review
 
+It also re-evaluates after these prerequisite workflows complete:
+
+- `Tests`
+- `Pull request body guard`
+- `Docs-only autopilot eligibility`
+
+For prerequisite workflow completions, the dry-run resolves the associated PR, re-reads current PR state, confirms `phoenix-automerge-docs` is still present, and skips stale workflow runs whose head SHA no longer matches the current PR head.
+
 The workflow uses read-only permissions:
 
 ```yaml
@@ -42,7 +50,7 @@ The label `phoenix-automerge-docs` requests the dry-run evaluation.
 
 If the label is absent, the workflow exits successfully with a not-requested message.
 
-If the label is present, the workflow fails closed unless every dry-run gate passes.
+If the label is present, the workflow fails closed unless every dry-run gate passes. Completed prerequisite workflow events let the dry-run re-evaluate automatically after required checks become available, so a candidate PR does not require a manual rerun after checks turn green.
 
 The label is not merge approval. Passing the dry-run gate is not merge approval.
 
@@ -168,6 +176,8 @@ The first docs-only auto-merge pilot validation surfaced two dry-run gate harden
 - PR #159 taught the dry-run gate to re-read current PR state before evaluating mergeability, avoiding stale webhook payload values.
 
 Both fixes preserved the existing label gate and fail-closed behavior.
+
+PR #164 taught the dry-run gate to re-evaluate automatically after prerequisite workflow completions and to ignore stale prerequisite runs whose head SHA no longer matches the current PR head. This preserves the human label switch while removing the need for manual reruns after prerequisite checks finish.
 
 ## Future Boundary
 
