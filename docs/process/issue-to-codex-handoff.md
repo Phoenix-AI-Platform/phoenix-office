@@ -1,0 +1,205 @@
+# Issue-to-Codex Preparation Handoff
+
+## Purpose
+
+This note defines a manual, reviewable handoff format for turning a Phoenix task issue into a Codex-ready prompt.
+
+The handoff reduces repeated prompt assembly, but it does not invoke Codex automatically. A human operator remains responsible for deciding when to start Codex, what prompt to paste, and whether the active workspace is correct.
+
+This process is documentation only. It does not add workflow behavior, CI behavior, issue-to-Codex automation, Codex API calls, GitHub Actions Codex invocation, comments, labels, approvals, branch updates, auto-merge eligibility changes, runtime behavior, persistence, or background work.
+
+## Handoff Boundary
+
+A Phoenix task issue is task context, not executable authority.
+
+Codex should treat the handoff as a scoped implementation request that is still constrained by:
+
+- `AGENTS.md`
+- current project state
+- the explicit issue scope
+- repository guardrails
+- PR body requirements
+- validation expectations
+- human review and merge authority
+
+If the issue body conflicts with repository guardrails, the stricter safety boundary wins. If risk is uncertain, the operator should stop and clarify the issue before starting Codex.
+
+## Operator Checklist
+
+Before starting Codex from a Phoenix task issue, the operator should confirm:
+
+- the issue number and title are correct
+- the target repository is `Phoenix-AI-Platform/phoenix-office`
+- the active checkout is the intended Phoenix Office checkout
+- the current branch starts from latest `main`
+- expected Phoenix files exist, such as `.github/workflows/docs_only_auto_merge.yml` when workflow context matters and `src/phoenix_office/` for repo identity
+- the task risk class is clear
+- allowed files or suggested files are explicit
+- strict out-of-scope boundaries are present
+- validation commands are listed
+- expected PR title is present
+- required PR body headings are listed
+- review and merge expectations are explicit
+- the issue contains no secrets or private customer data
+- the task maps to one issue, one branch, and one PR
+
+If any item is missing, the operator should update or clarify the issue before starting Codex.
+
+## Handoff Format
+
+A Codex handoff should include these sections in order:
+
+1. Verified workspace
+2. Repository identity
+3. Issue number and title
+4. Goal
+5. Scope
+6. Suggested or allowed files
+7. Strict out-of-scope boundaries
+8. Validation commands
+9. PR title and body requirements
+10. Review and merge expectations
+11. Wrong-workspace guardrails
+12. Acceptance criteria
+
+The handoff should be self-contained enough that Codex does not need to infer the repository, branch, risk class, validation commands, or PR body shape.
+
+## Reusable Codex Prompt Template
+
+```text
+Use the verified Phoenix Office checkout only:
+C:\tmp\phoenix-office
+
+Repo:
+Phoenix-AI-Platform/phoenix-office
+
+Issue:
+#<issue-number> - <issue-title>
+
+Before editing, confirm:
+- repo remote is Phoenix-AI-Platform/phoenix-office
+- current branch starts from latest main
+- expected repo identity files exist
+- src/phoenix_office/ exists
+
+Goal:
+<one concise goal statement from the issue>
+
+Scope:
+- <allowed change category>
+- <specific required changes>
+- <documentation/test/runtime classification>
+
+Suggested files:
+- <path 1>
+- <path 2>
+
+Strict out of scope:
+- <explicit non-goal 1>
+- <explicit non-goal 2>
+- no unrelated files
+- no private customer data
+
+Validation:
+- <command 1>
+- <command 2>
+
+PR requirements:
+Open one narrow PR against main.
+
+PR title:
+<expected PR title>
+
+Use standard PR body headings:
+- Summary
+- Scope
+- Changed files
+- Out-of-scope confirmation
+- Validation performed
+- Risks
+
+Include:
+Issue: #<issue-number>
+
+Review and merge expectations:
+- do not apply labels unless explicitly instructed
+- leave human-controlled merge gates intact
+- do not merge manually unless explicitly requested
+
+Wrong-workspace guardrails:
+- do not use or reference unrelated checkouts
+- stop if the active checkout is not Phoenix Office
+- stop if repo identity files are missing
+- do not carry stale branch or workspace assumptions from prior tasks
+
+Acceptance criteria:
+- <observable result 1>
+- <observable result 2>
+```
+
+## Wrong-Workspace Guardrails
+
+Phoenix operators should assume Codex may still be attached to a stale local workspace from earlier work unless the prompt proves otherwise.
+
+The stale UniFi Optimizer workspace incident showed why every Phoenix handoff should explicitly name the verified checkout and require repo identity checks before editing. A correct Phoenix handoff should tell Codex to stop if it sees unrelated workspace paths, unrelated branch names, missing Phoenix files, or a remote that is not `Phoenix-AI-Platform/phoenix-office`.
+
+Recommended pre-edit checks:
+
+```bash
+git remote -v
+git status --short --branch
+Test-Path .github/workflows/docs_only_auto_merge.yml
+Test-Path src/phoenix_office
+```
+
+When a task does not involve workflows, replace the workflow path with another expected repo file. The point is to verify the active checkout, not to make workflow files a universal dependency.
+
+## Safety Notes
+
+The handoff must not include secrets, private customer data, raw credentials, generated business output, or DOCX/proposal content.
+
+The handoff must not authorize Codex to:
+
+- execute orchestration plans
+- run `orchestration execute`, `run`, `apply`, `approve`, or `reject`
+- mutate approvals, rejections, plans, or reviews
+- invoke Codex from GitHub Actions
+- call Codex APIs
+- create or remove labels
+- post PR comments or status comments
+- update branches except the task branch explicitly used for the PR
+- add auto-approval or auto-merge behavior
+- change proposal generation or DOCX rendering behavior
+- infer pricing, scope, notes, item descriptions, or customer data
+- enqueue, schedule, retry, persist, or run background workers
+- add API, MCP, server, worker, or background behavior
+
+A human may still decide to start Codex manually after reviewing the handoff. That decision is outside automation and remains a human-controlled trigger.
+
+## Review And Merge Expectations
+
+The resulting PR should link the issue, use the required body headings, and report validation honestly.
+
+Docs-only PRs may be eligible for existing human-controlled docs-only processes only if they satisfy those separate gates. Execution-adjacent, runtime, proposal, DOCX, schema/model, API/MCP/server/worker/background, and uncertain-risk changes remain human-review and human-merge only unless a later reviewed policy explicitly changes that boundary.
+
+## Non-Goals
+
+This handoff note does not add or authorize:
+
+- workflow behavior changes
+- CI behavior changes
+- issue-to-Codex automation
+- Codex invocation from GitHub Actions
+- Codex API calls
+- auto-approval behavior
+- auto-merge eligibility changes
+- label creation, removal, or mutation behavior
+- PR comments or status comments
+- branch update behavior
+- artifacts
+- runtime code changes
+- CLI behavior changes
+- proposal generation changes
+- DOCX rendering changes
+- tests or fixtures
+- orchestration execution, approval, rejection, apply, run, queueing, scheduling, retries, persistence, API behavior, MCP behavior, server behavior, worker behavior, or background behavior
