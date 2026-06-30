@@ -212,6 +212,8 @@ PR #164 changed the pilot sequence so the human-applied label remains the trigge
 
 PR #168 made the label-triggered path self-contained for already-green docs-only PRs by letting the pilot resolve the PR from the successful dry-run head SHA when the workflow-run payload does not include a PR link. The pilot still merges only after the successful dry-run, label, head SHA, mergeability, requested-review, required-check, and docs-only file gates pass.
 
+PR #170 is the first intentionally tiny docs-only validation of that self-contained label path. Reviewers should leave the PR unlabeled until normal review is complete, then apply `phoenix-automerge-docs` once and confirm the dry-run wakes the pilot without a manual rerun.
+
 ## Future Boundary
 
 Future expansion requires a separate reviewed PR.
