@@ -50,7 +50,7 @@ The label `phoenix-automerge-docs` requests the dry-run evaluation.
 
 If the label is absent, the workflow exits successfully with a not-requested message.
 
-If the label is present, the workflow fails closed unless every dry-run gate passes. Completed prerequisite workflow events let the dry-run re-evaluate automatically after required checks become available, so a candidate PR does not require a manual rerun after checks turn green.
+If the label is present, the workflow fails closed for hard gate failures. If required checks are still pending, the workflow defers with a clear notice and exits without claiming the dry-run passed. Completed prerequisite workflow events let the dry-run re-evaluate automatically after required checks become available, so a candidate PR does not require a manual rerun after checks turn green.
 
 The label is not merge approval. Passing the dry-run gate is not merge approval.
 
@@ -83,7 +83,7 @@ Each required check may be satisfied by either the workflow display name or the 
 
 If a required check group is missing, the workflow logs the discovered check-run names and status contexts for debugging.
 
-This alias matching does not weaken the gate. The dry-run workflow still fails closed when labeled and a required check group is missing, pending, stale, or failing.
+This alias matching does not weaken the gate. The dry-run workflow still fails closed when labeled and a required check group is missing, stale, or failing. Pending required checks defer safely so later prerequisite workflow completions can re-evaluate the same PR head.
 
 ## Required PR Body Headings
 
@@ -118,9 +118,11 @@ The workflow fails closed if:
 - the PR body does not link to a Phoenix task issue
 - changed files leave the docs-only Markdown boundary
 - a current review requests changes
-- required checks are missing, pending, stale, or failing
+- required checks are missing, stale, or failing
 - mergeability is false or unknown
 - GitHub API reads fail
+
+The workflow defers without failing if required checks are pending. A deferred dry-run does not print the normal passed message and does not confirm eligibility for the pilot.
 
 ## Logging
 
@@ -180,6 +182,8 @@ Both fixes preserved the existing label gate and fail-closed behavior.
 PR #164 taught the dry-run gate to re-evaluate automatically after prerequisite workflow completions and to ignore stale prerequisite runs whose head SHA no longer matches the current PR head. This preserves the human label switch while removing the need for manual reruns after prerequisite checks finish.
 
 PR #168 made the label-triggered path self-contained for already-green docs-only PRs by ensuring workflow-run consumers can resolve the PR from the completed dry-run head SHA when GitHub does not include the PR link directly in the workflow-run payload.
+
+PR #172 taught the dry-run gate to defer safely while required checks are pending. Only a dry-run that reaches confirmed eligibility runs the confirmation job that can wake the pilot.
 
 ## Future Boundary
 
