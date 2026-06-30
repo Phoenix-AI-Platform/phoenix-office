@@ -16,6 +16,8 @@ For Phoenix task issue classification guidance, see [Phoenix task labels](../pro
 
 For the issue-to-Codex trigger evaluation, see [issue-to-Codex trigger evaluation](../process/issue-to-codex-trigger-evaluation.md).
 
+For the issue-to-Codex preparation handoff, see [issue-to-Codex handoff](../process/issue-to-codex-handoff.md).
+
 For docs-only autopilot eligibility guidance, see [docs-only autopilot eligibility](../process/docs-only-autopilot-eligibility.md).
 
 For the docs-only auto-merge implementation plan, see [docs-only auto-merge implementation plan](../process/docs-only-auto-merge-implementation-plan.md).
@@ -181,6 +183,7 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #161 docs/process: capture docs-only auto-merge pilot results (records PR #156 as the first successful human-controlled docs-only auto-merge pilot and captures hardening lessons from PRs #158 and #159; documentation only)
 #163 docs/process: define next autopilot expansion boundary (adds `docs/process/phoenix-autopilot-next-boundary.md` comparing next expansion options and recommending issue-to-Codex preparation handoff without automatic Codex invocation; documentation only)
 #164 ci: sequence docs-only auto-merge pilot after dry-run success (updates docs-only dry-run and pilot workflows so dry-run re-evaluates after prerequisite workflow completions and the pilot runs only after successful dry-run for the same PR head SHA; label gate and final PR re-read preserved)
+#166 docs/process: define issue-to-Codex preparation handoff (adds `docs/process/issue-to-codex-handoff.md` documenting the manual Codex-ready prompt handoff format, operator checklist, reusable template, safety boundaries, and wrong-workspace guardrails; no automation behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -243,6 +246,7 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - a Phoenix autopilot loop process direction
 - Phoenix task issue classification guidance
 - an issue-to-Codex trigger evaluation
+- an issue-to-Codex preparation handoff
 - docs-only autopilot eligibility guidance
 - a docs-only auto-merge implementation plan
 - a docs-only auto-merge dry-run gate
