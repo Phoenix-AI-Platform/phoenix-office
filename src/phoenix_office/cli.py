@@ -104,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output normalized proposal input as JSON",
     )
     inspect_proposal_parser.set_defaults(func=inspect_proposal)
+    draft_json_parser = proposal_subparsers.add_parser(
+        "draft-json",
+        help="Create an editable starter A-1 proposal intake JSON file",
+    )
+    draft_json_parser.add_argument(
+        "output_json",
+        type=Path,
+        help="Path for the starter A-1 proposal intake JSON",
+    )
+    draft_json_parser.set_defaults(func=create_proposal_draft_json)
 
     intake_normalize_parser = proposal_subparsers.add_parser(
         "intake-normalize",
@@ -554,6 +564,54 @@ def load_proposal(path: Path) -> ProposalInput:
     except ValidationError as exc:
         raise ValueError(f"Invalid proposal input in {path}: {exc}") from exc
 
+
+
+
+def starter_a1_proposal_intake_payload() -> dict[str, Any]:
+    return {
+        "company_name": "A-1 Tank Removal LLC",
+        "customer_name": "Jane Customer",
+        "item_description": "Removal of 1,000 Gallon Aboveground Storage Tank",
+        "job_address": {
+            "city_state_zip": "Milwaukee, WI 53202",
+            "street_address": "123 Main St.",
+        },
+        "pricing_lines": [
+            {
+                "amount": "3000.00",
+                "description": "Residential tank removal",
+                "is_starting_at": True,
+                "pricing_note": "Price is based on normal tank removal.",
+            }
+        ],
+        "proposal_date": "2026-07-01",
+        "scope_notes": [
+            "Pump contents of tank (contents unknown)",
+            "Open and clean tank",
+            "Remove 1,000 gallon AST",
+            "Remove and dispose of tank and residual contents",
+        ],
+        "special_notes": ["Customer is responsible for access to the tank area."],
+    }
+
+
+def create_proposal_draft_json(args: argparse.Namespace) -> int:
+    output_path = args.output_json
+
+    try:
+        intake = a1_proposal_intake_from_dict(starter_a1_proposal_intake_payload())
+        payload = intake.model_dump(mode="json")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to write proposal draft JSON: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote proposal draft JSON: {output_path}")
+    return 0
 
 
 def load_a1_proposal_intake(path: Path) -> Any:
