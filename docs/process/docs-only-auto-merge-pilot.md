@@ -214,7 +214,9 @@ PR #168 made the label-triggered path self-contained for already-green docs-only
 
 PR #172 made pending required checks a dry-run defer state instead of a hard failure. Deferred dry-runs do not run the eligibility confirmation job, so the pilot can distinguish a safe wait from a true eligibility pass.
 
-PR #173 recorded the pending-check defer and eligibility confirmation sequencing in the live pilot path, validating that the pilot correctly gates on the eligibility confirmation job from the dry-run.
+PR #173 was the workflow fix for pending-check defer and eligibility confirmation sequencing after PR #172.
+
+PR #175 (Issue #174) is the live docs-only validation PR after PR #173, validating that the pilot correctly gates on the eligibility confirmation job from the dry-run.
 
 ## Future Boundary
 
