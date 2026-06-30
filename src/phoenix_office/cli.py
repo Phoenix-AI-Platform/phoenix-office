@@ -113,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path for the starter A-1 proposal intake JSON",
     )
+    draft_json_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing starter proposal draft JSON file",
+    )
     draft_json_parser.set_defaults(func=create_proposal_draft_json)
 
     intake_normalize_parser = proposal_subparsers.add_parser(
@@ -598,6 +603,10 @@ def starter_a1_proposal_intake_payload() -> dict[str, Any]:
 def create_proposal_draft_json(args: argparse.Namespace) -> int:
     output_path = args.output_json
 
+    if output_path.exists() and not args.force:
+        print(f"Error: proposal draft JSON already exists: {output_path}", file=sys.stderr)
+        print("Use --force to overwrite it.", file=sys.stderr)
+        return 1
     try:
         intake = a1_proposal_intake_from_dict(starter_a1_proposal_intake_payload())
         payload = intake.model_dump(mode="json")
