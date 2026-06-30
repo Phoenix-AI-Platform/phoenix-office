@@ -20,6 +20,7 @@ from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.orchestration import WorkflowPlan, WorkflowPlanReview
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
+from phoenix_office.proposal_intake_normalization import a1_proposal_intake_from_dict
 from phoenix_office.records import (
     create_proposal_input_from_record_details,
     create_sqlite_record_store,
@@ -103,6 +104,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output normalized proposal input as JSON",
     )
     inspect_proposal_parser.set_defaults(func=inspect_proposal)
+
+    intake_normalize_parser = proposal_subparsers.add_parser(
+        "intake-normalize",
+        help="Normalize an explicit A-1 intake JSON file into ProposalInput JSON",
+    )
+    intake_normalize_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to A-1 proposal intake JSON input",
+    )
+    intake_normalize_parser.add_argument(
+        "output_json",
+        type=Path,
+        help="Path for normalized ProposalInput JSON output",
+    )
+    intake_normalize_parser.set_defaults(func=normalize_proposal_intake)
 
     intake_parser = proposal_subparsers.add_parser(
         "intake",
@@ -616,6 +633,49 @@ def inspect_proposal(args: argparse.Namespace) -> int:
         print(json.dumps(proposal.model_dump(mode="json"), indent=2, sort_keys=True))
     else:
         _print_proposal_summary(proposal)
+    return 0
+
+
+def normalize_proposal_intake(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+    output_path = args.output_json
+
+    if not input_path.exists():
+        print(
+            f"Error: intake JSON input file does not exist: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not input_path.is_file():
+        print(
+            f"Error: intake JSON input path is not a file: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        with input_path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+        if not isinstance(data, dict):
+            raise ValueError(f"A-1 proposal intake JSON must be an object: {input_path}")
+        intake = a1_proposal_intake_from_dict(data)
+        proposal = intake.to_proposal_input()
+        _write_proposal_input_json(proposal, output_path)
+    except json.JSONDecodeError as exc:
+        print(
+            f"Error: invalid A-1 proposal intake JSON: Invalid JSON in "
+            f"{input_path}: {exc.msg}",
+            file=sys.stderr,
+        )
+        return 1
+    except (ValueError, ValidationError) as exc:
+        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to normalize proposal intake: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Normalized proposal intake JSON: {output_path}")
     return 0
 
 
