@@ -1,0 +1,27 @@
+{
+  "company_name": "A-1 Tank Removal LLC",
+  "customer_name": "Jane Customer",
+  "item_description": "Removal of 1,000 Gallon Aboveground Storage Tank",
+  "job_address": {
+    "city_state_zip": "Milwaukee, WI 53202",
+    "street_address": "123 Main St."
+  },
+  "pricing_lines": [
+    {
+      "amount": "3000.00",
+      "description": "Residential tank removal",
+      "is_starting_at": true,
+      "pricing_note": "Price is based on normal pumping, cleaning, and removal of the tank. Additional charges may apply if hazardous materials are encountered."
+    }
+  ],
+  "proposal_date": "2026-07-01",
+  "scope_notes": [
+    "Pump contents of tank (contents unknown)",
+    "Open and clean tank",
+    "Remove 1,000 gallon AST",
+    "Remove and dispose of tank and residual contents"
+  ],
+  "special_notes": [
+    "Customer is responsible for access to the tank area."
+  ]
+}
