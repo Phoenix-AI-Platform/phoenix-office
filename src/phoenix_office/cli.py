@@ -147,6 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for normalized ProposalInput JSON output",
     )
     intake_normalize_parser.set_defaults(func=normalize_proposal_intake)
+    intake_validate_parser = proposal_subparsers.add_parser(
+        "intake-validate",
+        help="Validate an explicit A-1 intake JSON file",
+    )
+    intake_validate_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to A-1 proposal intake JSON input",
+    )
+    intake_validate_parser.set_defaults(func=validate_proposal_intake)
     intake_inspect_parser = proposal_subparsers.add_parser(
         "intake-inspect",
         help="Inspect an explicit A-1 intake JSON file",
@@ -845,6 +855,35 @@ def inspect_proposal(args: argparse.Namespace) -> int:
         print(json.dumps(proposal.model_dump(mode="json"), indent=2, sort_keys=True))
     else:
         _print_proposal_summary(proposal)
+    return 0
+
+
+def validate_proposal_intake(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(
+            f"Error: intake JSON input file does not exist: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not input_path.is_file():
+        print(
+            f"Error: intake JSON input path is not a file: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        load_a1_proposal_intake(input_path)
+    except ValueError as exc:
+        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to validate proposal intake: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"A-1 proposal intake validation passed: {input_path}")
     return 0
 
 
