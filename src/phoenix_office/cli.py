@@ -20,10 +20,15 @@ from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.orchestration import WorkflowPlan, WorkflowPlanReview
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_intake import collect_proposal_input
-from phoenix_office.proposal_intake_normalization import a1_proposal_intake_from_dict
+from phoenix_office.proposal_intake_normalization import (
+    A1ProposalPricingLine,
+    a1_proposal_intake_draft_from_customer_record,
+    a1_proposal_intake_from_dict,
+)
 from phoenix_office.records import (
     create_proposal_input_from_record_details,
     create_sqlite_record_store,
+    customer_record_from_json_file,
     customer_record_to_json,
     customer_records_to_json,
     export_customer_records_file,
@@ -131,6 +136,73 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing starter proposal draft JSON file",
     )
     draft_json_parser.set_defaults(func=create_proposal_draft_json)
+
+    customer_draft_json_parser = proposal_subparsers.add_parser(
+        "customer-draft-json",
+        help="Create an A-1 proposal intake JSON file from a customer record",
+    )
+    customer_draft_json_parser.add_argument(
+        "customer_json",
+        type=Path,
+        help="Path to CustomerRecord JSON input",
+    )
+    customer_draft_json_parser.add_argument(
+        "output_json",
+        type=Path,
+        help="Path for the customer-backed A-1 proposal intake JSON",
+    )
+    customer_draft_json_parser.add_argument(
+        "--proposal-date",
+        required=True,
+        help="Explicit proposal date in YYYY-MM-DD format",
+    )
+    customer_draft_json_parser.add_argument(
+        "--item-description",
+        required=True,
+        help="Explicit proposal item description",
+    )
+    customer_draft_json_parser.add_argument(
+        "--scope-note",
+        action="append",
+        required=True,
+        help="Explicit proposal scope note; repeat for multiple scope items",
+    )
+    customer_draft_json_parser.add_argument(
+        "--pricing-description",
+        required=True,
+        help="Explicit pricing line description",
+    )
+    customer_draft_json_parser.add_argument(
+        "--pricing-amount",
+        required=True,
+        help="Explicit pricing amount in USD",
+    )
+    customer_draft_json_parser.add_argument(
+        "--pricing-note",
+        help="Optional explicit pricing note",
+    )
+    customer_draft_json_parser.add_argument(
+        "--starting-at",
+        action="store_true",
+        help="Mark the explicit price as a starting-at amount",
+    )
+    customer_draft_json_parser.add_argument(
+        "--special-note",
+        action="append",
+        required=True,
+        help="Explicit proposal special note; repeat for multiple notes",
+    )
+    customer_draft_json_parser.add_argument(
+        "--company-name",
+        default="A-1 Tank Removal LLC",
+        help="Explicit company name for the intake draft",
+    )
+    customer_draft_json_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing customer-backed proposal draft JSON file",
+    )
+    customer_draft_json_parser.set_defaults(func=create_customer_proposal_draft_json)
 
     intake_normalize_parser = proposal_subparsers.add_parser(
         "intake-normalize",
@@ -707,6 +779,55 @@ def create_proposal_draft_json(args: argparse.Namespace) -> int:
 
     print(f"Wrote proposal draft JSON: {output_path}")
     return 0
+
+
+def customer_proposal_draft_from_args(args: argparse.Namespace) -> Any:
+    customer = customer_record_from_json_file(args.customer_json)
+    pricing_line = A1ProposalPricingLine(
+        description=args.pricing_description,
+        amount=args.pricing_amount,
+        is_starting_at=args.starting_at,
+        pricing_note=args.pricing_note,
+    )
+    return a1_proposal_intake_draft_from_customer_record(
+        customer=customer,
+        proposal_date=args.proposal_date,
+        item_description=args.item_description,
+        scope_notes=args.scope_note,
+        pricing_lines=[pricing_line],
+        special_notes=args.special_note,
+        company_name=args.company_name,
+    )
+
+
+def create_customer_proposal_draft_json(args: argparse.Namespace) -> int:
+    output_path = args.output_json
+
+    if output_path.exists() and not args.force:
+        print(
+            f"Error: customer-backed proposal draft JSON already exists: {output_path}",
+            file=sys.stderr,
+        )
+        print("Use --force to overwrite it.", file=sys.stderr)
+        return 1
+    try:
+        intake = customer_proposal_draft_from_args(args)
+        payload = intake.model_dump(mode="json")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(
+            f"Error: failed to write customer-backed proposal draft JSON: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Wrote customer-backed proposal draft JSON: {output_path}")
+    return 0
+
 
 def load_a1_proposal_intake(path: Path) -> Any:
     try:
