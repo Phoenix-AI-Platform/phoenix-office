@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to A-1 proposal intake JSON input",
     )
+    intake_inspect_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the validated A-1 intake summary as JSON",
+    )
     intake_inspect_parser.set_defaults(func=inspect_proposal_intake)
     generate_from_intake_parser = proposal_subparsers.add_parser(
         "generate-from-intake",
@@ -900,7 +905,11 @@ def inspect_proposal_intake(args: argparse.Namespace) -> int:
         print(f"Error: failed to inspect proposal intake: {exc}", file=sys.stderr)
         return 1
 
-    _print_a1_proposal_intake_summary(intake)
+    if args.json:
+        payload = _a1_proposal_intake_summary_payload(intake)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        _print_a1_proposal_intake_summary(intake)
     return 0
 
 
@@ -1419,6 +1428,23 @@ def _print_proposal_summary(proposal: ProposalInput) -> None:
     print(f"Notes: {'present' if proposal.notes else 'none'}")
     if proposal.company_config.company_name:
         print(f"Company: {proposal.company_config.company_name}")
+
+
+def _a1_proposal_intake_summary_payload(intake: Any) -> dict[str, Any]:
+    pricing_line = intake.pricing_lines[0]
+    return {
+        "customer_name": intake.customer_name,
+        "is_starting_at": pricing_line.is_starting_at,
+        "item_description": intake.item_description,
+        "job_address": {
+            "city_state_zip": intake.job_address.city_state_zip,
+            "street_address": intake.job_address.street_address,
+        },
+        "notes_count": len(intake.special_notes),
+        "pricing_amount": f"{pricing_line.amount:.2f}",
+        "proposal_date": intake.proposal_date.isoformat(),
+        "scope_count": len(intake.scope_notes),
+    }
 
 
 def _print_a1_proposal_intake_summary(intake: Any) -> None:
