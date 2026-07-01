@@ -156,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to A-1 proposal intake JSON input",
     )
+    intake_validate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the A-1 intake validation result as JSON",
+    )
     intake_validate_parser.set_defaults(func=validate_proposal_intake)
     intake_inspect_parser = proposal_subparsers.add_parser(
         "intake-inspect",
@@ -862,29 +867,68 @@ def validate_proposal_intake(args: argparse.Namespace) -> int:
     input_path = args.input_json
 
     if not input_path.exists():
-        print(
-            f"Error: intake JSON input file does not exist: {input_path}",
-            file=sys.stderr,
-        )
+        error = f"intake JSON input file does not exist: {input_path}"
+        if args.json:
+            _print_proposal_intake_validation_json(input_path, error)
+        else:
+            print(f"Error: {error}", file=sys.stderr)
         return 1
     if not input_path.is_file():
-        print(
-            f"Error: intake JSON input path is not a file: {input_path}",
-            file=sys.stderr,
-        )
+        error = f"intake JSON input path is not a file: {input_path}"
+        if args.json:
+            _print_proposal_intake_validation_json(input_path, error)
+        else:
+            print(f"Error: {error}", file=sys.stderr)
         return 1
 
     try:
         load_a1_proposal_intake(input_path)
     except ValueError as exc:
-        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        error = str(exc)
+        if args.json:
+            _print_proposal_intake_validation_json(input_path, error)
+        else:
+            print(f"Error: invalid A-1 proposal intake JSON: {error}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
-        print(f"Error: failed to validate proposal intake: {exc}", file=sys.stderr)
+        error = f"failed to validate proposal intake: {exc}"
+        if args.json:
+            _print_proposal_intake_validation_json(input_path, error)
+        else:
+            print(f"Error: {error}", file=sys.stderr)
         return 1
 
-    print(f"A-1 proposal intake validation passed: {input_path}")
+    if args.json:
+        _print_proposal_intake_validation_json(input_path, None)
+    else:
+        print(f"A-1 proposal intake validation passed: {input_path}")
     return 0
+
+
+def _print_proposal_intake_validation_json(
+    input_path: Path,
+    error: str | None,
+) -> None:
+    payload = _proposal_intake_validation_result_payload(
+        input_path=input_path,
+        valid=error is None,
+        error=error,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _proposal_intake_validation_result_payload(
+    *,
+    input_path: Path,
+    valid: bool,
+    error: str | None,
+) -> dict[str, Any]:
+    return {
+        "error": error,
+        "input_path": str(input_path),
+        "status": "valid" if valid else "invalid",
+        "valid": valid,
+    }
 
 
 def normalize_proposal_intake(args: argparse.Namespace) -> int:

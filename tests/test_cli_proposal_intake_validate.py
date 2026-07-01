@@ -74,3 +74,52 @@ def test_cli_proposal_intake_validate_directory_path_fails(
     assert exit_code == 1
     assert captured.out == ""
     assert f"Error: intake JSON input path is not a file: {tmp_path}" in captured.err
+
+
+def test_cli_proposal_intake_validate_json_valid_example(capsys) -> None:
+    exit_code = main(["proposal", "intake-validate", str(A1_INTAKE_JSON), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload == {
+        "error": None,
+        "input_path": str(A1_INTAKE_JSON),
+        "status": "valid",
+        "valid": True,
+    }
+    assert captured.err == ""
+
+
+def test_cli_proposal_intake_validate_json_invalid_intake_fails(
+    tmp_path: Path, capsys
+) -> None:
+    input_path = tmp_path / "invalid_a1_intake.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "customer_name": "Jane Customer",
+                "job_address": {
+                    "street_address": "123 Main St.",
+                    "city_state_zip": "Milwaukee, WI 53202",
+                },
+                "proposal_date": "2026-07-01",
+                "item_description": "Removal of 1,000 Gallon Aboveground Storage Tank",
+                "scope_notes": ["Remove tank"],
+                "pricing_lines": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["proposal", "intake-validate", str(input_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert payload["input_path"] == str(input_path)
+    assert payload["status"] == "invalid"
+    assert payload["valid"] is False
+    assert "Invalid A-1 proposal intake" in payload["error"]
+    assert "pricing_lines" in payload["error"]
+    assert captured.err == ""
