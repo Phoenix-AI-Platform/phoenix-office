@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any
@@ -9,6 +11,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field, StringConstraints
 
 from phoenix_office.models.proposal import CompanyConfig, PricingLine, ProposalInput, ScopeItem
+from phoenix_office.models.records import CustomerRecord
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -74,6 +77,49 @@ class A1ProposalIntake(BaseModel):
 def a1_proposal_intake_from_dict(value: dict[str, Any]) -> A1ProposalIntake:
     """Parse A-1 proposal intake details from a dictionary."""
     return A1ProposalIntake.model_validate(value)
+
+
+def a1_proposal_intake_from_customer_record(
+    value: Mapping[str, Any],
+    customer: CustomerRecord,
+) -> A1ProposalIntake:
+    """Prepare A-1 proposal intake with customer defaults for unset fields only.
+
+    Proposal intake values remain authoritative. CustomerRecord values may only fill
+    the matching customer name and job-address fields when the incoming intake data
+    leaves those fields absent or null.
+    """
+    payload = deepcopy(dict(value))
+
+    if "customer_name" not in payload or payload["customer_name"] is None:
+        payload["customer_name"] = customer.display_name
+
+    job_address = payload.get("job_address")
+    if job_address is None:
+        has_customer_job_address = (
+            customer.job_street_address is not None
+            and customer.job_city_state_zip is not None
+        )
+        if has_customer_job_address:
+            payload["job_address"] = {
+                "street_address": customer.job_street_address,
+                "city_state_zip": customer.job_city_state_zip,
+            }
+    elif isinstance(job_address, Mapping):
+        job_address_payload = deepcopy(dict(job_address))
+        if (
+            "street_address" not in job_address_payload
+            or job_address_payload["street_address"] is None
+        ) and customer.job_street_address is not None:
+            job_address_payload["street_address"] = customer.job_street_address
+        if (
+            "city_state_zip" not in job_address_payload
+            or job_address_payload["city_state_zip"] is None
+        ) and customer.job_city_state_zip is not None:
+            job_address_payload["city_state_zip"] = customer.job_city_state_zip
+        payload["job_address"] = job_address_payload
+
+    return a1_proposal_intake_from_dict(payload)
 
 
 def a1_proposal_intake_to_proposal_input(intake: A1ProposalIntake) -> ProposalInput:

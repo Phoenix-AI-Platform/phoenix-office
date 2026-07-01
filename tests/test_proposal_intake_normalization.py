@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from phoenix_office.models.proposal import ProposalInput
+from phoenix_office.models.records import CustomerRecord
 from phoenix_office.proposal_intake_normalization import (
     A1JobAddress,
     A1ProposalIntake,
     A1ProposalPricingLine,
+    a1_proposal_intake_from_customer_record,
     a1_proposal_intake_from_dict,
     a1_proposal_intake_to_proposal_input,
 )
@@ -121,3 +125,86 @@ def test_a1_intake_does_not_aggregate_multiple_pricing_lines() -> None:
 
     with pytest.raises(ValueError, match="exactly one pricing line"):
         a1_proposal_intake_to_proposal_input(intake)
+
+
+def _partial_a1_intake_payload() -> dict[str, object]:
+    return {
+        "proposal_date": "2026-07-01",
+        "item_description": "Removal of 1,000 Gallon Aboveground Storage Tank",
+        "scope_notes": ["Remove one 1,000 gallon AST."],
+        "pricing_lines": [
+            {
+                "description": "Residential tank removal",
+                "amount": "3000.00",
+            }
+        ],
+    }
+
+
+def _customer_record_with_job_address() -> CustomerRecord:
+    return CustomerRecord(
+        customer_id="cust_123",
+        display_name="Jane Customer",
+        job_street_address="123 Main St.",
+        job_city_state_zip="Milwaukee, WI 53202",
+    )
+
+
+def test_a1_intake_from_customer_record_fills_unset_customer_and_job_address() -> None:
+    payload = _partial_a1_intake_payload()
+    original_payload = deepcopy(payload)
+    customer = _customer_record_with_job_address()
+
+    intake = a1_proposal_intake_from_customer_record(payload, customer)
+
+    assert intake.customer_name == "Jane Customer"
+    assert intake.job_address.street_address == "123 Main St."
+    assert intake.job_address.city_state_zip == "Milwaukee, WI 53202"
+    assert intake.item_description == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    assert payload == original_payload
+
+
+def test_a1_intake_from_customer_record_preserves_explicit_intake_values() -> None:
+    payload = {
+        **_partial_a1_intake_payload(),
+        "customer_name": "Explicit Intake Customer",
+        "job_address": {
+            "street_address": "456 Intake Ave.",
+            "city_state_zip": "Madison, WI 53703",
+        },
+    }
+    customer = _customer_record_with_job_address()
+
+    intake = a1_proposal_intake_from_customer_record(payload, customer)
+
+    assert intake.customer_name == "Explicit Intake Customer"
+    assert intake.job_address.street_address == "456 Intake Ave."
+    assert intake.job_address.city_state_zip == "Madison, WI 53703"
+
+
+def test_a1_intake_from_customer_record_fills_partial_job_address_only() -> None:
+    payload = {
+        **_partial_a1_intake_payload(),
+        "customer_name": "Explicit Intake Customer",
+        "job_address": {"street_address": "456 Intake Ave."},
+    }
+    customer = _customer_record_with_job_address()
+
+    intake = a1_proposal_intake_from_customer_record(payload, customer)
+
+    assert intake.customer_name == "Explicit Intake Customer"
+    assert intake.job_address.street_address == "456 Intake Ave."
+    assert intake.job_address.city_state_zip == "Milwaukee, WI 53202"
+
+
+def test_a1_intake_from_customer_record_does_not_use_billing_address_for_job_address() -> None:
+    payload = _partial_a1_intake_payload()
+    customer = CustomerRecord(
+        customer_id="cust_123",
+        display_name="Jane Customer",
+        billing_street_address="999 Billing Rd.",
+        billing_city_state_zip="Billing, WI 53000",
+    )
+
+    with pytest.raises(ValidationError, match="job_address"):
+        a1_proposal_intake_from_customer_record(payload, customer)
