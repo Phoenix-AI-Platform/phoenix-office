@@ -40,6 +40,12 @@ class CustomerRecord(BaseModel):
     billing_city_state_zip: str | None = Field(
         default=None, description="City, state, and ZIP for billing."
     )
+    job_street_address: str | None = Field(
+        default=None, description="Street address for the primary or current job site."
+    )
+    job_city_state_zip: str | None = Field(
+        default=None, description="City, state, and ZIP for the primary or current job site."
+    )
     notes: list[str] = Field(
         default_factory=list, description="General notes about the customer."
     )
