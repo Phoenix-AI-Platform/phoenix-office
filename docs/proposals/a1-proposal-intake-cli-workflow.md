@@ -4,7 +4,7 @@
 
 This guide shows the current manual CLI flow for preparing an A-1 proposal from explicit intake JSON. The commands are deterministic and operator-driven. They do not infer missing pricing, scope, notes, item descriptions, or customer data.
 
-Use this workflow when starting from an A-1 intake JSON draft rather than record-backed customer and job records.
+Use this workflow when starting from an A-1 intake JSON draft. The customer-backed variant below starts from an explicit `CustomerRecord` JSON file and still requires the operator to provide proposal date, item description, scope, pricing, and notes.
 
 ## 1. Create An Editable Intake Draft
 
@@ -21,6 +21,45 @@ python -m phoenix_office.cli proposal draft-json output/a1_proposal_intake.json 
 ```
 
 Review and edit the draft before using it. Placeholder values must be replaced by the operator.
+
+## Customer-Backed Intake Draft Example
+
+Create or export a single customer record JSON file:
+
+```bash
+python -m phoenix_office.cli records show customer customer-abby-hill --db output/records.sqlite > output/abby_hill_customer.json
+```
+
+Create an A-1 intake draft from that customer record plus explicit proposal fields:
+
+```bash
+python -m phoenix_office.cli proposal customer-draft-json output/abby_hill_customer.json output/abby_hill_intake.json --proposal-date 2026-07-01 --item-description "Removal of 1,000 Gallon Aboveground Storage Tank" --scope-note "Pump contents of tank (contents unknown)" --scope-note "Remove and dispose of tank and residual contents" --pricing-description "Residential tank removal" --pricing-amount 3000.00 --pricing-note "Explicit operator-provided pricing note." --starting-at --special-note "Explicit operator-provided special note."
+```
+
+Validate the customer-backed intake draft:
+
+```bash
+python -m phoenix_office.cli proposal intake-validate output/abby_hill_intake.json
+```
+
+Inspect the customer-backed intake draft:
+
+```bash
+python -m phoenix_office.cli proposal intake-inspect output/abby_hill_intake.json
+python -m phoenix_office.cli proposal intake-inspect output/abby_hill_intake.json --json
+```
+
+Normalize the customer-backed intake draft into `ProposalInput` JSON:
+
+```bash
+python -m phoenix_office.cli proposal intake-normalize output/abby_hill_intake.json output/abby_hill_proposal_input.json
+```
+
+Generate a DOCX only after explicit review:
+
+```bash
+python -m phoenix_office.cli proposal generate-from-intake output/abby_hill_intake.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
 
 ## 2. Validate Intake JSON
 
@@ -85,7 +124,6 @@ Generated DOCX files are local output artifacts. Do not commit generated proposa
 This workflow does not:
 
 - call AI or LLM services
-- read customer or job records
 - infer pricing, scope, notes, item descriptions, or customer data
 - mutate records
 - trigger workflows
