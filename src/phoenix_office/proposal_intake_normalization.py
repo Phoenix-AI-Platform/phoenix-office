@@ -122,6 +122,43 @@ def a1_proposal_intake_from_customer_record(
     return a1_proposal_intake_from_dict(payload)
 
 
+def a1_proposal_intake_draft_from_customer_record(
+    *,
+    customer: CustomerRecord,
+    proposal_date: date,
+    item_description: str,
+    scope_notes: list[str],
+    pricing_lines: list[A1ProposalPricingLine],
+    special_notes: list[str],
+    company_name: str = DEFAULT_A1_COMPANY_NAME,
+) -> A1ProposalIntake:
+    """Create an A-1 intake draft from a customer and explicit proposal details.
+
+    CustomerRecord supplies only the customer display name and job address. Scope,
+    pricing, notes, date, item description, and company name remain explicit caller
+    inputs and are validated by the existing A1ProposalIntake model.
+    """
+    if customer.job_street_address is None or customer.job_city_state_zip is None:
+        raise ValueError(
+            "CustomerRecord job_street_address and job_city_state_zip are required "
+            "to create a customer-backed A-1 intake draft."
+        )
+
+    return A1ProposalIntake(
+        customer_name=customer.display_name,
+        job_address=A1JobAddress(
+            street_address=customer.job_street_address,
+            city_state_zip=customer.job_city_state_zip,
+        ),
+        proposal_date=proposal_date,
+        item_description=item_description,
+        scope_notes=scope_notes,
+        pricing_lines=pricing_lines,
+        special_notes=special_notes,
+        company_name=company_name,
+    )
+
+
 def a1_proposal_intake_to_proposal_input(intake: A1ProposalIntake) -> ProposalInput:
     """Convert explicit A-1 intake details into a normalized ProposalInput draft.
 
