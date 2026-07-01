@@ -1,13 +1,17 @@
 """Tests for customer and job record JSON codec helpers."""
 
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
+from pydantic import ValidationError
 
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
 from phoenix_office.records import (
     customer_record_from_dict,
     customer_record_from_json,
+    customer_record_from_json_file,
     customer_record_to_dict,
     customer_record_to_json,
     customer_records_from_json,
@@ -183,3 +187,42 @@ def test_record_json_codec_exports_are_available_from_records_package() -> None:
 
     assert customer_record_from_json(customer_record_to_json(customer)) == customer
     assert job_record_from_json(job_record_to_json(job)) == job
+
+
+def test_customer_record_from_json_file_loads_valid_data() -> None:
+    customer = CustomerRecord(
+        customer_id="cust-1",
+        display_name="Abby Hill",
+        phone="555-0100",
+        email="abby@example.com",
+        job_street_address="W3064 Piper Rd.",
+        job_city_state_zip="Whitewater, WI 53190",
+    )
+    with TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "customer.json"
+        path.write_text(customer_record_to_json(customer), encoding="utf-8")
+
+        assert customer_record_from_json_file(path) == customer
+
+
+def test_customer_record_from_json_file_reuses_model_validation() -> None:
+    with TemporaryDirectory() as temp_dir:
+        path = Path(temp_dir) / "invalid-customer.json"
+        path.write_text(json.dumps({"customer_id": "cust-1"}), encoding="utf-8")
+
+        with pytest.raises(ValidationError, match="display_name"):
+            customer_record_from_json_file(path)
+
+
+def test_customer_record_from_json_file_missing_file_fails() -> None:
+    with TemporaryDirectory() as temp_dir:
+        missing_path = Path(temp_dir) / "missing-customer.json"
+
+        with pytest.raises(FileNotFoundError, match="Customer record JSON file does not exist"):
+            customer_record_from_json_file(missing_path)
+
+
+def test_customer_record_from_json_file_non_file_path_fails() -> None:
+    with TemporaryDirectory() as temp_dir:
+        with pytest.raises(ValueError, match="Customer record JSON path is not a file"):
+            customer_record_from_json_file(Path(temp_dir))

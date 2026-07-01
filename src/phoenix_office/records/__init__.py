@@ -3,6 +3,7 @@
 from phoenix_office.records.json_codec import (
     customer_record_from_dict,
     customer_record_from_json,
+    customer_record_from_json_file,
     customer_record_to_dict,
     customer_record_to_json,
     customer_records_from_json,
@@ -75,6 +76,7 @@ __all__ = [
     "create_sqlite_record_store",
     "customer_record_from_dict",
     "customer_record_from_json",
+    "customer_record_from_json_file",
     "customer_record_to_dict",
     "customer_record_to_json",
     "customer_records_from_json",
