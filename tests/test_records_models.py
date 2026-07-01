@@ -18,7 +18,44 @@ def test_customer_record_accepts_valid_data() -> None:
     assert record.email is None
     assert record.billing_street_address is None
     assert record.billing_city_state_zip is None
+    assert record.job_street_address is None
+    assert record.job_city_state_zip is None
     assert record.notes == []
+
+
+def test_customer_record_accepts_contact_and_job_address_fields() -> None:
+    """CustomerRecord should accept optional contact and job address fields."""
+    record = CustomerRecord(
+        customer_id="cust_123",
+        display_name="Abby Hill",
+        phone="555-0100",
+        email="abby@example.com",
+        job_street_address="W3064 Piper Rd.",
+        job_city_state_zip="Whitewater, WI 53190",
+    )
+
+    assert record.display_name == "Abby Hill"
+    assert record.phone == "555-0100"
+    assert record.email == "abby@example.com"
+    assert record.job_street_address == "W3064 Piper Rd."
+    assert record.job_city_state_zip == "Whitewater, WI 53190"
+
+
+def test_customer_record_model_dump_includes_job_address_fields() -> None:
+    """CustomerRecord should serialize optional job address fields deterministically."""
+    record = CustomerRecord(
+        customer_id="cust_123",
+        display_name="Abby Hill",
+        job_street_address="W3064 Piper Rd.",
+        job_city_state_zip="Whitewater, WI 53190",
+    )
+
+    dumped = record.model_dump(mode="json")
+
+    assert dumped["customer_id"] == "cust_123"
+    assert dumped["display_name"] == "Abby Hill"
+    assert dumped["job_street_address"] == "W3064 Piper Rd."
+    assert dumped["job_city_state_zip"] == "Whitewater, WI 53190"
 
 
 def test_customer_record_rejects_empty_display_name() -> None:
