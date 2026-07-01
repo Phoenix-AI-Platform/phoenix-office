@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from phoenix_office.models.records import CustomerRecord, JobRecord
@@ -26,6 +27,15 @@ def customer_record_to_json(record: CustomerRecord) -> str:
 def customer_record_from_json(value: str) -> CustomerRecord:
     """Build a customer record from JSON text."""
     return customer_record_from_dict(_load_json_object(value))
+
+
+def customer_record_from_json_file(path: Path) -> CustomerRecord:
+    """Load a customer record from an explicit UTF-8 JSON file."""
+    if not path.exists():
+        raise FileNotFoundError(f"Customer record JSON file does not exist: {path}")
+    if not path.is_file():
+        raise ValueError(f"Customer record JSON path is not a file: {path}")
+    return customer_record_from_json(path.read_text(encoding="utf-8"))
 
 
 def job_record_to_dict(record: JobRecord) -> dict[str, object]:
