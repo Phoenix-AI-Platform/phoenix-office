@@ -147,6 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path for normalized ProposalInput JSON output",
     )
     intake_normalize_parser.set_defaults(func=normalize_proposal_intake)
+    intake_inspect_parser = proposal_subparsers.add_parser(
+        "intake-inspect",
+        help="Inspect an explicit A-1 intake JSON file",
+    )
+    intake_inspect_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to A-1 proposal intake JSON input",
+    )
+    intake_inspect_parser.set_defaults(func=inspect_proposal_intake)
     generate_from_intake_parser = proposal_subparsers.add_parser(
         "generate-from-intake",
         help="Generate a proposal DOCX from explicit A-1 intake JSON",
@@ -865,6 +875,35 @@ def normalize_proposal_intake(args: argparse.Namespace) -> int:
     return 0
 
 
+def inspect_proposal_intake(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(
+            f"Error: intake JSON input file does not exist: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not input_path.is_file():
+        print(
+            f"Error: intake JSON input path is not a file: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        intake = load_a1_proposal_intake(input_path)
+    except ValueError as exc:
+        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to inspect proposal intake: {exc}", file=sys.stderr)
+        return 1
+
+    _print_a1_proposal_intake_summary(intake)
+    return 0
+
+
 def list_capabilities(args: argparse.Namespace) -> int:
     capabilities = get_registered_plugin_capabilities()
 
@@ -1380,6 +1419,21 @@ def _print_proposal_summary(proposal: ProposalInput) -> None:
     print(f"Notes: {'present' if proposal.notes else 'none'}")
     if proposal.company_config.company_name:
         print(f"Company: {proposal.company_config.company_name}")
+
+
+def _print_a1_proposal_intake_summary(intake: Any) -> None:
+    pricing_line = intake.pricing_lines[0]
+    print(f"Customer: {intake.customer_name}")
+    print(
+        "Job Address: "
+        f"{intake.job_address.street_address}, {intake.job_address.city_state_zip}"
+    )
+    print(f"Proposal Date: {intake.proposal_date.isoformat()}")
+    print(f"Item Description: {intake.item_description}")
+    print(f"Scope Count: {len(intake.scope_notes)}")
+    print(f"Pricing Amount: ${pricing_line.amount:,.2f}")
+    print(f"Starting At: {_format_yes_no(pricing_line.is_starting_at)}")
+    print(f"Notes Count: {len(intake.special_notes)}")
 
 
 def _print_workflow_plan_summary(plan: WorkflowPlan) -> None:
