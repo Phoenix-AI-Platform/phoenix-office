@@ -17,6 +17,7 @@ from phoenix_office.proposal_intake_normalization import (
     A1JobAddress,
     A1ProposalIntake,
     A1ProposalPricingLine,
+    a1_proposal_intake_draft_from_customer_record,
     a1_proposal_intake_from_customer_record,
     a1_proposal_intake_from_dict,
     a1_proposal_intake_to_proposal_input,
@@ -208,3 +209,86 @@ def test_a1_intake_from_customer_record_does_not_use_billing_address_for_job_add
 
     with pytest.raises(ValidationError, match="job_address"):
         a1_proposal_intake_from_customer_record(payload, customer)
+
+
+def test_a1_intake_draft_from_customer_record_uses_customer_name_and_job_address() -> None:
+    customer = CustomerRecord(
+        customer_id="cust_123",
+        display_name="Jane Customer",
+        phone="555-0100",
+        email="jane@example.com",
+        billing_street_address="999 Billing Rd.",
+        billing_city_state_zip="Billing, WI 53000",
+        job_street_address="123 Main St.",
+        job_city_state_zip="Milwaukee, WI 53202",
+        notes=["Do not include internal customer notes."],
+    )
+    pricing_line = A1ProposalPricingLine(
+        description="Residential tank removal",
+        amount=Decimal("3000.00"),
+        is_starting_at=True,
+        pricing_note="Explicit pricing note.",
+    )
+
+    intake = a1_proposal_intake_draft_from_customer_record(
+        customer=customer,
+        proposal_date=date(2026, 7, 1),
+        item_description="Removal of 1,000 Gallon Aboveground Storage Tank",
+        scope_notes=["Explicitly remove one 1,000 gallon AST."],
+        pricing_lines=[pricing_line],
+        special_notes=["Explicit special note."],
+        company_name="A-1 Tank Removal LLC",
+    )
+
+    assert intake.customer_name == "Jane Customer"
+    assert intake.job_address.street_address == "123 Main St."
+    assert intake.job_address.city_state_zip == "Milwaukee, WI 53202"
+    assert intake.proposal_date == date(2026, 7, 1)
+    assert intake.item_description == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    assert intake.scope_notes == ["Explicitly remove one 1,000 gallon AST."]
+    assert intake.pricing_lines == [pricing_line]
+    assert intake.special_notes == ["Explicit special note."]
+    assert intake.company_name == "A-1 Tank Removal LLC"
+
+
+def test_a1_intake_draft_from_customer_record_requires_customer_job_address() -> None:
+    customer = CustomerRecord(
+        customer_id="cust_123",
+        display_name="Jane Customer",
+        billing_street_address="999 Billing Rd.",
+        billing_city_state_zip="Billing, WI 53000",
+    )
+
+    with pytest.raises(ValueError, match="job_street_address and job_city_state_zip"):
+        a1_proposal_intake_draft_from_customer_record(
+            customer=customer,
+            proposal_date=date(2026, 7, 1),
+            item_description="Removal of 1,000 Gallon Aboveground Storage Tank",
+            scope_notes=["Explicit scope."],
+            pricing_lines=[
+                A1ProposalPricingLine(
+                    description="Residential tank removal",
+                    amount=Decimal("3000.00"),
+                )
+            ],
+            special_notes=[],
+        )
+
+
+def test_a1_intake_draft_from_customer_record_validates_explicit_scope() -> None:
+    customer = _customer_record_with_job_address()
+
+    with pytest.raises(ValidationError, match="scope_notes"):
+        a1_proposal_intake_draft_from_customer_record(
+            customer=customer,
+            proposal_date=date(2026, 7, 1),
+            item_description="Removal of 1,000 Gallon Aboveground Storage Tank",
+            scope_notes=[],
+            pricing_lines=[
+                A1ProposalPricingLine(
+                    description="Residential tank removal",
+                    amount=Decimal("3000.00"),
+                )
+            ],
+            special_notes=[],
+        )
