@@ -1004,7 +1004,8 @@ def validate_proposal(args: argparse.Namespace) -> int:
     try:
         with input_path.open(encoding="utf-8") as file:
             data: Any = json.load(file)
-        ProposalInput.model_validate(data)
+        proposal = ProposalInput.model_validate(data)
+        placeholder_paths = proposal_input_placeholder_paths(proposal)
     except json.JSONDecodeError as exc:
         print(
             f"Error: invalid proposal input: Invalid JSON in {input_path}: {exc.msg}",
@@ -1022,8 +1023,16 @@ def validate_proposal(args: argparse.Namespace) -> int:
         return 1
 
     print(f"ProposalInput validation passed: {input_path}")
+    if placeholder_paths:
+        print(
+            "Warning: unresolved placeholder text in proposal input.",
+            file=sys.stderr,
+        )
+        print(
+            "Placeholder fields: " + ", ".join(placeholder_paths),
+            file=sys.stderr,
+        )
     return 0
-
 
 def _format_proposal_validation_errors(exc: ValidationError) -> list[str]:
     return [_format_proposal_validation_error(error) for error in exc.errors()]
