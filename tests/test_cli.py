@@ -176,6 +176,64 @@ def test_cli_creates_output_directory(tmp_path):
     assert output_path.exists()
     assert output_path.stat().st_size > 0
 
+def _write_placeholder_proposal_input(tmp_path: Path) -> tuple[Path, str]:
+    placeholder = "TODO: Replace with explicit item description."
+    payload = json.loads(EXAMPLE_JSON.read_text(encoding="utf-8"))
+    payload["item_description"] = placeholder
+    input_path = tmp_path / "placeholder_proposal_input.json"
+    input_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return input_path, placeholder
+
+
+def test_cli_generate_blocks_placeholder_proposal_input(tmp_path, capsys):
+    input_path, _placeholder = _write_placeholder_proposal_input(tmp_path)
+    output_path = tmp_path / "blocked_placeholder_proposal.docx"
+
+    exit_code = main(
+        [
+            "proposal",
+            "generate",
+            str(input_path),
+            str(output_path),
+            "--template",
+            str(A1_TEMPLATE),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "unresolved placeholder text in proposal input" in captured.err
+    assert "Use --allow-placeholder-proposal-input to generate anyway." in captured.err
+    assert "item_description" in captured.err
+    assert not output_path.exists()
+
+
+def test_cli_generate_allows_placeholder_proposal_input_override(tmp_path, capsys):
+    input_path, placeholder = _write_placeholder_proposal_input(tmp_path)
+    output_path = tmp_path / "allowed_placeholder_proposal.docx"
+
+    exit_code = main(
+        [
+            "proposal",
+            "generate",
+            str(input_path),
+            str(output_path),
+            "--template",
+            str(A1_TEMPLATE),
+            "--allow-placeholder-proposal-input",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    text = read_docx_text(output_path)
+    assert exit_code == 0
+    assert "Generated proposal DOCX" in captured.out
+    assert captured.err == ""
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert placeholder in text
+
 
 def test_cli_fails_cleanly_when_input_json_is_missing(tmp_path, capsys):
     missing_json = tmp_path / "missing.json"

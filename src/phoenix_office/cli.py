@@ -25,6 +25,9 @@ from phoenix_office.proposal_intake_normalization import (
     a1_proposal_intake_draft_from_customer_record,
     a1_proposal_intake_from_dict,
 )
+from phoenix_office.proposal_placeholder_validation import (
+    proposal_input_placeholder_paths,
+)
 from phoenix_office.records import (
     create_proposal_input_from_record_details,
     create_sqlite_record_store,
@@ -81,8 +84,15 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to the DOCX template",
     )
+    generate_parser.add_argument(
+        "--allow-placeholder-proposal-input",
+        action="store_true",
+        help=(
+            "Allow DOCX generation when proposal input contains unresolved "
+            "placeholder text"
+        ),
+    )
     generate_parser.set_defaults(func=generate_proposal)
-
     validate_proposal_parser = proposal_subparsers.add_parser(
         "validate",
         help="Validate a proposal JSON input file",
@@ -865,6 +875,22 @@ def generate_proposal(args: argparse.Namespace) -> int:
 
     try:
         proposal = load_proposal(input_path)
+        placeholder_paths = proposal_input_placeholder_paths(proposal)
+        if placeholder_paths and not args.allow_placeholder_proposal_input:
+            print(
+                "Error: unresolved placeholder text in proposal input; "
+                "refusing DOCX generation.",
+                file=sys.stderr,
+            )
+            print(
+                "Use --allow-placeholder-proposal-input to generate anyway.",
+                file=sys.stderr,
+            )
+            print(
+                "Placeholder fields: " + ", ".join(placeholder_paths),
+                file=sys.stderr,
+            )
+            return 1
         result = DocxProposalRenderer().render(proposal, template_path, output_path)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
