@@ -27,8 +27,13 @@ def test_cli_proposal_readiness_reports_ready_example(capsys) -> None:
     assert exit_code == 0
     assert f"ProposalInput readiness: ready ({EXAMPLE_JSON})" in captured.out
     assert "Ready for DOCX generation: yes" in captured.out
+    assert (
+        "Next manual command: "
+        "python -m phoenix_office.cli proposal generate "
+        f"{EXAMPLE_JSON} output/proposal.docx "
+        "--template tests/fixtures/templates/a1_proposal_template.docx"
+    ) in captured.out
     assert captured.err == ""
-
 
 def test_cli_proposal_readiness_blocks_placeholder_text(
     tmp_path: Path,
