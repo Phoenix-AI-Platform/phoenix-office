@@ -22,6 +22,29 @@ def test_cli_proposal_intake_validate_valid_example(capsys) -> None:
     assert captured.err == ""
 
 
+def _write_placeholder_intake(tmp_path: Path) -> Path:
+    input_path = tmp_path / "placeholder_a1_intake.json"
+    payload = json.loads(A1_INTAKE_JSON.read_text(encoding="utf-8"))
+    payload["item_description"] = "TODO: Replace with explicit item description."
+    payload["scope_notes"][0] = "Replace with explicit first scope note."
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    return input_path
+
+
+def test_cli_proposal_intake_validate_warns_about_placeholder_text(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_intake(tmp_path)
+
+    exit_code = main(["proposal", "intake-validate", str(input_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert f"A-1 proposal intake validation passed: {input_path}" in captured.out
+    assert "Warning: unresolved placeholder text in A-1 proposal intake." in captured.err
+    assert "Placeholder fields: item_description, scope_notes[0]" in captured.err
+
 def test_cli_proposal_intake_validate_invalid_intake_fails(
     tmp_path: Path, capsys
 ) -> None:
@@ -85,11 +108,32 @@ def test_cli_proposal_intake_validate_json_valid_example(capsys) -> None:
     assert payload == {
         "error": None,
         "input_path": str(A1_INTAKE_JSON),
+        "placeholder_field_paths": [],
         "status": "valid",
         "valid": True,
     }
     assert captured.err == ""
 
+
+def test_cli_proposal_intake_validate_json_reports_placeholder_field_paths(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_intake(tmp_path)
+
+    exit_code = main(["proposal", "intake-validate", str(input_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload == {
+        "error": None,
+        "input_path": str(input_path),
+        "placeholder_field_paths": ["item_description", "scope_notes[0]"],
+        "status": "valid",
+        "valid": True,
+    }
+    assert captured.err == ""
 
 def test_cli_proposal_intake_validate_json_invalid_intake_fails(
     tmp_path: Path, capsys
