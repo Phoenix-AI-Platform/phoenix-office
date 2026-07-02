@@ -75,6 +75,13 @@ For machine-readable validation output:
 python -m phoenix_office.cli proposal intake-validate output/a1_proposal_intake.json --json
 ```
 
+If the intake is structurally valid but still contains unresolved placeholder text, validation still succeeds and reports placeholder field paths. JSON validation includes `placeholder_field_paths`.
+
+```bash
+python -m phoenix_office.cli proposal intake-validate output/placeholder_a1_proposal_intake.json
+python -m phoenix_office.cli proposal intake-validate output/placeholder_a1_proposal_intake.json --json
+```
+
 Validation does not normalize the intake, render DOCX, or write output files.
 
 ## 3. Inspect Intake JSON
@@ -89,6 +96,13 @@ For machine-readable summary output:
 
 ```bash
 python -m phoenix_office.cli proposal intake-inspect output/a1_proposal_intake.json --json
+```
+
+If unresolved placeholder text remains, human-readable inspection reports warning field paths and JSON inspection includes `placeholder_field_paths`.
+
+```bash
+python -m phoenix_office.cli proposal intake-inspect output/placeholder_a1_proposal_intake.json
+python -m phoenix_office.cli proposal intake-inspect output/placeholder_a1_proposal_intake.json --json
 ```
 
 Inspection is read-only. It validates and summarizes the intake only.
@@ -107,6 +121,19 @@ The normalized JSON can then be reviewed with the existing ProposalInput command
 python -m phoenix_office.cli proposal validate output/a1_proposal_input.json
 python -m phoenix_office.cli proposal inspect output/a1_proposal_input.json
 python -m phoenix_office.cli proposal inspect output/a1_proposal_input.json --json
+```
+
+`proposal validate` still succeeds for structurally valid normalized `ProposalInput` JSON with unresolved placeholder text, and reports warning field paths.
+
+```bash
+python -m phoenix_office.cli proposal validate output/placeholder_a1_proposal_input.json
+```
+
+`proposal inspect` reports placeholder warning field paths in human-readable output, and `--json` includes `placeholder_field_paths`.
+
+```bash
+python -m phoenix_office.cli proposal inspect output/placeholder_a1_proposal_input.json
+python -m phoenix_office.cli proposal inspect output/placeholder_a1_proposal_input.json --json
 ```
 
 `proposal generate` also refuses normalized `ProposalInput` JSON that still contains unresolved placeholder text such as `TODO:` or `replace with explicit`; the error reports the placeholder field paths.
@@ -130,6 +157,7 @@ python -m phoenix_office.cli proposal generate output/abby_hill_placeholder_prop
 ```
 
 ## 5. Generate DOCX From Intake
+
 When the intake has been reviewed and the operator explicitly wants a DOCX artifact, run:
 
 ```bash
