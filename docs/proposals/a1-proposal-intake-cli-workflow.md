@@ -117,6 +117,20 @@ When the intake has been reviewed and the operator explicitly wants a DOCX artif
 python -m phoenix_office.cli proposal generate-from-intake output/a1_proposal_intake.json output/a1_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
+By default, `generate-from-intake` refuses to render DOCX when the intake still contains unresolved placeholder text such as `TODO:` or `replace with explicit`, and the error reports the placeholder field paths.
+
+Example command that should fail until placeholders are replaced:
+
+```bash
+python -m phoenix_office.cli proposal generate-from-intake output/abby_hill_placeholder_intake.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+Use the explicit override only when the operator intentionally wants placeholder text rendered into the DOCX:
+
+```bash
+python -m phoenix_office.cli proposal generate-from-intake output/abby_hill_placeholder_intake.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx --allow-placeholder-intake
+```
+
 Generated DOCX files are local output artifacts. Do not commit generated proposal outputs, private customer data, or real customer documents.
 
 ## Boundaries
