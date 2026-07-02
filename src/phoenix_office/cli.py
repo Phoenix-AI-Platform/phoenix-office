@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from docx import Document
 from pydantic import ValidationError
 
 from phoenix_office.dev_status import (
@@ -119,6 +120,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output proposal readiness as JSON",
     )
     readiness_proposal_parser.set_defaults(func=check_proposal_readiness)
+
+    template_readiness_parser = proposal_subparsers.add_parser(
+        "template-readiness",
+        help="Check whether a DOCX proposal template path is usable",
+    )
+    template_readiness_parser.add_argument(
+        "template_docx",
+        type=Path,
+        help="Path to DOCX proposal template",
+    )
+    template_readiness_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output template readiness as JSON",
+    )
+    template_readiness_parser.set_defaults(func=check_proposal_template_readiness)
 
     inspect_proposal_parser = proposal_subparsers.add_parser(
         "inspect",
@@ -1125,6 +1142,41 @@ def _format_proposal_validation_error(error: dict[str, Any]) -> str:
         location = "(root)"
     message = str(error.get("msg", "Invalid value"))
     return f"{location}: {message}"
+
+
+def check_proposal_template_readiness(args: argparse.Namespace) -> int:
+    template_path = args.template_docx
+    error: str | None = None
+
+    if not template_path.exists():
+        error = f"DOCX template file does not exist: {template_path}"
+    elif not template_path.is_file():
+        error = f"DOCX template path is not a file: {template_path}"
+    else:
+        try:
+            Document(str(template_path))
+        except Exception as exc:  # noqa: BLE001 - python-docx exposes broad parse errors.
+            error = f"DOCX template could not be opened: {exc}"
+
+    ready = error is None
+    payload = {
+        "error": error,
+        "ready": ready,
+        "status": "ready" if ready else "blocked",
+        "template_path": str(template_path),
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif ready:
+        print(f"DOCX template readiness: ready ({template_path})")
+        print("Ready for proposal generation: yes")
+    else:
+        print(f"DOCX template readiness: blocked ({template_path})")
+        print("Ready for proposal generation: no")
+        print(f"Blocker: {error}")
+
+    return 0 if ready else 1
 
 
 def inspect_proposal(args: argparse.Namespace) -> int:
