@@ -1051,6 +1051,7 @@ def inspect_proposal(args: argparse.Namespace) -> int:
 
     try:
         proposal = load_proposal(input_path)
+        placeholder_paths = proposal_input_placeholder_paths(proposal)
     except ValueError as exc:
         print(f"Error: invalid proposal input: {exc}", file=sys.stderr)
         return 1
@@ -1059,11 +1060,21 @@ def inspect_proposal(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        print(json.dumps(proposal.model_dump(mode="json"), indent=2, sort_keys=True))
+        payload = proposal.model_dump(mode="json")
+        payload["placeholder_field_paths"] = placeholder_paths
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         _print_proposal_summary(proposal)
+        if placeholder_paths:
+            print(
+                "Warning: unresolved placeholder text in proposal input.",
+                file=sys.stderr,
+            )
+            print(
+                "Placeholder fields: " + ", ".join(placeholder_paths),
+                file=sys.stderr,
+            )
     return 0
-
 
 def validate_proposal_intake(args: argparse.Namespace) -> int:
     input_path = args.input_json

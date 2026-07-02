@@ -131,6 +131,47 @@ def test_cli_proposal_inspect_json_defaults_omitted_notes_to_empty_list(
     assert captured.err == ""
 
 
+def _write_placeholder_proposal_input(tmp_path: Path) -> Path:
+    input_path = tmp_path / "placeholder_proposal.json"
+    payload = json.loads(EXAMPLE_JSON.read_text(encoding="utf-8"))
+    payload["item_description"] = "TODO: Replace with explicit item description."
+    payload["pricing"]["pricing_note"] = "Replace with explicit pricing note."
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    return input_path
+
+
+def test_cli_proposal_inspect_warns_about_placeholder_text(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_proposal_input(tmp_path)
+
+    exit_code = main(["proposal", "inspect", str(input_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Customer: Abby Hill" in captured.out
+    assert "Warning: unresolved placeholder text in proposal input." in captured.err
+    assert "Placeholder fields: item_description, pricing.pricing_note" in captured.err
+
+
+def test_cli_proposal_inspect_json_includes_placeholder_field_paths(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_proposal_input(tmp_path)
+
+    exit_code = main(["proposal", "inspect", str(input_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["placeholder_field_paths"] == [
+        "item_description",
+        "pricing.pricing_note",
+    ]
+    assert captured.err == ""
+
 def test_cli_proposal_inspect_invalid_json(tmp_path: Path, capsys) -> None:
     input_path = tmp_path / "invalid_proposal.json"
     input_path.write_text("{not valid json", encoding="utf-8")
