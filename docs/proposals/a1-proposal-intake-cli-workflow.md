@@ -109,8 +109,27 @@ python -m phoenix_office.cli proposal inspect output/a1_proposal_input.json
 python -m phoenix_office.cli proposal inspect output/a1_proposal_input.json --json
 ```
 
-## 5. Generate DOCX From Intake
+`proposal generate` also refuses normalized `ProposalInput` JSON that still contains unresolved placeholder text such as `TODO:` or `replace with explicit`; the error reports the placeholder field paths.
 
+Example reviewed normalized-input generation command:
+
+```bash
+python -m phoenix_office.cli proposal generate output/a1_proposal_input.json output/a1_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+Example normalized-input command that should fail until placeholders are replaced:
+
+```bash
+python -m phoenix_office.cli proposal generate output/abby_hill_placeholder_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+Use the explicit override only when the operator intentionally wants placeholder text rendered from normalized `ProposalInput` JSON:
+
+```bash
+python -m phoenix_office.cli proposal generate output/abby_hill_placeholder_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx --allow-placeholder-proposal-input
+```
+
+## 5. Generate DOCX From Intake
 When the intake has been reviewed and the operator explicitly wants a DOCX artifact, run:
 
 ```bash
