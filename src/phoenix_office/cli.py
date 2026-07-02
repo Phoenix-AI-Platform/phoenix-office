@@ -1099,6 +1099,12 @@ def check_proposal_readiness(args: argparse.Namespace) -> int:
     elif ready:
         print(f"ProposalInput readiness: ready ({input_path})")
         print("Ready for DOCX generation: yes")
+        print(
+            "Next manual command: "
+            "python -m phoenix_office.cli proposal generate "
+            f"{input_path} output/proposal.docx "
+            "--template tests/fixtures/templates/a1_proposal_template.docx"
+        )
     else:
         print(f"ProposalInput readiness: blocked ({input_path})")
         print("Ready for DOCX generation: no")
