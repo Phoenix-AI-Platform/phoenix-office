@@ -1183,6 +1183,7 @@ def inspect_proposal_intake(args: argparse.Namespace) -> int:
 
     try:
         intake = load_a1_proposal_intake(input_path)
+        placeholder_paths = unresolved_a1_proposal_intake_placeholder_paths(intake)
     except ValueError as exc:
         print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
         return 1
@@ -1192,11 +1193,20 @@ def inspect_proposal_intake(args: argparse.Namespace) -> int:
 
     if args.json:
         payload = _a1_proposal_intake_summary_payload(intake)
+        payload["placeholder_field_paths"] = placeholder_paths
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         _print_a1_proposal_intake_summary(intake)
+        if placeholder_paths:
+            print(
+                "Warning: unresolved placeholder text in A-1 proposal intake.",
+                file=sys.stderr,
+            )
+            print(
+                "Placeholder fields: " + ", ".join(placeholder_paths),
+                file=sys.stderr,
+            )
     return 0
-
 
 def list_capabilities(args: argparse.Namespace) -> int:
     capabilities = get_registered_plugin_capabilities()
