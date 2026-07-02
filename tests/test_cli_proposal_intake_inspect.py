@@ -27,6 +27,29 @@ def test_cli_proposal_intake_inspect_example(capsys) -> None:
     assert captured.err == ""
 
 
+def _write_placeholder_intake(tmp_path: Path) -> Path:
+    input_path = tmp_path / "placeholder_a1_intake.json"
+    payload = json.loads(A1_INTAKE_JSON.read_text(encoding="utf-8"))
+    payload["item_description"] = "TODO: Replace with explicit item description."
+    payload["scope_notes"][0] = "Replace with explicit first scope note."
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    return input_path
+
+
+def test_cli_proposal_intake_inspect_warns_about_placeholder_text(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_intake(tmp_path)
+
+    exit_code = main(["proposal", "intake-inspect", str(input_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Customer: Jane Customer" in captured.out
+    assert "Warning: unresolved placeholder text in A-1 proposal intake." in captured.err
+    assert "Placeholder fields: item_description, scope_notes[0]" in captured.err
+
 def test_cli_proposal_intake_inspect_invalid_intake_fails(
     tmp_path: Path, capsys
 ) -> None:
@@ -72,12 +95,30 @@ def test_cli_proposal_intake_inspect_json_output(capsys) -> None:
             "street_address": "123 Main St.",
         },
         "notes_count": 1,
+        "placeholder_field_paths": [],
         "pricing_amount": "3000.00",
         "proposal_date": "2026-07-01",
         "scope_count": 4,
     }
     assert captured.err == ""
 
+
+def test_cli_proposal_intake_inspect_json_includes_placeholder_field_paths(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    input_path = _write_placeholder_intake(tmp_path)
+
+    exit_code = main(["proposal", "intake-inspect", str(input_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 0
+    assert payload["placeholder_field_paths"] == [
+        "item_description",
+        "scope_notes[0]",
+    ]
+    assert captured.err == ""
 
 def test_cli_proposal_intake_inspect_json_invalid_intake_fails(
     tmp_path: Path, capsys
