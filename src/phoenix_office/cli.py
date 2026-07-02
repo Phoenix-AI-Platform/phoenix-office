@@ -260,6 +260,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the A-1 intake validation result as JSON",
     )
     intake_validate_parser.set_defaults(func=validate_proposal_intake)
+    intake_readiness_parser = proposal_subparsers.add_parser(
+        "intake-readiness",
+        help="Check whether an A-1 intake JSON file is ready for normalization",
+    )
+    intake_readiness_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to A-1 proposal intake JSON input",
+    )
+    intake_readiness_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output A-1 intake readiness as JSON",
+    )
+    intake_readiness_parser.set_defaults(func=check_proposal_intake_readiness)
     intake_inspect_parser = proposal_subparsers.add_parser(
         "intake-inspect",
         help="Inspect an explicit A-1 intake JSON file",
@@ -1258,6 +1273,53 @@ def normalize_proposal_intake(args: argparse.Namespace) -> int:
 
     print(f"Normalized proposal intake JSON: {output_path}")
     return 0
+
+
+def check_proposal_intake_readiness(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(
+            f"Error: intake JSON input file does not exist: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not input_path.is_file():
+        print(
+            f"Error: intake JSON input path is not a file: {input_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        intake = load_a1_proposal_intake(input_path)
+        placeholder_paths = unresolved_a1_proposal_intake_placeholder_paths(intake)
+    except ValueError as exc:
+        print(f"Error: invalid A-1 proposal intake JSON: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to check proposal intake readiness: {exc}", file=sys.stderr)
+        return 1
+
+    ready = not placeholder_paths
+    payload = {
+        "blocker_field_paths": placeholder_paths,
+        "input_path": str(input_path),
+        "ready_for_normalization": ready,
+        "status": "ready" if ready else "blocked",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif ready:
+        print(f"A-1 proposal intake readiness: ready ({input_path})")
+        print("Ready for normalization: yes")
+    else:
+        print(f"A-1 proposal intake readiness: blocked ({input_path})")
+        print("Ready for normalization: no")
+        print("Blocker fields: " + ", ".join(placeholder_paths))
+
+    return 0 if ready else 1
 
 
 def inspect_proposal_intake(args: argparse.Namespace) -> int:
