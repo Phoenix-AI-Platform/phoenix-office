@@ -104,6 +104,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_proposal_parser.set_defaults(func=validate_proposal)
 
+    readiness_proposal_parser = proposal_subparsers.add_parser(
+        "readiness",
+        help="Check whether a proposal JSON input is ready for DOCX generation",
+    )
+    readiness_proposal_parser.add_argument(
+        "input_json",
+        type=Path,
+        help="Path to proposal JSON input",
+    )
+    readiness_proposal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output proposal readiness as JSON",
+    )
+    readiness_proposal_parser.set_defaults(func=check_proposal_readiness)
+
     inspect_proposal_parser = proposal_subparsers.add_parser(
         "inspect",
         help="Inspect a proposal JSON input file",
@@ -1033,6 +1049,48 @@ def validate_proposal(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def check_proposal_readiness(args: argparse.Namespace) -> int:
+    input_path = args.input_json
+
+    if not input_path.exists():
+        print(f"Error: JSON input file does not exist: {input_path}", file=sys.stderr)
+        return 1
+    if not input_path.is_file():
+        print(f"Error: JSON input path is not a file: {input_path}", file=sys.stderr)
+        return 1
+
+    try:
+        proposal = load_proposal(input_path)
+        placeholder_paths = proposal_input_placeholder_paths(proposal)
+    except ValueError as exc:
+        print(f"Error: invalid proposal input: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI boundary should return a useful failure.
+        print(f"Error: failed to check proposal readiness: {exc}", file=sys.stderr)
+        return 1
+
+    ready = not placeholder_paths
+    payload = {
+        "blocker_field_paths": placeholder_paths,
+        "input_path": str(input_path),
+        "ready_for_docx_generation": ready,
+        "status": "ready" if ready else "blocked",
+    }
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    elif ready:
+        print(f"ProposalInput readiness: ready ({input_path})")
+        print("Ready for DOCX generation: yes")
+    else:
+        print(f"ProposalInput readiness: blocked ({input_path})")
+        print("Ready for DOCX generation: no")
+        print("Blocker fields: " + ", ".join(placeholder_paths))
+
+    return 0 if ready else 1
+
 
 def _format_proposal_validation_errors(exc: ValidationError) -> list[str]:
     return [_format_proposal_validation_error(error) for error in exc.errors()]
