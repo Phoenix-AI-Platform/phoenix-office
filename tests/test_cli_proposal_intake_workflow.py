@@ -234,3 +234,134 @@ def test_cli_customer_backed_a1_intake_workflow_smoke(
     assert "Pump contents of tank (contents unknown)" in docx_text
     assert "TOTAL: Starting at $3,000.00" in docx_text
     assert "Customer is responsible for access to the tank area." in docx_text
+
+
+def test_cli_readiness_workflow_smoke(tmp_path: Path, capsys) -> None:
+    intake_path = tmp_path / "a1_proposal_intake.json"
+    blocked_intake_path = tmp_path / "blocked_a1_proposal_intake.json"
+    proposal_input_path = tmp_path / "a1_proposal_input.json"
+    blocked_proposal_input_path = tmp_path / "blocked_a1_proposal_input.json"
+    blocked_docx_path = tmp_path / "blocked_a1_proposal.docx"
+
+    draft_exit_code = main(["proposal", "draft-json", str(intake_path)])
+    draft_output = capsys.readouterr()
+
+    assert draft_exit_code == 0
+    assert draft_output.err == ""
+    assert intake_path.exists()
+
+    intake_ready_exit_code = main(
+        ["proposal", "intake-readiness", str(intake_path), "--json"]
+    )
+    intake_ready_output = capsys.readouterr()
+    intake_ready_payload = json.loads(intake_ready_output.out)
+
+    assert intake_ready_exit_code == 0
+    assert intake_ready_payload == {
+        "blocker_field_paths": [],
+        "input_path": str(intake_path),
+        "ready_for_normalization": True,
+        "status": "ready",
+    }
+    assert intake_ready_output.err == ""
+
+    blocked_intake_payload = json.loads(intake_path.read_text(encoding="utf-8"))
+    blocked_intake_payload["item_description"] = (
+        "TODO: Replace with explicit item description."
+    )
+    blocked_intake_payload["scope_notes"][0] = "Replace with explicit first scope note."
+    blocked_intake_path.write_text(
+        json.dumps(blocked_intake_payload),
+        encoding="utf-8",
+    )
+
+    intake_blocked_exit_code = main(
+        ["proposal", "intake-readiness", str(blocked_intake_path), "--json"]
+    )
+    intake_blocked_output = capsys.readouterr()
+    intake_blocked_payload = json.loads(intake_blocked_output.out)
+
+    assert intake_blocked_exit_code == 1
+    assert intake_blocked_payload == {
+        "blocker_field_paths": [
+            "item_description",
+            "scope_notes[0]",
+        ],
+        "input_path": str(blocked_intake_path),
+        "ready_for_normalization": False,
+        "status": "blocked",
+    }
+    assert intake_blocked_output.err == ""
+
+    normalize_exit_code = main(
+        ["proposal", "intake-normalize", str(intake_path), str(proposal_input_path)]
+    )
+    normalize_output = capsys.readouterr()
+
+    assert normalize_exit_code == 0
+    assert "Normalized proposal intake JSON" in normalize_output.out
+    assert normalize_output.err == ""
+    assert proposal_input_path.exists()
+
+    proposal_ready_exit_code = main(
+        ["proposal", "readiness", str(proposal_input_path), "--json"]
+    )
+    proposal_ready_output = capsys.readouterr()
+    proposal_ready_payload = json.loads(proposal_ready_output.out)
+
+    assert proposal_ready_exit_code == 0
+    assert proposal_ready_payload == {
+        "blocker_field_paths": [],
+        "input_path": str(proposal_input_path),
+        "ready_for_docx_generation": True,
+        "status": "ready",
+    }
+    assert proposal_ready_output.err == ""
+
+    blocked_proposal_payload = json.loads(
+        proposal_input_path.read_text(encoding="utf-8")
+    )
+    blocked_proposal_payload["item_description"] = (
+        "TODO: Replace with explicit item description."
+    )
+    blocked_proposal_input_path.write_text(
+        json.dumps(blocked_proposal_payload),
+        encoding="utf-8",
+    )
+
+    proposal_blocked_exit_code = main(
+        ["proposal", "readiness", str(blocked_proposal_input_path), "--json"]
+    )
+    proposal_blocked_output = capsys.readouterr()
+    proposal_blocked_payload = json.loads(proposal_blocked_output.out)
+
+    assert proposal_blocked_exit_code == 1
+    assert proposal_blocked_payload == {
+        "blocker_field_paths": ["item_description"],
+        "input_path": str(blocked_proposal_input_path),
+        "ready_for_docx_generation": False,
+        "status": "blocked",
+    }
+    assert proposal_blocked_output.err == ""
+
+    blocked_generate_exit_code = main(
+        [
+            "proposal",
+            "generate-from-intake",
+            str(blocked_intake_path),
+            str(blocked_docx_path),
+            "--template",
+            str(A1_TEMPLATE),
+        ]
+    )
+    blocked_generate_output = capsys.readouterr()
+
+    assert blocked_generate_exit_code == 1
+    assert blocked_generate_output.out == ""
+    assert "unresolved placeholder text in A-1 proposal intake" in (
+        blocked_generate_output.err
+    )
+    assert "Placeholder fields: item_description, scope_notes[0]" in (
+        blocked_generate_output.err
+    )
+    assert not blocked_docx_path.exists()
