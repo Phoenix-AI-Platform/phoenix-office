@@ -142,11 +142,35 @@ python -m phoenix_office.cli proposal readiness output/placeholder_a1_proposal_i
 python -m phoenix_office.cli proposal readiness output/placeholder_a1_proposal_input.json --json
 ```
 
-Readiness checks are read-only. They do not normalize intake, render DOCX, write output files, or change proposal data.
+Check whether a DOCX template path passes the current template readiness checks before generation:
+
+```bash
+python -m phoenix_office.cli proposal template-readiness tests/fixtures/templates/a1_proposal_template.docx
+```
+
+For machine-readable template readiness output:
+
+```bash
+python -m phoenix_office.cli proposal template-readiness tests/fixtures/templates/a1_proposal_template.docx --json
+```
+
+If the template path is missing, template readiness exits nonzero and reports a blocked result:
+
+```bash
+python -m phoenix_office.cli proposal template-readiness output/missing_template.docx
+```
+
+If the template file is not a usable DOCX file, template readiness exits nonzero and reports a blocked result:
+
+```bash
+python -m phoenix_office.cli proposal template-readiness output/invalid_template.docx
+```
+
+Readiness checks are read-only. They do not normalize intake, render DOCX, write output files, modify templates, change proposal data, mutate records, call GitHub APIs, trigger workflows, or execute workers or background behavior. A ready result means the input or template path passed the current readiness checks; it is not permission to generate, submit, email, or approve a proposal. Actual DOCX generation still requires the explicit proposal generation command.
 
 ## 5. Normalize To ProposalInput JSON
-Convert the explicit intake JSON into the existing `ProposalInput` shape:
 
+Convert the explicit intake JSON into the existing `ProposalInput` shape:
 ```bash
 python -m phoenix_office.cli proposal intake-normalize output/a1_proposal_intake.json output/a1_proposal_input.json
 ```
