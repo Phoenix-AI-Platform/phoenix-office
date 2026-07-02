@@ -8,6 +8,8 @@ from pathlib import Path
 from docx import Document
 
 from phoenix_office.cli import main
+from phoenix_office.models.records import CustomerRecord
+from phoenix_office.records import customer_record_to_json
 
 ROOT = Path(__file__).parents[1]
 A1_INTAKE_JSON = ROOT / "examples" / "proposals" / "a1_residential_tank_removal_intake.json"
@@ -95,3 +97,111 @@ def test_cli_proposal_generate_from_intake_invalid_intake_fails(
     assert "Error: invalid A-1 proposal intake JSON:" in captured.err
     assert "pricing_lines" in captured.err
     assert not output_path.exists()
+
+
+def _write_customer_record(path: Path) -> None:
+    customer = CustomerRecord(
+        customer_id="customer-abby-hill",
+        display_name="Abby Hill",
+        phone="555-0100",
+        email="abby@example.com",
+        billing_street_address="999 Billing Rd.",
+        billing_city_state_zip="Billing, WI 53000",
+        job_street_address="W3064 Piper Rd.",
+        job_city_state_zip="Whitewater, WI 53190",
+    )
+    path.write_text(customer_record_to_json(customer), encoding="utf-8")
+
+
+def _write_customer_backed_placeholder_intake(
+    tmp_path: Path, capsys
+) -> tuple[Path, str]:
+    customer_path = tmp_path / "abby_customer.json"
+    intake_path = tmp_path / "abby_placeholder_intake.json"
+    _write_customer_record(customer_path)
+
+    exit_code = main(
+        [
+            "proposal",
+            "customer-draft-json",
+            str(customer_path),
+            str(intake_path),
+            "--proposal-date",
+            "2026-07-01",
+            "--item-description",
+            "TODO: Replace with explicit item description.",
+            "--scope-note",
+            "Remove and dispose of tank and residual contents",
+            "--pricing-description",
+            "Residential tank removal",
+            "--pricing-amount",
+            "3000.00",
+            "--special-note",
+            "Customer is responsible for access to the tank area.",
+        ]
+    )
+    output = capsys.readouterr()
+
+    assert exit_code == 0
+    assert output.err == ""
+    assert intake_path.exists()
+    return intake_path, "TODO: Replace with explicit item description."
+
+
+def test_cli_proposal_generate_from_customer_backed_intake_blocks_placeholders(
+    tmp_path: Path, capsys
+) -> None:
+    intake_path, _placeholder = _write_customer_backed_placeholder_intake(
+        tmp_path, capsys
+    )
+    output_path = tmp_path / "blocked_placeholder_proposal.docx"
+
+    exit_code = main(
+        [
+            "proposal",
+            "generate-from-intake",
+            str(intake_path),
+            str(output_path),
+            "--template",
+            str(A1_TEMPLATE),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "unresolved placeholder text in A-1 proposal intake" in captured.err
+    assert "Use --allow-placeholder-intake to generate anyway." in captured.err
+    assert "item_description" in captured.err
+    assert not output_path.exists()
+
+
+def test_cli_proposal_generate_from_customer_backed_intake_allows_placeholder_override(
+    tmp_path: Path, capsys
+) -> None:
+    intake_path, placeholder = _write_customer_backed_placeholder_intake(
+        tmp_path, capsys
+    )
+    output_path = tmp_path / "allowed_placeholder_proposal.docx"
+
+    exit_code = main(
+        [
+            "proposal",
+            "generate-from-intake",
+            str(intake_path),
+            str(output_path),
+            "--template",
+            str(A1_TEMPLATE),
+            "--allow-placeholder-intake",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    text = read_docx_text(output_path)
+    assert exit_code == 0
+    assert "Generated proposal DOCX" in captured.out
+    assert captured.err == ""
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert "Abby Hill" in text
+    assert placeholder in text
