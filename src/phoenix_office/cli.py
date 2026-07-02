@@ -1084,7 +1084,8 @@ def validate_proposal_intake(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        load_a1_proposal_intake(input_path)
+        intake = load_a1_proposal_intake(input_path)
+        placeholder_paths = unresolved_a1_proposal_intake_placeholder_paths(intake)
     except ValueError as exc:
         error = str(exc)
         if args.json:
@@ -1101,20 +1102,35 @@ def validate_proposal_intake(args: argparse.Namespace) -> int:
         return 1
 
     if args.json:
-        _print_proposal_intake_validation_json(input_path, None)
+        _print_proposal_intake_validation_json(
+            input_path,
+            None,
+            placeholder_paths=placeholder_paths,
+        )
     else:
         print(f"A-1 proposal intake validation passed: {input_path}")
+        if placeholder_paths:
+            print(
+                "Warning: unresolved placeholder text in A-1 proposal intake.",
+                file=sys.stderr,
+            )
+            print(
+                "Placeholder fields: " + ", ".join(placeholder_paths),
+                file=sys.stderr,
+            )
     return 0
-
 
 def _print_proposal_intake_validation_json(
     input_path: Path,
     error: str | None,
+    *,
+    placeholder_paths: list[str] | None = None,
 ) -> None:
     payload = _proposal_intake_validation_result_payload(
         input_path=input_path,
         valid=error is None,
         error=error,
+        placeholder_paths=placeholder_paths or [],
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1124,14 +1140,15 @@ def _proposal_intake_validation_result_payload(
     input_path: Path,
     valid: bool,
     error: str | None,
+    placeholder_paths: list[str],
 ) -> dict[str, Any]:
     return {
         "error": error,
         "input_path": str(input_path),
+        "placeholder_field_paths": placeholder_paths,
         "status": "valid" if valid else "invalid",
         "valid": valid,
     }
-
 
 def normalize_proposal_intake(args: argparse.Namespace) -> int:
     input_path = args.input_json
