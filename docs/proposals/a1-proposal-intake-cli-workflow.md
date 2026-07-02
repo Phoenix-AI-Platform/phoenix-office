@@ -107,8 +107,44 @@ python -m phoenix_office.cli proposal intake-inspect output/placeholder_a1_propo
 
 Inspection is read-only. It validates and summarizes the intake only.
 
-## 4. Normalize To ProposalInput JSON
+## 4. Check Readiness
 
+Check whether an intake is structurally valid and free of unresolved placeholders before normalization:
+
+```bash
+python -m phoenix_office.cli proposal intake-readiness output/a1_proposal_intake.json
+```
+
+For machine-readable readiness output:
+
+```bash
+python -m phoenix_office.cli proposal intake-readiness output/a1_proposal_intake.json --json
+```
+
+If placeholders remain, intake readiness exits nonzero and reports blocker field paths. JSON readiness includes `blocker_field_paths`.
+
+```bash
+python -m phoenix_office.cli proposal intake-readiness output/placeholder_a1_proposal_intake.json
+python -m phoenix_office.cli proposal intake-readiness output/placeholder_a1_proposal_intake.json --json
+```
+
+After normalization, check whether the normalized `ProposalInput` is ready for DOCX generation:
+
+```bash
+python -m phoenix_office.cli proposal readiness output/a1_proposal_input.json
+python -m phoenix_office.cli proposal readiness output/a1_proposal_input.json --json
+```
+
+If normalized proposal placeholders remain, proposal readiness exits nonzero and reports blocker field paths. JSON readiness includes `blocker_field_paths`.
+
+```bash
+python -m phoenix_office.cli proposal readiness output/placeholder_a1_proposal_input.json
+python -m phoenix_office.cli proposal readiness output/placeholder_a1_proposal_input.json --json
+```
+
+Readiness checks are read-only. They do not normalize intake, render DOCX, write output files, or change proposal data.
+
+## 5. Normalize To ProposalInput JSON
 Convert the explicit intake JSON into the existing `ProposalInput` shape:
 
 ```bash
@@ -156,7 +192,7 @@ Use the explicit override only when the operator intentionally wants placeholder
 python -m phoenix_office.cli proposal generate output/abby_hill_placeholder_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx --allow-placeholder-proposal-input
 ```
 
-## 5. Generate DOCX From Intake
+## 6. Generate DOCX From Intake
 
 When the intake has been reviewed and the operator explicitly wants a DOCX artifact, run:
 
