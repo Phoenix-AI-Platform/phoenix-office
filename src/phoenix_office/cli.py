@@ -1314,6 +1314,11 @@ def check_proposal_intake_readiness(args: argparse.Namespace) -> int:
     elif ready:
         print(f"A-1 proposal intake readiness: ready ({input_path})")
         print("Ready for normalization: yes")
+        print(
+            "Next manual command: "
+            "python -m phoenix_office.cli proposal intake-normalize "
+            f"{input_path} output/a1_proposal_input.json"
+        )
     else:
         print(f"A-1 proposal intake readiness: blocked ({input_path})")
         print("Ready for normalization: no")

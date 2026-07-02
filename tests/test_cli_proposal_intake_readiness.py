@@ -27,8 +27,12 @@ def test_cli_proposal_intake_readiness_reports_ready_example(capsys) -> None:
     assert exit_code == 0
     assert f"A-1 proposal intake readiness: ready ({A1_INTAKE_JSON})" in captured.out
     assert "Ready for normalization: yes" in captured.out
+    assert (
+        "Next manual command: "
+        "python -m phoenix_office.cli proposal intake-normalize "
+        f"{A1_INTAKE_JSON} output/a1_proposal_input.json"
+    ) in captured.out
     assert captured.err == ""
-
 
 def test_cli_proposal_intake_readiness_blocks_placeholder_text(
     tmp_path: Path,
