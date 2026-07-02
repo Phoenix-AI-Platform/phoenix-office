@@ -269,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to the DOCX template",
     )
+    generate_from_intake_parser.add_argument(
+        "--allow-placeholder-intake",
+        action="store_true",
+        help="Allow DOCX generation when intake contains unresolved placeholder text",
+    )
     generate_from_intake_parser.set_defaults(func=generate_proposal_from_intake)
 
     intake_parser = proposal_subparsers.add_parser(
@@ -873,6 +878,40 @@ def generate_proposal(args: argparse.Namespace) -> int:
 
 
 
+
+UNRESOLVED_INTAKE_PLACEHOLDER_MARKERS = (
+    "todo:",
+    "replace with explicit",
+)
+
+
+def unresolved_a1_proposal_intake_placeholder_paths(intake: Any) -> list[str]:
+    payload = intake.model_dump(mode="json")
+    return _unresolved_placeholder_paths(payload)
+
+
+def _unresolved_placeholder_paths(value: Any, path: str = "") -> list[str]:
+    if isinstance(value, str):
+        normalized = value.casefold()
+        if any(marker in normalized for marker in UNRESOLVED_INTAKE_PLACEHOLDER_MARKERS):
+            return [path or "<root>"]
+        return []
+
+    if isinstance(value, dict):
+        paths: list[str] = []
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            paths.extend(_unresolved_placeholder_paths(child, child_path))
+        return paths
+
+    if isinstance(value, list):
+        paths = []
+        for index, child in enumerate(value):
+            paths.extend(_unresolved_placeholder_paths(child, f"{path}[{index}]"))
+        return paths
+
+    return []
+
 def generate_proposal_from_intake(args: argparse.Namespace) -> int:
     input_path = args.input_json
     template_path = args.template
@@ -895,6 +934,22 @@ def generate_proposal_from_intake(args: argparse.Namespace) -> int:
 
     try:
         intake = load_a1_proposal_intake(input_path)
+        placeholder_paths = unresolved_a1_proposal_intake_placeholder_paths(intake)
+        if placeholder_paths and not args.allow_placeholder_intake:
+            print(
+                "Error: unresolved placeholder text in A-1 proposal intake; "
+                "refusing DOCX generation.",
+                file=sys.stderr,
+            )
+            print(
+                "Use --allow-placeholder-intake to generate anyway.",
+                file=sys.stderr,
+            )
+            print(
+                "Placeholder fields: " + ", ".join(placeholder_paths),
+                file=sys.stderr,
+            )
+            return 1
         proposal = intake.to_proposal_input()
         result = DocxProposalRenderer().render(proposal, template_path, output_path)
     except ValueError as exc:
