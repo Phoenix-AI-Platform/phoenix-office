@@ -62,6 +62,12 @@ The package inspection is read-only and local-only. It validates explicit record
 
 Structural validity means the package is internally well formed. A structurally valid package may still be incomplete when one or more controls are explicitly `blocked` or `unverified`; those statuses are valid records, not malformed package structure. Exit zero means only that the package is structurally valid and all eleven required external controls are marked `verified` with safe opaque evidence references and expected reviewer roles. It does not prove the referenced evidence is truthful, fresh, enforceable, sufficient, or reviewed, and package completeness does not authorize invocation. The output must keep `pilot_ready: false`, `invocation_authorized: false`, `invocation_performed: false`, `github_access_performed: false`, `network_access_performed: false`, and `mutation_performed: false`.
 
+## Supervised Pilot Composite Preflight
+
+`python -m phoenix_office.cli dev codex-pilot-preflight <handoff.json> <evidence.json>` composes the reviewed local/package checks before a separate authorization review. It reuses the handoff static preflight, local runtime capability probe, and evidence package inspection, then verifies the handoff/evidence binding. `--json` emits the same sanitized report as deterministic JSON.
+
+This command does not verify the truth, freshness, enforceability, review quality, or sufficiency of external evidence. Exit zero means only `eligible_for_authorization_review: true`; it does not mean that invocation is authorized, ready, or performed. Unsafe input filenames block the composite preflight. Detailed standalone handoff diagnostics are reduced to sanitized categories in the composite report. The command must not emit the handoff prompt, rendered prompt, raw evidence references, raw runtime output, workspace paths, environment values, credentials, usernames, home directories, or machine-specific values, and it must keep all invocation, GitHub, network, branch, PR, and mutation flags false.
+
 ## Supervised Invocation Pilot Boundary
 
 The narrowest future pilot boundary is: a human-triggered supervised invocation that consumes one already-committed `CodexHandoffPackage` after local or workflow validation has succeeded.

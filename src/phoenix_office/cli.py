@@ -150,6 +150,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the evidence inspection report as JSON",
     )
     codex_pilot_evidence_parser.set_defaults(func=codex_pilot_evidence)
+    codex_pilot_preflight_parser = dev_subparsers.add_parser(
+        "codex-pilot-preflight",
+        help="Run the read-only supervised Codex pilot readiness preflight",
+    )
+    codex_pilot_preflight_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_pilot_preflight_parser.add_argument(
+        "evidence_json",
+        type=Path,
+        help="Path to Codex pilot evidence package JSON",
+    )
+    codex_pilot_preflight_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the composite pilot preflight report as JSON",
+    )
+    codex_pilot_preflight_parser.set_defaults(func=codex_pilot_preflight)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -946,6 +966,18 @@ def codex_pilot_evidence(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_evidence_report(report)
     return 0 if report["evidence_package_complete"] else 1
+
+
+def codex_pilot_preflight(args: argparse.Namespace) -> int:
+    report = _run_codex_pilot_preflight(
+        handoff_path=args.handoff_json,
+        evidence_path=args.evidence_json,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_preflight_report(report)
+    return 0 if report["eligible_for_authorization_review"] else 1
 
 
 def _load_codex_invocation_preflight(
@@ -2154,6 +2186,187 @@ CODEX_PILOT_EVIDENCE_CONTROL_FIELDS = {
     "evidence_ref",
     "reviewer_role",
 }
+
+
+CODEX_PILOT_PREFLIGHT_SCHEMA_VERSION = "codex-pilot-preflight.v1"
+CODEX_PILOT_PREFLIGHT_COMMAND = "dev codex-pilot-preflight"
+
+
+def _run_codex_pilot_preflight(
+    *,
+    handoff_path: Path,
+    evidence_path: Path,
+) -> dict[str, Any]:
+    handoff_filename = _safe_codex_pilot_evidence_input_filename(handoff_path)
+    evidence_filename = _safe_codex_pilot_evidence_input_filename(evidence_path)
+    handoff_package, handoff_report = _load_codex_invocation_preflight(
+        handoff_path
+    )
+    runtime_report = _run_codex_runtime_probe()
+    evidence_report = _inspect_codex_pilot_evidence_package(evidence_path)
+
+    handoff_id = handoff_report.get("handoff_id")
+    evidence_handoff_id = evidence_report.get("handoff_id")
+    repository = (
+        CODEX_PILOT_EVIDENCE_REPOSITORY
+        if handoff_report.get("repository") == CODEX_PILOT_EVIDENCE_REPOSITORY
+        and evidence_report.get("repository") == CODEX_PILOT_EVIDENCE_REPOSITORY
+        else None
+    )
+
+    handoff_blockers = _codex_pilot_preflight_handoff_blockers(
+        handoff_package=handoff_package,
+        handoff_report=handoff_report,
+        handoff_filename=handoff_filename,
+    )
+    runtime_blockers = sorted(runtime_report.get("blockers", []))
+    evidence_blockers = sorted(evidence_report.get("blockers", []))
+    if evidence_filename is None:
+        evidence_blockers = sorted(
+            {*evidence_blockers, "evidence input filename is unsafe"}
+        )
+    binding_blockers = _codex_pilot_preflight_binding_blockers(
+        handoff_report=handoff_report,
+        evidence_report=evidence_report,
+    )
+
+    handoff_static_preflight_passed = bool(handoff_report.get("static_eligible"))
+    runtime_local_cli_ready = bool(runtime_report.get("local_cli_ready"))
+    evidence_structural_valid = bool(evidence_report.get("structural_valid"))
+    evidence_package_complete = bool(
+        evidence_report.get("evidence_package_complete")
+    )
+    binding_passed = not binding_blockers
+    eligible_for_authorization_review = all(
+        [
+            handoff_filename is not None,
+            evidence_filename is not None,
+            handoff_static_preflight_passed,
+            runtime_local_cli_ready,
+            evidence_structural_valid,
+            evidence_package_complete,
+            binding_passed,
+        ]
+    )
+
+    return {
+        "binding_blockers": binding_blockers,
+        "binding_passed": binding_passed,
+        "blockers_by_source": {
+            "binding": binding_blockers,
+            "evidence": evidence_blockers,
+            "handoff": handoff_blockers,
+            "runtime": runtime_blockers,
+        },
+        "branch_created": False,
+        "command": CODEX_PILOT_PREFLIGHT_COMMAND,
+        "eligible_for_authorization_review": eligible_for_authorization_review,
+        "evidence_complete": evidence_package_complete,
+        "evidence_filename": evidence_filename,
+        "evidence_structural_valid": evidence_structural_valid,
+        "github_access_performed": False,
+        "handoff_filename": handoff_filename,
+        "handoff_id": handoff_id if handoff_id == evidence_handoff_id else None,
+        "handoff_static_preflight_passed": handoff_static_preflight_passed,
+        "invocation_authorized": False,
+        "invocation_performed": False,
+        "mutation_performed": False,
+        "network_access_performed": False,
+        "pilot_kind": evidence_report.get("pilot_kind"),
+        "pilot_ready": False,
+        "pull_request_created": False,
+        "repository": repository,
+        "runtime_local_cli_ready": runtime_local_cli_ready,
+        "schema_version": CODEX_PILOT_PREFLIGHT_SCHEMA_VERSION,
+    }
+
+
+def _codex_pilot_preflight_binding_blockers(
+    *,
+    handoff_report: dict[str, Any],
+    evidence_report: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    if handoff_report.get("repository") != CODEX_PILOT_EVIDENCE_REPOSITORY:
+        blockers.append("handoff repository is invalid")
+    if evidence_report.get("repository") != CODEX_PILOT_EVIDENCE_REPOSITORY:
+        blockers.append("evidence repository is invalid")
+    if evidence_report.get("pilot_kind") != CODEX_PILOT_EVIDENCE_KIND:
+        blockers.append("evidence pilot_kind is invalid")
+
+    handoff_id = handoff_report.get("handoff_id")
+    evidence_handoff_id = evidence_report.get("handoff_id")
+    if not handoff_id or not evidence_handoff_id:
+        blockers.append("handoff id binding is unavailable")
+    elif handoff_id != evidence_handoff_id:
+        blockers.append("handoff id does not match evidence package")
+    return sorted(blockers)
+
+
+def _codex_pilot_preflight_handoff_blockers(
+    *,
+    handoff_package: dict[str, Any] | None,
+    handoff_report: dict[str, Any],
+    handoff_filename: str | None,
+) -> list[str]:
+    blockers: set[str] = set()
+    if handoff_filename is None:
+        blockers.add("handoff input filename is unsafe")
+
+    raw_blockers = handoff_report.get("package_blockers", [])
+    if not raw_blockers:
+        return sorted(blockers)
+
+    if handoff_package is None:
+        if any("does not exist" in blocker for blocker in raw_blockers):
+            blockers.add("handoff package is missing")
+        elif any("Invalid JSON" in blocker for blocker in raw_blockers):
+            blockers.add("handoff package is malformed")
+        else:
+            blockers.add("handoff package is unreadable")
+    else:
+        blockers.add("handoff package failed static preflight")
+    return sorted(blockers)
+
+
+def _print_codex_pilot_preflight_report(report: dict[str, Any]) -> None:
+    print("Codex pilot readiness preflight")
+    print(f"Schema version: {report['schema_version']}")
+    print(f"Command: {report['command']}")
+    print(f"Handoff filename: {report['handoff_filename']}")
+    print(f"Evidence filename: {report['evidence_filename']}")
+    print(f"Repository: {report['repository']}")
+    print(f"Handoff ID: {report['handoff_id']}")
+    print(f"Pilot kind: {report['pilot_kind']}")
+    print(
+        "Handoff static preflight passed: "
+        f"{_format_yes_no(report['handoff_static_preflight_passed'])}"
+    )
+    print(
+        "Runtime local CLI ready: "
+        f"{_format_yes_no(report['runtime_local_cli_ready'])}"
+    )
+    print(
+        "Evidence structural valid: "
+        f"{_format_yes_no(report['evidence_structural_valid'])}"
+    )
+    print(f"Evidence complete: {_format_yes_no(report['evidence_complete'])}")
+    print(f"Binding passed: {_format_yes_no(report['binding_passed'])}")
+    print(
+        "Eligible for authorization review: "
+        f"{_format_yes_no(report['eligible_for_authorization_review'])}"
+    )
+    print("Pilot ready: no")
+    print("Invocation authorized: no")
+    print("Invocation performed: no")
+    print("GitHub access performed: no")
+    print("Network access performed: no")
+    print("Mutation performed: no")
+    print("Branch created: no")
+    print("Pull request created: no")
+    blockers_by_source = report["blockers_by_source"]
+    for source in ["handoff", "runtime", "evidence", "binding"]:
+        _print_list(f"{source.title()} blockers", blockers_by_source[source])
 
 
 def _inspect_codex_pilot_evidence_package(path: Path) -> dict[str, Any]:
