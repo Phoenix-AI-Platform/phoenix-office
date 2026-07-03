@@ -187,6 +187,10 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #168 ci: make docs-only auto-merge label trigger self-contained (updates docs-only dry-run and pilot workflows so successful label-triggered dry-runs can wake the pilot even when GitHub omits PR links from workflow-run payloads; human label gate and final PR re-read preserved)
 #172 ci: defer docs-only dry-run while required checks are pending (updates docs-only dry-run to defer pending required checks without claiming eligibility, adds an eligibility confirmation job for the pilot, and preserves fail-closed behavior for hard gate failures)
 #181 docs/process: capture docs-only auto-merge validation after 179 (records PR #179 successful fresh-branch docs-only auto-merge validation and the PR #176/#177/#178 confirmation-job hardening lesson; documentation only)
+#260 feat: add machine-readable Codex handoff package (adds `CodexHandoffPackage`, a sanitized example, and tests for deterministic manual Codex handoff preparation; no invocation behavior added)
+#262 feat: add read-only Codex handoff inspection CLI (adds `python -m phoenix_office.cli dev codex-handoff` text/JSON inspection with fail-closed safety validation; no package writing or Codex invocation added)
+#264 ci: add manual Codex handoff dry-run workflow (adds manual-only read-permission workflow validation for committed handoff packages, uploading only normalized validated JSON; no automatic trigger or GitHub mutation added)
+#266 docs/process: validate Codex handoff dry-run workflow (records successful main-branch manual dry-run validation and unsafe escaping-path fail-closed behavior; documentation only)
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -250,6 +254,8 @@ Phoenix Office now has repo-native process documentation for keeping future work
 - Phoenix task issue classification guidance
 - an issue-to-Codex trigger evaluation
 - an issue-to-Codex preparation handoff
+- a machine-readable Codex handoff package contract and read-only inspection CLI
+- a manual-only Codex handoff dry-run validation workflow
 - docs-only autopilot eligibility guidance
 - a docs-only auto-merge implementation plan
 - a docs-only auto-merge dry-run gate
