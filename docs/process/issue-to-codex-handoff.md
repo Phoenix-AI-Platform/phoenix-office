@@ -81,6 +81,22 @@ Creating, reading, validating, displaying, or reviewing a `CodexHandoffPackage` 
 
 `invocation_authorized: false` means the package is preparation only. A human still decides whether to start Codex and what prompt to paste. `worker_may_merge: false` means Codex must stop after opening its PR; reviewer approval and the repository merge process remain separate human-controlled gates.
 
+Operators can inspect a package in human-readable form:
+
+```bash
+python -m phoenix_office.cli dev codex-handoff examples/tasks/codex_handoff_package.json
+```
+
+They can also inspect the same package as deterministic machine-readable JSON:
+
+```bash
+python -m phoenix_office.cli dev codex-handoff examples/tasks/codex_handoff_package.json --json
+```
+
+The inspection command is read-only. It reads one local JSON file, validates the current v1 safety boundary, and prints either a text summary or sorted, indented JSON. It does not create or rewrite packages, invoke Codex, call GitHub APIs, dispatch workflows, execute workers, mutate files, or merge a PR.
+
+The command fails closed for malformed, incomplete, unsupported, or unsafe packages. A successful inspection means only that the package satisfies the current read-only handoff checks; it does not authorize Codex invocation, PR approval, merge behavior, proposal generation, DOCX rendering, or any background work.
+
 Future CLI commands, workflow behavior, issue fetching, package validation automation, or Codex invocation behavior require separate reviewed PRs.
 
 ## Reusable Codex Prompt Template

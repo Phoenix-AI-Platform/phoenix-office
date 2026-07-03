@@ -69,6 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output development status as JSON",
     )
     dev_status_parser.set_defaults(func=dev_status)
+    codex_handoff_parser = dev_subparsers.add_parser(
+        "codex-handoff",
+        help="Inspect a read-only Codex handoff package",
+    )
+    codex_handoff_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_handoff_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the validated Codex handoff package as JSON",
+    )
+    codex_handoff_parser.set_defaults(func=inspect_codex_handoff)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -731,6 +746,48 @@ def dev_status(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    return 0
+
+
+def inspect_codex_handoff(args: argparse.Namespace) -> int:
+    package_path = args.handoff_json
+
+    if not package_path.exists():
+        print(
+            f"Error: CodexHandoffPackage JSON file does not exist: {package_path}",
+            file=sys.stderr,
+        )
+        return 1
+    if not package_path.is_file():
+        print(
+            f"Error: CodexHandoffPackage JSON path is not a file: {package_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        package = _load_codex_handoff_package_json(package_path)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(
+            f"Error: failed to read CodexHandoffPackage JSON: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    issues = _validate_codex_handoff_package(package)
+    if issues:
+        print("Error: unsafe or invalid CodexHandoffPackage.", file=sys.stderr)
+        for issue in issues:
+            print(f"- {issue}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(package, indent=2, sort_keys=True))
+    else:
+        _print_codex_handoff_summary(package)
     return 0
 
 
@@ -1804,6 +1861,75 @@ def _load_task_json(path: Path) -> dict[str, Any]:
     return data
 
 
+def _load_codex_handoff_package_json(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as file:
+            data: Any = json.load(file)
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Invalid UTF-8 in {path}: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"CodexHandoffPackage JSON must be an object: {path}")
+    return data
+
+
+def _validate_codex_handoff_package(package: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    expected_values: dict[str, Any] = {
+        "schema_version": "codex-handoff-package.v1",
+        "worker_type": "codex",
+        "invocation_mode": "manual",
+    }
+    for field_name, expected_value in expected_values.items():
+        if package.get(field_name) != expected_value:
+            issues.append(
+                f"{field_name} must be {expected_value!r}; "
+                f"got {package.get(field_name)!r}"
+            )
+
+    expected_booleans = {
+        "invocation_authorized": False,
+        "review_required": True,
+        "worker_may_merge": False,
+    }
+    for field_name, expected_value in expected_booleans.items():
+        value = package.get(field_name)
+        if type(value) is not bool or value is not expected_value:
+            issues.append(
+                f"{field_name} must be JSON boolean {expected_value!r}; "
+                f"got {value!r}"
+            )
+
+    for field_name in [
+        "handoff_id",
+        "repository",
+        "base_branch",
+        "expected_pr_title",
+        "prompt",
+    ]:
+        if not _is_non_empty_string(package.get(field_name)):
+            issues.append(f"{field_name} must be a non-empty string")
+
+    task = package.get("task")
+    if not isinstance(task, dict):
+        issues.append("task must be an object")
+    else:
+        for field_name in ["task_id", "title", "objective"]:
+            if not _is_non_empty_string(task.get(field_name)):
+                issues.append(f"task.{field_name} must be a non-empty string")
+
+    for field_name in ["required_repo_paths", "required_pr_body_headings"]:
+        value = package.get(field_name)
+        if not isinstance(value, list):
+            issues.append(f"{field_name} must be a list of strings")
+        elif not all(isinstance(item, str) for item in value):
+            issues.append(f"{field_name} must contain only strings")
+
+    return issues
+
+
 def _load_workflow_plan(path: Path) -> WorkflowPlan:
     try:
         with path.open(encoding="utf-8") as file:
@@ -1904,6 +2030,10 @@ def _as_list(value: Any) -> list[Any]:
     return []
 
 
+def _is_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _format_yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
@@ -1931,6 +2061,35 @@ def _print_optional_value(label: str, value: object | None) -> None:
 def _print_list_if_present(label: str, values: list[str]) -> None:
     if values:
         _print_list(label, values)
+
+
+def _print_codex_handoff_summary(package: dict[str, Any]) -> None:
+    task = _as_dict(package.get("task"))
+    print(f"Codex handoff package: {package['handoff_id']}")
+    print(f"Schema version: {package['schema_version']}")
+    print(f"Task ID: {task['task_id']}")
+    print(f"Task title: {task['title']}")
+    print(f"Repository: {package['repository']}")
+    print(f"Base branch: {package['base_branch']}")
+    print(f"Expected PR title: {package['expected_pr_title']}")
+    print(f"Worker type: {package['worker_type']}")
+    print(f"Invocation mode: {package['invocation_mode']}")
+    print(
+        "Invocation authorized: "
+        f"{_format_yes_no(package['invocation_authorized'])}"
+    )
+    print(f"Review required: {_format_yes_no(package['review_required'])}")
+    print(f"Worker may merge: {_format_yes_no(package['worker_may_merge'])}")
+    _print_list("Required repository paths", _as_list(package["required_repo_paths"]))
+    _print_list(
+        "Required PR body headings",
+        _as_list(package["required_pr_body_headings"]),
+    )
+    print("Prompt:")
+    print(package["prompt"])
+    print("Codex invocation: not authorized")
+    print("Merge behavior: not authorized")
+    print("Inspection: read-only; no files, GitHub state, workflows, or workers changed")
 
 
 def _print_proposal_summary(proposal: ProposalInput) -> None:
