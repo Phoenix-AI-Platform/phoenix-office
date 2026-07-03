@@ -107,6 +107,34 @@ The inspection command is read-only. It reads one local JSON file, validates the
 
 The command fails closed for malformed, incomplete, unsupported, or unsafe packages. A successful inspection means only that the package satisfies the current read-only handoff checks; it does not authorize Codex invocation, PR approval, merge behavior, proposal generation, DOCX rendering, or any background work.
 
+## Static Invocation Preflight
+
+Operators can run a read-only static preflight for the supervised invocation pilot boundary:
+
+```bash
+python -m phoenix_office.cli dev codex-invocation-preflight examples/tasks/codex_handoff_package.json
+```
+
+They can also emit the same report as deterministic JSON:
+
+```bash
+python -m phoenix_office.cli dev codex-invocation-preflight examples/tasks/codex_handoff_package.json --json
+```
+
+The preflight reuses the fail-closed `CodexHandoffPackage` validation and then checks the package against the docs-only pilot rules: repository `Phoenix-AI-Platform/phoenix-office`, `base_branch: "main"`, `docs-only` task risk, strict JSON-false task permissions for destructive, execution, and network access, exactly one to three unique safe repository-relative Markdown files in `task.allowed_resources.paths` under `docs/process/` or `docs/development/`, membership of every `required_repo_paths` entry in that allowed-resource boundary, required PR headings, and required repository validation commands.
+
+The preflight is static only. It does not invoke Codex, access GitHub, fetch issues, inspect live PRs or branches, create artifacts, write files, dispatch workflows, execute workers, or mutate anything.
+
+The report includes the handoff ID, source issue number, repository, base branch, and declared changed files. `declared_changed_files` is reported from the validated `task.allowed_resources.paths` boundary because that is the package's static write boundary; `required_repo_paths` must remain a subset of it. The report also separates:
+
+- static eligibility
+- package blockers
+- external checks still required
+
+External checks still required include duplicate PR detection, branch collision detection, repository credentials and permissions, budget or usage ceiling enforcement, operator cancellation support, Codex availability, post-PR CI, and assistant review before merge.
+
+A static eligible result never authorizes invocation. It means only that the package currently satisfies the local static checks for possible later supervised review.
+
 ## Manual Dry-Run Workflow
 
 Operators can run the `Codex handoff dry-run` workflow manually from GitHub Actions when they want CI to validate a committed handoff package.

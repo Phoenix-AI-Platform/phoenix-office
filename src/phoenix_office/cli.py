@@ -89,6 +89,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output only the validated Codex handoff package prompt",
     )
     codex_handoff_parser.set_defaults(func=inspect_codex_handoff)
+    codex_invocation_preflight_parser = dev_subparsers.add_parser(
+        "codex-invocation-preflight",
+        help="Run a read-only static Codex invocation preflight",
+    )
+    codex_invocation_preflight_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_invocation_preflight_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the static preflight report as JSON",
+    )
+    codex_invocation_preflight_parser.set_defaults(
+        func=codex_invocation_preflight
+    )
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -833,6 +850,47 @@ def inspect_codex_handoff(args: argparse.Namespace) -> int:
     else:
         _print_codex_handoff_summary(package)
     return 0
+
+
+def codex_invocation_preflight(args: argparse.Namespace) -> int:
+    package_path = args.handoff_json
+    package: dict[str, Any] | None = None
+    package_blockers: list[str] = []
+
+    if not package_path.exists():
+        package_blockers.append(
+            f"CodexHandoffPackage JSON file does not exist: {package_path}"
+        )
+    elif not package_path.is_file():
+        package_blockers.append(
+            f"CodexHandoffPackage JSON path is not a file: {package_path}"
+        )
+    else:
+        try:
+            package = _load_codex_handoff_package_json(package_path)
+        except ValueError as exc:
+            package_blockers.append(str(exc))
+        except OSError as exc:
+            package_blockers.append(
+                f"failed to read CodexHandoffPackage JSON: {exc}"
+            )
+
+    if package is not None:
+        package_blockers.extend(
+            _validate_codex_invocation_preflight_package(package)
+        )
+
+    report = _build_codex_invocation_preflight_report(
+        package=package,
+        path=package_path,
+        package_blockers=package_blockers,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_invocation_preflight_report(report)
+
+    return 0 if report["static_eligible"] else 1
 
 
 def load_proposal(path: Path) -> ProposalInput:
@@ -1934,6 +1992,283 @@ def _print_codex_handoff_json_failure(
         "path": str(path),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+CODEX_INVOCATION_ALLOWED_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
+CODEX_INVOCATION_REQUIRED_BASE_BRANCH = "main"
+CODEX_INVOCATION_MAX_DOC_FILES = 3
+CODEX_INVOCATION_ALLOWED_DOC_PREFIXES = (
+    "docs/process/",
+    "docs/development/",
+)
+CODEX_INVOCATION_REQUIRED_PR_HEADINGS = [
+    "Summary",
+    "Scope",
+    "Changed files",
+    "Out-of-scope confirmation",
+    "Validation performed",
+    "Risks",
+]
+CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS = [
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp",
+    "python -m ruff check . --no-cache",
+    "git diff --check",
+]
+CODEX_INVOCATION_EXTERNAL_CHECKS_REQUIRED = [
+    "duplicate PR detection for the source issue and handoff id",
+    "branch collision detection before branch creation",
+    "repository credentials and write-permission verification",
+    "platform budget or usage ceiling enforcement",
+    "operator cancellation support",
+    "Codex availability",
+    "post-PR CI results for the final head SHA",
+    "assistant review verdict before merge",
+]
+CODEX_INVOCATION_REQUIRED_FALSE_PERMISSIONS = [
+    "destructive",
+    "execute",
+    "network",
+]
+
+
+def _validate_codex_invocation_preflight_package(
+    package: dict[str, Any],
+) -> list[str]:
+    issues = _validate_codex_handoff_package(package)
+
+    if package.get("repository") != CODEX_INVOCATION_ALLOWED_REPOSITORY:
+        issues.append(
+            "repository must be "
+            f"{CODEX_INVOCATION_ALLOWED_REPOSITORY!r}; "
+            f"got {package.get('repository')!r}"
+        )
+    if package.get("base_branch") != CODEX_INVOCATION_REQUIRED_BASE_BRANCH:
+        issues.append(
+            "base_branch must be "
+            f"{CODEX_INVOCATION_REQUIRED_BASE_BRANCH!r}; "
+            f"got {package.get('base_branch')!r}"
+        )
+
+    task = _as_dict(package.get("task"))
+    if task.get("risk_class") != "docs-only":
+        issues.append("task.risk_class must be 'docs-only'")
+
+    permissions = task.get("permissions")
+    if not isinstance(permissions, dict):
+        issues.append("task.permissions must be an object")
+    else:
+        for field_name in CODEX_INVOCATION_REQUIRED_FALSE_PERMISSIONS:
+            value = permissions.get(field_name)
+            if type(value) is not bool or value is not False:
+                issues.append(
+                    f"task.permissions.{field_name} must be JSON boolean "
+                    f"False; got {value!r}"
+                )
+
+    source = _as_dict(task.get("source"))
+    source_uri = source.get("uri")
+    if source.get("kind") != "github_issue":
+        issues.append("task.source.kind must be 'github_issue'")
+    if not _is_phoenix_office_issue_url(source_uri):
+        issues.append(
+            "task.source.uri must be a Phoenix Office GitHub issue URL"
+        )
+
+    allowed_paths = _as_dict(task.get("allowed_resources")).get("paths")
+    normalized_allowed_path_set: set[str] = set()
+    if not isinstance(allowed_paths, list):
+        issues.append("task.allowed_resources.paths must be a list of strings")
+    else:
+        allowed_string_paths = [
+            path for path in allowed_paths if isinstance(path, str)
+        ]
+        if len(allowed_string_paths) != len(allowed_paths):
+            issues.append(
+                "task.allowed_resources.paths must contain only strings"
+            )
+        if not allowed_string_paths:
+            issues.append(
+                "task.allowed_resources.paths must contain at least 1 path"
+            )
+        if len(allowed_string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
+            issues.append(
+                "task.allowed_resources.paths must contain no more than "
+                f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
+            )
+        normalized_allowed_paths = [
+            path.replace("\\", "/") for path in allowed_string_paths
+        ]
+        if len(set(normalized_allowed_paths)) != len(normalized_allowed_paths):
+            issues.append("task.allowed_resources.paths must be unique")
+        for path in normalized_allowed_paths:
+            if not _is_allowed_codex_invocation_doc_path(path):
+                issues.append(
+                    "task.allowed_resources.paths must contain only safe "
+                    "repository-relative Markdown files under docs/process/ "
+                    "or docs/development/: "
+                    f"{path!r}"
+                )
+        normalized_allowed_path_set = set(normalized_allowed_paths)
+
+    repo_paths = package.get("required_repo_paths")
+    if isinstance(repo_paths, list):
+        string_paths = [path for path in repo_paths if isinstance(path, str)]
+        if not string_paths:
+            issues.append("required_repo_paths must contain at least 1 path")
+        if len(string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
+            issues.append(
+                "required_repo_paths must contain no more than "
+                f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
+            )
+        for path in string_paths:
+            normalized = path.replace("\\", "/")
+            if not _is_allowed_codex_invocation_doc_path(normalized):
+                issues.append(
+                    "required_repo_paths must contain only safe "
+                    "repository-relative Markdown files under docs/process/ "
+                    "or docs/development/: "
+                    f"{path!r}"
+                )
+            if normalized_allowed_path_set:
+                if normalized not in normalized_allowed_path_set:
+                    issues.append(
+                        "required_repo_paths entries must also appear in "
+                        f"task.allowed_resources.paths: {path!r}"
+                    )
+    else:
+        string_paths = []
+
+    headings = package.get("required_pr_body_headings")
+    if isinstance(headings, list):
+        missing_headings = [
+            heading
+            for heading in CODEX_INVOCATION_REQUIRED_PR_HEADINGS
+            if heading not in headings
+        ]
+        for heading in missing_headings:
+            issues.append(
+                f"required_pr_body_headings must include {heading!r}"
+            )
+
+    verification_plan = _as_dict(task.get("verification_plan"))
+    commands = verification_plan.get("commands")
+    if not isinstance(commands, list) or not all(
+        isinstance(command, str) for command in commands
+    ):
+        issues.append("task.verification_plan.commands must be a list of strings")
+    else:
+        for command in CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS:
+            if command not in commands:
+                issues.append(
+                    "task.verification_plan.commands must include "
+                    f"{command!r}"
+                )
+
+    return issues
+
+
+def _build_codex_invocation_preflight_report(
+    *,
+    package: dict[str, Any] | None,
+    path: Path,
+    package_blockers: list[str],
+) -> dict[str, Any]:
+    task = _as_dict(package.get("task")) if package is not None else {}
+    source = _as_dict(task.get("source"))
+    source_issue_number = (
+        _parse_phoenix_office_issue_number(source.get("uri"))
+        if source.get("kind") == "github_issue"
+        else None
+    )
+    return {
+        "base_branch": package.get("base_branch") if package is not None else None,
+        "command": "dev codex-invocation-preflight",
+        "declared_changed_files": _codex_invocation_declared_changed_files(
+            package
+        ),
+        "external_checks_required": CODEX_INVOCATION_EXTERNAL_CHECKS_REQUIRED,
+        "handoff_id": package.get("handoff_id") if package is not None else None,
+        "invocation_authorized": False,
+        "message": (
+            "Static success never authorizes Codex invocation."
+            if not package_blockers
+            else "Static preflight found package blockers."
+        ),
+        "package_blockers": package_blockers,
+        "path": str(path),
+        "repository": package.get("repository") if package is not None else None,
+        "source_issue_number": source_issue_number,
+        "static_eligible": not package_blockers,
+        "static_success_authorizes_invocation": False,
+    }
+
+
+def _codex_invocation_declared_changed_files(
+    package: dict[str, Any] | None,
+) -> list[str]:
+    if package is None:
+        return []
+    task = _as_dict(package.get("task"))
+    allowed_paths = _as_dict(task.get("allowed_resources")).get("paths")
+    if not isinstance(allowed_paths, list):
+        return []
+    return [
+        path.replace("\\", "/")
+        for path in allowed_paths
+        if isinstance(path, str)
+    ]
+
+
+def _print_codex_invocation_preflight_report(report: dict[str, Any]) -> None:
+    print("Codex invocation static preflight")
+    print(f"Path: {report['path']}")
+    print(f"Handoff ID: {report['handoff_id']}")
+    print(f"Source issue number: {report['source_issue_number']}")
+    print(f"Repository: {report['repository']}")
+    print(f"Base branch: {report['base_branch']}")
+    print(f"Static eligibility: {_format_yes_no(report['static_eligible'])}")
+    print("Static success authorizes invocation: no")
+    print("Codex invocation: not authorized")
+    print("GitHub access: not performed")
+    print("Mutation: not performed")
+    _print_list("Declared changed files", report["declared_changed_files"])
+    print("Package blockers:")
+    package_blockers = report["package_blockers"]
+    if package_blockers:
+        for blocker in package_blockers:
+            print(f"  - {blocker}")
+    else:
+        print("  - (none)")
+    print("External checks still required:")
+    for check in report["external_checks_required"]:
+        print(f"  - {check}")
+
+
+def _is_allowed_codex_invocation_doc_path(path: str) -> bool:
+    if not path or path.startswith("/") or ":" in path:
+        return False
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    return path.endswith(".md") and path.startswith(
+        CODEX_INVOCATION_ALLOWED_DOC_PREFIXES
+    )
+
+
+def _is_phoenix_office_issue_url(value: Any) -> bool:
+    return _parse_phoenix_office_issue_number(value) is not None
+
+
+def _parse_phoenix_office_issue_number(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    prefix = "https://github.com/Phoenix-AI-Platform/phoenix-office/issues/"
+    if not value.startswith(prefix):
+        return None
+    issue_number = value.removeprefix(prefix)
+    if issue_number.isdecimal() and int(issue_number) > 0:
+        return int(issue_number)
+    return None
 
 
 def _validate_codex_handoff_package(package: dict[str, Any]) -> list[str]:
