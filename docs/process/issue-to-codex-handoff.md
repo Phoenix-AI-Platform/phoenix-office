@@ -93,6 +93,8 @@ They can also inspect the same package as deterministic machine-readable JSON:
 python -m phoenix_office.cli dev codex-handoff examples/tasks/codex_handoff_package.json --json
 ```
 
+When `--json` is supplied, missing paths, malformed JSON or UTF-8, and unsafe packages return nonzero with deterministic JSON on stdout. The failure payload includes `ok: false`, an `error_code`, a human-readable `message`, the checked `path`, and any validation `issues`. Without `--json`, the command keeps the human-readable stderr failure messages.
+
 After validation succeeds, operators can print only the package prompt for manual copy/paste:
 
 ```bash

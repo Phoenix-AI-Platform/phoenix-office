@@ -765,35 +765,65 @@ def inspect_codex_handoff(args: argparse.Namespace) -> int:
         return 1
 
     if not package_path.exists():
-        print(
-            f"Error: CodexHandoffPackage JSON file does not exist: {package_path}",
-            file=sys.stderr,
-        )
+        message = f"CodexHandoffPackage JSON file does not exist: {package_path}"
+        if args.json:
+            _print_codex_handoff_json_failure(
+                error_code="missing_file",
+                message=message,
+                path=package_path,
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
         return 1
     if not package_path.is_file():
-        print(
-            f"Error: CodexHandoffPackage JSON path is not a file: {package_path}",
-            file=sys.stderr,
-        )
+        message = f"CodexHandoffPackage JSON path is not a file: {package_path}"
+        if args.json:
+            _print_codex_handoff_json_failure(
+                error_code="not_file",
+                message=message,
+                path=package_path,
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
         return 1
 
     try:
         package = _load_codex_handoff_package_json(package_path)
     except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        if args.json:
+            _print_codex_handoff_json_failure(
+                error_code="invalid_json",
+                message=str(exc),
+                path=package_path,
+            )
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(
-            f"Error: failed to read CodexHandoffPackage JSON: {exc}",
-            file=sys.stderr,
-        )
+        message = f"failed to read CodexHandoffPackage JSON: {exc}"
+        if args.json:
+            _print_codex_handoff_json_failure(
+                error_code="read_error",
+                message=message,
+                path=package_path,
+            )
+        else:
+            print(f"Error: {message}", file=sys.stderr)
         return 1
 
     issues = _validate_codex_handoff_package(package)
     if issues:
-        print("Error: unsafe or invalid CodexHandoffPackage.", file=sys.stderr)
-        for issue in issues:
-            print(f"- {issue}", file=sys.stderr)
+        if args.json:
+            _print_codex_handoff_json_failure(
+                error_code="unsafe_or_invalid_package",
+                message="unsafe or invalid CodexHandoffPackage",
+                path=package_path,
+                issues=issues,
+            )
+        else:
+            print("Error: unsafe or invalid CodexHandoffPackage.", file=sys.stderr)
+            for issue in issues:
+                print(f"- {issue}", file=sys.stderr)
         return 1
 
     if args.json:
@@ -1887,6 +1917,23 @@ def _load_codex_handoff_package_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"CodexHandoffPackage JSON must be an object: {path}")
     return data
+
+
+def _print_codex_handoff_json_failure(
+    *,
+    error_code: str,
+    message: str,
+    path: Path,
+    issues: list[str] | None = None,
+) -> None:
+    payload = {
+        "error_code": error_code,
+        "issues": issues or [],
+        "message": message,
+        "ok": False,
+        "path": str(path),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def _validate_codex_handoff_package(package: dict[str, Any]) -> list[str]:
