@@ -54,6 +54,14 @@ This checklist records evidence only. Completing it does not authorize Codex inv
 
 Advertised CLI capability is not the same as enforceable operational control. Successful authentication does not prove cancellation, budget enforcement, GitHub permissions, duplicate detection, branch-collision safety, final CI, or assistant review. Account-wide usage limits are not equivalent to a per-run ceiling.
 
+## Supervised Pilot Evidence Package Inspection
+
+`python -m phoenix_office.cli dev codex-pilot-evidence <evidence.json>` inspects a local `codex-pilot-evidence.v1` package that records the explicit status of every supervised pilot external control. `python -m phoenix_office.cli dev codex-pilot-evidence <evidence.json> --json` emits the same inspection result as deterministic JSON.
+
+The package inspection is read-only and local-only. It validates explicit records only; it does not collect evidence, verify the underlying evidence, authenticate, access GitHub, access the network, inspect issues or PRs, create branches or PRs, invoke Codex, submit prompts, write artifacts, approve, merge, dispatch workflows, retry, schedule, persist audit data, or run background work.
+
+Structural validity means the package is internally well formed. A structurally valid package may still be incomplete when one or more controls are explicitly `blocked` or `unverified`; those statuses are valid records, not malformed package structure. Exit zero means only that the package is structurally valid and all eleven required external controls are marked `verified` with safe opaque evidence references and expected reviewer roles. It does not prove the referenced evidence is truthful, fresh, enforceable, sufficient, or reviewed, and package completeness does not authorize invocation. The output must keep `pilot_ready: false`, `invocation_authorized: false`, `invocation_performed: false`, `github_access_performed: false`, `network_access_performed: false`, and `mutation_performed: false`.
+
 ## Supervised Invocation Pilot Boundary
 
 The narrowest future pilot boundary is: a human-triggered supervised invocation that consumes one already-committed `CodexHandoffPackage` after local or workflow validation has succeeded.
