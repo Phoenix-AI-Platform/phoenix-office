@@ -135,6 +135,28 @@ External checks still required include duplicate PR detection, branch collision 
 
 A static eligible result never authorizes invocation. It means only that the package currently satisfies the local static checks for possible later supervised review.
 
+## Invocation Request Draft
+
+Operators can turn a statically eligible docs-only handoff package into a deterministic provider-neutral request draft:
+
+```bash
+python -m phoenix_office.cli dev codex-invocation-request <path-to-statically-eligible-docs-handoff.json>
+```
+
+They can also emit the draft as sorted, indented JSON:
+
+```bash
+python -m phoenix_office.cli dev codex-invocation-request <path-to-statically-eligible-docs-handoff.json> --json
+```
+
+The request command reuses the complete static invocation preflight. If the package is missing, malformed, unsafe, or statically ineligible, no request draft and no rendered prompt are produced. JSON failures include the preflight blockers and remain non-authorizing.
+
+When static preflight succeeds, the command prints one local stdout-only draft. The draft includes identity, source issue number, repository, base branch, expected PR title, declared changed files, required PR body headings, required repository validation commands, the original reviewed package prompt, a deterministic rendered prompt, and the external checks still required.
+
+The draft is unsent. It does not invoke Codex, call a provider API, access GitHub, fetch issues, inspect live PRs or branches, create branches, open PRs, write files, create artifacts, dispatch workflows, execute workers, approve, merge, retry, schedule, queue, persist state, or continue in the background.
+
+The draft does not authorize Codex invocation. It remains provider-neutral preparation for later supervised review, and it does not claim duplicate-PR detection, branch-collision detection, credentials, budget enforcement, cancellation support, Codex availability, final CI, or assistant review have passed.
+
 ## Manual Dry-Run Workflow
 
 Operators can run the `Codex handoff dry-run` workflow manually from GitHub Actions when they want CI to validate a committed handoff package.
