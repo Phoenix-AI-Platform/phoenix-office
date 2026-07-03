@@ -245,6 +245,42 @@ def _assert_no_unsafe_output(output: str) -> None:
         assert fragment not in output
 
 
+def _assert_authorization_structural_failure(report: dict[str, Any]) -> None:
+    assert report["authorization_structural_valid"] is False
+    assert report["authorization_binding_passed"] is False
+    assert report["authorization_packet_valid_for_one_attempt"] is False
+
+
+def _assert_unsafe_fragments_do_not_leak(
+    outputs: list[str], fragments: list[str]
+) -> None:
+    for output in outputs:
+        for fragment in fragments:
+            assert fragment not in output
+
+
+def _unsafe_fragments(value: str) -> list[str]:
+    encoded = json.dumps(value)[1:-1]
+    candidates = [
+        value,
+        encoded,
+        "private-name",
+        "C:/Users",
+        "/home",
+        "AppData",
+        "PRIVATE CUSTOMER NAME",
+        "approved\\tpilot",
+        "approved pilot\\rhidden",
+        "approved pilot\\nhidden",
+        "reviewed path",
+        "reviewed\\tpath",
+        "Users/private-name",
+    ]
+    return sorted(
+        {fragment for fragment in candidates if fragment and fragment in f"{value} {encoded}"}
+    )
+
+
 def test_codex_pilot_authorization_success_json_text_and_determinism(
     tmp_path, capsys, monkeypatch
 ):
@@ -402,6 +438,7 @@ def test_codex_pilot_authorization_unsafe_input_filename_fails_closed(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert report["authorization_filename"] is None
     assert "authorization input filename is unsafe" in (
         report["blockers_by_source"]["authorization_structural"]
@@ -426,7 +463,7 @@ def test_codex_pilot_authorization_missing_or_unreadable_authorization_file(
     exit_code, report, output = _run_json(handoff_path, evidence_path, bad_path, capsys)
 
     assert exit_code == 1
-    assert report["authorization_structural_valid"] is False
+    _assert_authorization_structural_failure(report)
     assert expected in report["blockers_by_source"]["authorization_structural"]
     assert str(tmp_path) not in output
     _assert_no_unsafe_output(output)
@@ -451,6 +488,7 @@ def test_codex_pilot_authorization_malformed_or_non_object_json(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert expected in report["blockers_by_source"]["authorization_structural"]
     assert "password=secret" not in output
     assert "Traceback" not in output
@@ -472,6 +510,7 @@ def test_codex_pilot_authorization_missing_required_fields_fail_closed(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert "authorization package is missing required fields" in (
         report["blockers_by_source"]["authorization_structural"]
     )
@@ -492,6 +531,7 @@ def test_codex_pilot_authorization_unknown_fields_do_not_leak_names(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert "authorization package contains unknown fields" in (
         report["blockers_by_source"]["authorization_structural"]
     )
@@ -558,6 +598,7 @@ def test_codex_pilot_authorization_structural_field_failures(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert expected in report["blockers_by_source"]["authorization_structural"]
     _assert_no_unsafe_output(output)
 
@@ -602,6 +643,7 @@ def test_codex_pilot_authorization_allowed_path_failures(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert "authorization allowed paths are invalid" in (
         report["blockers_by_source"]["authorization_structural"]
     )
@@ -644,6 +686,7 @@ def test_codex_pilot_authorization_reference_failures_are_sanitized(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert f"authorization {field} is invalid" in (
         report["blockers_by_source"]["authorization_structural"]
     )
@@ -695,8 +738,175 @@ def test_codex_pilot_authorization_safety_flag_inversions_fail(
     )
 
     assert exit_code == 1
+    _assert_authorization_structural_failure(report)
     assert expected in report["blockers_by_source"]["authorization_structural"]
 
+
+@pytest.mark.parametrize(
+    "unsafe_objective",
+    [
+        "Document /home/private-name/config.",
+        "Document C:/Users/private-name/config.",
+        "Document AppData configuration.",
+        "Document PRIVATE CUSTOMER NAME records.",
+        "Document approved\tpilot.",
+        "Document approved pilot.\rhidden",
+        "Document approved pilot.\nhidden",
+    ],
+)
+def test_codex_pilot_authorization_matching_unsafe_objective_is_structural_failure(
+    tmp_path, capsys, monkeypatch, unsafe_objective
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff = _valid_handoff_package()
+    handoff["task"]["objective"] = unsafe_objective
+    authorization = _valid_authorization_packet()
+    authorization["objective"] = unsafe_objective
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, handoff=handoff, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+    text_exit, text_output = _run_text(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert text_exit == 1
+    _assert_authorization_structural_failure(report)
+    assert "authorization objective is invalid" in (
+        report["blockers_by_source"]["authorization_structural"]
+    )
+    _assert_unsafe_fragments_do_not_leak(
+        [json_output, text_output], _unsafe_fragments(unsafe_objective)
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_title",
+    [
+        "docs: PRIVATE CUSTOMER NAME /home/private-name",
+        "docs: C:/Users/private-name",
+        "docs: AppData configuration",
+        "docs: approved\tpilot",
+        "docs: approved pilot\rhidden",
+    ],
+)
+def test_codex_pilot_authorization_matching_unsafe_pr_title_is_structural_failure(
+    tmp_path, capsys, monkeypatch, unsafe_title
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff = _valid_handoff_package()
+    handoff["expected_pr_title"] = unsafe_title
+    authorization = _valid_authorization_packet()
+    authorization["expected_pr_title"] = unsafe_title
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, handoff=handoff, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+    text_exit, text_output = _run_text(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert text_exit == 1
+    _assert_authorization_structural_failure(report)
+    assert "authorization expected_pr_title is invalid" in (
+        report["blockers_by_source"]["authorization_structural"]
+    )
+    _assert_unsafe_fragments_do_not_leak(
+        [json_output, text_output], _unsafe_fragments(unsafe_title)
+    )
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "docs/process/private name.md",
+        "docs/process/file\tname.md",
+        "docs/process/file\rname.md",
+        "docs/process//file.md",
+        "docs/process/./file.md",
+        "docs/process/../file.md",
+        "docs/process/AppData.md",
+        "docs/process/PRIVATE CUSTOMER NAME.md",
+    ],
+)
+def test_codex_pilot_authorization_matching_unsafe_allowed_path_is_structural_failure(
+    tmp_path, capsys, monkeypatch, unsafe_path
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff = _valid_handoff_package()
+    handoff["required_repo_paths"] = [unsafe_path]
+    handoff["task"]["allowed_resources"]["paths"] = [unsafe_path]
+    authorization = _valid_authorization_packet()
+    authorization["allowed_paths"] = [unsafe_path]
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, handoff=handoff, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+    text_exit, text_output = _run_text(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert text_exit == 1
+    _assert_authorization_structural_failure(report)
+    assert "authorization allowed paths are invalid" in (
+        report["blockers_by_source"]["authorization_structural"]
+    )
+    _assert_unsafe_fragments_do_not_leak(
+        [json_output, text_output], _unsafe_fragments(unsafe_path)
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_path"),
+    [
+        ("handoff_path", "reviewed path/handoff.json"),
+        ("handoff_path", "reviewed\tpath/handoff.json"),
+        ("handoff_path", "AppData/handoff.json"),
+        ("handoff_path", "Users/private-name/handoff.json"),
+        ("evidence_path", "reviewed path/evidence.json"),
+        ("evidence_path", "reviewed\tpath/evidence.json"),
+        ("evidence_path", "AppData/evidence.json"),
+        ("evidence_path", "Users/private-name/evidence.json"),
+    ],
+)
+def test_codex_pilot_authorization_unsafe_declared_json_paths_are_structural_failure(
+    tmp_path, capsys, monkeypatch, field, unsafe_path
+):
+    _install_runtime_mocks(monkeypatch)
+    authorization = _valid_authorization_packet()
+    authorization[field] = unsafe_path
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+    text_exit, text_output = _run_text(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert text_exit == 1
+    _assert_authorization_structural_failure(report)
+    assert f"authorization {field} is invalid" in (
+        report["blockers_by_source"]["authorization_structural"]
+    )
+    _assert_unsafe_fragments_do_not_leak(
+        [json_output, text_output], _unsafe_fragments(unsafe_path)
+    )
 
 @pytest.mark.parametrize(
     ("field", "value", "expected"),

@@ -2520,10 +2520,18 @@ def _run_codex_pilot_authorization(
     composite_blockers = _codex_pilot_authorization_composite_blockers(
         preflight_report
     )
-    authorization_packet_valid_for_one_attempt = (
-        bool(preflight_report.get("eligible_for_authorization_review"))
-        and structural_valid
+    composite_preflight_passed = bool(
+        preflight_report.get("eligible_for_authorization_review")
+    )
+    authorization_binding_passed = (
+        structural_valid
+        and package is not None
         and not binding_blockers
+    )
+    authorization_packet_valid_for_one_attempt = (
+        composite_preflight_passed
+        and structural_valid
+        and authorization_binding_passed
     )
     safe_fields = _safe_codex_pilot_authorization_fields(
         package=package,
@@ -2532,7 +2540,7 @@ def _run_codex_pilot_authorization(
     return {
         **safe_fields,
         "authorization_binding_blockers": sorted(binding_blockers),
-        "authorization_binding_passed": not binding_blockers,
+        "authorization_binding_passed": authorization_binding_passed,
         "authorization_filename": authorization_filename,
         "authorization_packet_valid_for_one_attempt": (
             authorization_packet_valid_for_one_attempt
@@ -2546,9 +2554,7 @@ def _run_codex_pilot_authorization(
         },
         "branch_created": False,
         "command": CODEX_PILOT_AUTHORIZATION_COMMAND,
-        "composite_preflight_passed": bool(
-            preflight_report.get("eligible_for_authorization_review")
-        ),
+        "composite_preflight_passed": composite_preflight_passed,
         "github_access_performed": False,
         "handoff_filename": preflight_report.get("handoff_filename"),
         "evidence_filename": preflight_report.get("evidence_filename"),
@@ -2719,20 +2725,7 @@ def _safe_codex_pilot_authorization_fields(
     if structural_valid:
         for field_name in CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS:
             fields[field_name] = package.get(field_name)
-    else:
-        if package.get("repository") == CODEX_PILOT_EVIDENCE_REPOSITORY:
-            fields["repository"] = package["repository"]
-        if package.get("pilot_kind") == CODEX_PILOT_EVIDENCE_KIND:
-            fields["pilot_kind"] = package["pilot_kind"]
-        if package.get("decision_state") == CODEX_PILOT_AUTHORIZATION_DECISION_STATE:
-            fields["decision_state"] = package["decision_state"]
-        if package.get("authorizer_role") == CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE:
-            fields["authorizer_role"] = package["authorizer_role"]
-        for field_name in ["authorization_id", "handoff_id"]:
-            if _is_safe_evidence_identifier(package.get(field_name)):
-                fields[field_name] = package[field_name]
-        if _is_lower_hex_sha(package.get("base_commit_sha")):
-            fields["base_commit_sha"] = package["base_commit_sha"]
+
     return fields
 
 
@@ -2745,48 +2738,107 @@ def _is_lower_hex_sha(value: Any) -> bool:
     )
 
 
-def _is_safe_authorization_json_path(value: Any) -> bool:
-    if not isinstance(value, str) or not value or len(value) > 160:
-        return False
+def _contains_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _is_safe_printable_ascii(value: str) -> bool:
+    return all(32 <= ord(character) <= 126 for character in value)
+
+
+def _contains_url_marker(value: str) -> bool:
     lowered = value.lower()
+    return "://" in lowered or lowered.startswith("www.")
+
+
+def _contains_drive_like_path(value: str) -> bool:
+    return any(
+        character.isalpha()
+        and value[index + 1] == ":"
+        and value[index + 2] in {"/", "\\"}
+        for index, character in enumerate(value[:-2])
+    )
+
+
+def _contains_sensitive_authorization_marker(value: str) -> bool:
+    lowered = value.lower()
+    markers = [
+        "appdata",
+        "credential",
+        "customer name",
+        "password",
+        "private customer",
+        "private-name",
+        "secret",
+        "sk-",
+        "token",
+        "users",
+        "/home",
+        "home/",
+        "~",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _has_safe_authorization_text_shape(value: str, max_length: int) -> bool:
+    return (
+        bool(value)
+        and value == value.strip()
+        and len(value) <= max_length
+        and not _contains_control_character(value)
+        and _is_safe_printable_ascii(value)
+        and "\t" not in value
+        and "\r" not in value
+        and "\n" not in value
+    )
+
+
+def _is_conservative_path_segment(segment: str) -> bool:
+    return (
+        bool(segment)
+        and segment not in {".", ".."}
+        and all(character.isalnum() or character in "._-" for character in segment)
+    )
+
+
+def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> bool:
     if (
-        "\\" in value
-        or "://" in lowered
+        not _has_safe_authorization_text_shape(value, max_length)
+        or " " in value
+        or "\\" in value
         or ":" in value
+        or "//" in value
         or value.startswith("/")
         or value.startswith("~")
-        or not value.endswith(".json")
+        or not value.endswith(suffix)
+        or _contains_url_marker(value)
+        or _contains_sensitive_authorization_marker(value)
     ):
         return False
-    if any(
-        fragment in lowered
-        for fragment in ["sk-", "token", "secret", "password", "users", "home", "appdata"]
-    ):
-        return False
-    parts = value.split("/")
-    return not any(part in {"", ".", ".."} for part in parts)
+    return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
+
+
+def _is_safe_authorization_json_path(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
+    )
 
 
 def _is_safe_authorization_objective(value: Any) -> bool:
     if not isinstance(value, str):
         return False
-    stripped = value.strip()
-    if not stripped or stripped != value or len(stripped) > 200 or "\n" in value:
+    if (
+        not _has_safe_authorization_text_shape(value, 200)
+        or "/" in value
+        or "\\" in value
+        or "=" in value
+        or _contains_url_marker(value)
+        or _contains_drive_like_path(value)
+        or _contains_sensitive_authorization_marker(value)
+    ):
         return False
     lowered = value.lower()
-    unsafe = [
-        "://",
-        "\\",
-        "sk-",
-        "token",
-        "secret",
-        "password",
-        "private customer",
-        "customer name",
-        "=",
-    ]
-    if any(fragment in lowered for fragment in unsafe):
-        return False
     return "document" in lowered or "docs" in lowered or "documentation" in lowered
 
 
@@ -2797,22 +2849,21 @@ def _validate_authorization_allowed_paths(value: Any) -> bool:
         return False
     if len(set(value)) != len(value) or value != sorted(value):
         return False
-    return all(
-        path != "docs/development/project_state.md"
-        and _is_allowed_codex_invocation_doc_path(path)
-        for path in value
-    )
+    return all(_is_allowed_codex_pilot_authorization_doc_path(path) for path in value)
 
 
 def _is_safe_authorization_pr_title(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    if not value.startswith("docs:") or "\n" in value or not 6 <= len(value) <= 120:
-        return False
-    lowered = value.lower()
-    return not any(
-        fragment in lowered
-        for fragment in ["sk-", "token", "secret", "password", "://", "\\"]
+    return (
+        isinstance(value, str)
+        and 6 <= len(value) <= 120
+        and value.startswith("docs: ")
+        and _has_safe_authorization_text_shape(value, 120)
+        and "/" not in value
+        and "\\" not in value
+        and "=" not in value
+        and not _contains_url_marker(value)
+        and not _contains_drive_like_path(value)
+        and not _contains_sensitive_authorization_marker(value)
     )
 
 
@@ -2820,8 +2871,8 @@ def _is_safe_authorization_branch_name(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     if (
-        not value.startswith("codex/")
-        or len(value) > 100
+        not _has_safe_authorization_text_shape(value, 100)
+        or not value.startswith("codex/")
         or " " in value
         or ".." in value
         or "@{" in value
@@ -2829,16 +2880,12 @@ def _is_safe_authorization_branch_name(value: Any) -> bool:
         or value.startswith(".")
         or value.endswith(".")
         or "//" in value
+        or _contains_url_marker(value)
+        or _contains_drive_like_path(value)
+        or _contains_sensitive_authorization_marker(value)
     ):
         return False
-    lowered = value.lower()
-    if any(
-        fragment in lowered
-        for fragment in ["sk-", "token", "secret", "password", "users", "home", "appdata", ":\\"]
-    ):
-        return False
-    return all(character.isalnum() or character in {"/", "-", "_", "."} for character in value)
-
+    return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
 
 def _print_codex_pilot_authorization_report(report: dict[str, Any]) -> None:
     print("Codex pilot authorization packet inspection")
@@ -3883,13 +3930,44 @@ def _print_codex_invocation_preflight_report(report: dict[str, Any]) -> None:
 
 
 def _is_allowed_codex_invocation_doc_path(path: str) -> bool:
-    if not path or path.startswith("/") or ":" in path:
+    if not isinstance(path, str):
         return False
-    parts = path.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
+    if not _is_safe_repo_relative_path(path, suffix=".md", max_length=200):
         return False
-    return path.endswith(".md") and path.startswith(
-        CODEX_INVOCATION_ALLOWED_DOC_PREFIXES
+    if not path.startswith(CODEX_INVOCATION_ALLOWED_DOC_PREFIXES):
+        return False
+    lowered_segments = {segment.lower() for segment in path.split("/")}
+    forbidden_segments = {
+        "api",
+        "customer",
+        "customers",
+        "docx",
+        "example",
+        "examples",
+        "fixture",
+        "fixtures",
+        "mcp",
+        "orchestration",
+        "proposal",
+        "proposals",
+        "server",
+        "src",
+        "template",
+        "templates",
+        "test",
+        "tests",
+        "workflow",
+        "workflows",
+        "worker",
+        "workers",
+    }
+    return lowered_segments.isdisjoint(forbidden_segments)
+
+
+def _is_allowed_codex_pilot_authorization_doc_path(path: str) -> bool:
+    return (
+        _is_allowed_codex_invocation_doc_path(path)
+        and path != "docs/development/project_state.md"
     )
 
 
