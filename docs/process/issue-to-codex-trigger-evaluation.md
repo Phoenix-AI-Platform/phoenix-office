@@ -26,9 +26,13 @@ Phoenix Office now has a machine-readable manual handoff spine:
 - `python -m phoenix_office.cli dev codex-handoff <handoff.json>` validates a handoff package fail-closed and prints a human-readable summary.
 - `python -m phoenix_office.cli dev codex-handoff <handoff.json> --json` emits deterministic normalized JSON for successful packages and deterministic JSON failure payloads for missing, malformed, unreadable, or unsafe packages.
 - `python -m phoenix_office.cli dev codex-handoff <handoff.json> --prompt-only` prints only the validated prompt for human copy/paste.
+- `python -m phoenix_office.cli dev codex-runtime-probe` inspects the local Codex CLI surface with fixed `codex --version` and `codex exec --help` probes only.
+- `python -m phoenix_office.cli dev codex-runtime-probe --json` emits the same local runtime capability report as deterministic JSON.
 - The manual `Codex handoff dry-run` workflow validates a committed package with read-only repository permissions and uploads only normalized validated JSON as a temporary artifact.
 
 These capabilities are verified as preparation, inspection, and validation surfaces only. They do not invoke Codex, create branches, open PRs, approve, merge, dispatch workflows automatically, execute orchestration plans, generate proposal/DOCX/business output, or authorize background work.
+
+The runtime probe is intentionally local and non-invoking. It may detect whether the installed CLI advertises non-interactive `codex exec`, stdin or `-` prompt input, `--ephemeral`, `--sandbox`, `--cd` or `-C`, `--json`, `--output-last-message` or `-o`, and an explicit per-run budget-style option. It does not submit prompts, run Codex tasks, authenticate, access GitHub, access the network, inspect live branches or PRs, write files, dispatch workflows, or mutate repository state. Even if all local capabilities are detected, `pilot_ready` remains `false`; authentication, runner access, enforceable per-run budget ceilings, cancellation behavior, GitHub permissions, duplicate PR detection, branch-collision detection, actual Codex availability, final CI, and assistant review remain external checks.
 
 ## Supervised Invocation Pilot Boundary
 
