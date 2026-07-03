@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
     codex_invocation_request_parser.set_defaults(
         func=codex_invocation_request
     )
+    codex_runtime_probe_parser = dev_subparsers.add_parser(
+        "codex-runtime-probe",
+        help="Probe local read-only Codex CLI runtime capabilities",
+    )
+    codex_runtime_probe_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the runtime capability probe report as JSON",
+    )
+    codex_runtime_probe_parser.set_defaults(func=codex_runtime_probe)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -901,6 +913,15 @@ def codex_invocation_request(args: argparse.Namespace) -> int:
     else:
         _print_codex_invocation_request_draft(request)
     return 0
+
+
+def codex_runtime_probe(args: argparse.Namespace) -> int:
+    report = _run_codex_runtime_probe()
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_runtime_probe(report)
+    return 0 if report["local_cli_ready"] else 1
 
 
 def _load_codex_invocation_preflight(
@@ -2039,6 +2060,278 @@ def _print_codex_handoff_json_failure(
         "path": str(path),
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+CODEX_RUNTIME_PROBE_SCHEMA_VERSION = "codex-runtime-probe.v1"
+CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS = 5
+CODEX_RUNTIME_VERSION_ARGV = ["codex", "--version"]
+CODEX_RUNTIME_EXEC_HELP_ARGV = ["codex", "exec", "--help"]
+CODEX_RUNTIME_EXTERNAL_CHECKS_REQUIRED = [
+    "authentication and runner access",
+    "enforceable per-run budget ceiling",
+    "operator cancellation behavior",
+    "GitHub branch and PR permissions",
+    "duplicate active-PR detection",
+    "branch-collision detection",
+    "actual Codex availability during a task",
+    "final CI",
+    "assistant review",
+]
+CODEX_RUNTIME_CAPABILITY_FIELDS = {
+    "non_interactive_exec_detected": "non-interactive codex exec evidence",
+    "stdin_prompt_input_detected": "stdin or '-' prompt input support",
+    "ephemeral_option_detected": "--ephemeral option",
+    "sandbox_option_detected": "--sandbox option",
+    "working_directory_option_detected": "--cd or -C option",
+    "json_option_detected": "--json option",
+    "output_last_message_option_detected": "--output-last-message or -o option",
+    "explicit_budget_option_detected": "explicit per-run budget option",
+}
+
+
+def _run_codex_runtime_probe() -> dict[str, Any]:
+    executable_found = shutil.which("codex") is not None
+    blockers: list[str] = []
+    version_probe = _empty_codex_runtime_probe_status("not_run")
+    exec_help_probe = _empty_codex_runtime_probe_status("not_run")
+    sanitized_version = None
+    help_text = ""
+
+    if not executable_found:
+        blockers.append("codex executable not found")
+    else:
+        version_probe = _run_fixed_codex_probe(CODEX_RUNTIME_VERSION_ARGV)
+        exec_help_probe = _run_fixed_codex_probe(CODEX_RUNTIME_EXEC_HELP_ARGV)
+
+        if version_probe["status"] == "success":
+            sanitized_version = _sanitize_codex_version_output(
+                version_probe["stdout"]
+            )
+            if sanitized_version is None:
+                version_probe["status"] = "malformed_output"
+                blockers.append("version output was empty or malformed")
+        else:
+            blockers.append(f"version probe {version_probe['status']}")
+
+        if exec_help_probe["status"] == "success":
+            help_text = _sanitize_probe_text(exec_help_probe["stdout"])
+            if not help_text:
+                exec_help_probe["status"] = "malformed_output"
+                blockers.append("exec-help output was empty or malformed")
+        else:
+            blockers.append(f"exec-help probe {exec_help_probe['status']}")
+
+    capabilities = _detect_codex_runtime_capabilities(
+        version=sanitized_version,
+        exec_help=help_text,
+    )
+    for field_name, description in CODEX_RUNTIME_CAPABILITY_FIELDS.items():
+        if not capabilities[field_name]:
+            blockers.append(f"missing capability: {description}")
+
+    local_cli_ready = executable_found and not blockers
+    return {
+        "blockers": blockers,
+        "command": "dev codex-runtime-probe",
+        "exec_help_probe": {
+            "returncode": exec_help_probe["returncode"],
+            "status": exec_help_probe["status"],
+            "timed_out": exec_help_probe["timed_out"],
+        },
+        "ephemeral_option_detected": capabilities["ephemeral_option_detected"],
+        "executable_found": executable_found,
+        "explicit_budget_option_detected": capabilities[
+            "explicit_budget_option_detected"
+        ],
+        "external_checks_required": CODEX_RUNTIME_EXTERNAL_CHECKS_REQUIRED,
+        "github_access_performed": False,
+        "invocation_performed": False,
+        "json_option_detected": capabilities["json_option_detected"],
+        "local_cli_ready": local_cli_ready,
+        "mutation_performed": False,
+        "network_access_performed": False,
+        "non_interactive_exec_detected": capabilities[
+            "non_interactive_exec_detected"
+        ],
+        "output_last_message_option_detected": capabilities[
+            "output_last_message_option_detected"
+        ],
+        "pilot_ready": False,
+        "prompt_submitted": False,
+        "sandbox_option_detected": capabilities["sandbox_option_detected"],
+        "sanitized_cli_version": sanitized_version,
+        "schema_version": CODEX_RUNTIME_PROBE_SCHEMA_VERSION,
+        "stdin_prompt_input_detected": capabilities[
+            "stdin_prompt_input_detected"
+        ],
+        "version_probe": {
+            "returncode": version_probe["returncode"],
+            "status": version_probe["status"],
+            "timed_out": version_probe["timed_out"],
+        },
+        "working_directory_option_detected": capabilities[
+            "working_directory_option_detected"
+        ],
+    }
+
+
+def _empty_codex_runtime_probe_status(status: str) -> dict[str, Any]:
+    return {
+        "returncode": None,
+        "status": status,
+        "stdout": "",
+        "timed_out": False,
+    }
+
+
+def _run_fixed_codex_probe(argv: list[str]) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            input=None,
+            shell=False,
+            text=True,
+            timeout=CODEX_RUNTIME_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "returncode": None,
+            "status": "timeout",
+            "stdout": "",
+            "timed_out": True,
+        }
+    except OSError:
+        return {
+            "returncode": None,
+            "status": "launch_error",
+            "stdout": "",
+            "timed_out": False,
+        }
+
+    status = "success" if completed.returncode == 0 else "nonzero_exit"
+    return {
+        "returncode": completed.returncode,
+        "status": status,
+        "stdout": _sanitize_probe_text(completed.stdout),
+        "timed_out": False,
+    }
+
+
+def _sanitize_codex_version_output(value: str) -> str | None:
+    for line in value.splitlines():
+        sanitized = _sanitize_probe_line(line)
+        if sanitized:
+            return sanitized[:80]
+    return None
+
+
+def _sanitize_probe_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return "\n".join(
+        line
+        for line in (_sanitize_probe_line(line) for line in value.splitlines())
+        if line
+    )
+
+
+def _sanitize_probe_line(value: str) -> str:
+    sanitized = " ".join(value.strip().split())
+    if not sanitized:
+        return ""
+    if any(marker in sanitized for marker in ["\\", "/", "=", "sk-"]):
+        return ""
+    return sanitized[:200]
+
+
+def _detect_codex_runtime_capabilities(
+    *,
+    version: str | None,
+    exec_help: str,
+) -> dict[str, bool]:
+    del version
+    help_lower = exec_help.lower()
+    return {
+        "ephemeral_option_detected": _contains_long_option(
+            exec_help, "--ephemeral"
+        ),
+        "explicit_budget_option_detected": _detect_budget_option(exec_help),
+        "json_option_detected": _contains_long_option(exec_help, "--json"),
+        "non_interactive_exec_detected": (
+            "codex exec" in help_lower
+            or "usage: exec" in help_lower
+            or "usage: codex exec" in help_lower
+        ),
+        "output_last_message_option_detected": (
+            _contains_long_option(exec_help, "--output-last-message")
+            or _contains_short_option(exec_help, "-o")
+        ),
+        "sandbox_option_detected": _contains_long_option(exec_help, "--sandbox"),
+        "stdin_prompt_input_detected": (
+            "stdin" in help_lower
+            or "standard input" in help_lower
+            or "prompt from -" in help_lower
+        ),
+        "working_directory_option_detected": (
+            _contains_long_option(exec_help, "--cd")
+            or _contains_short_option(exec_help, "-C")
+        ),
+    }
+
+
+def _detect_budget_option(help_text: str) -> bool:
+    option_lines = [
+        line.lower()
+        for line in help_text.splitlines()
+        if line.strip().startswith("-") or " --" in line
+    ]
+    return any(
+        any(ceiling_word in line for ceiling_word in ["budget", "limit", "max", "ceiling"])
+        and any(metric_word in line for metric_word in ["token", "cost", "usage"])
+        for line in option_lines
+    )
+
+
+def _contains_long_option(help_text: str, option: str) -> bool:
+    return any(
+        part == option
+        for part in help_text.lower().replace(",", " ").split()
+    )
+
+
+def _contains_short_option(help_text: str, option: str) -> bool:
+    return any(part == option for part in help_text.replace(",", " ").split())
+
+
+def _print_codex_runtime_probe(report: dict[str, Any]) -> None:
+    print("Codex CLI runtime capability probe")
+    print(f"Schema version: {report['schema_version']}")
+    print(f"Executable found: {_format_yes_no(report['executable_found'])}")
+    print(f"Sanitized CLI version: {report['sanitized_cli_version']}")
+    print(f"Version probe status: {report['version_probe']['status']}")
+    print(f"Exec-help probe status: {report['exec_help_probe']['status']}")
+    print(f"Local CLI ready: {_format_yes_no(report['local_cli_ready'])}")
+    print("Pilot ready: no")
+    print("Invocation performed: no")
+    print("Prompt submitted: no")
+    print("Network access performed: no")
+    print("GitHub access performed: no")
+    print("Mutation performed: no")
+    capability_labels = [
+        ("Non-interactive exec", "non_interactive_exec_detected"),
+        ("Stdin prompt input", "stdin_prompt_input_detected"),
+        ("Ephemeral option", "ephemeral_option_detected"),
+        ("Sandbox option", "sandbox_option_detected"),
+        ("Working-directory option", "working_directory_option_detected"),
+        ("JSON option", "json_option_detected"),
+        ("Output last message option", "output_last_message_option_detected"),
+        ("Explicit budget option", "explicit_budget_option_detected"),
+    ]
+    for label, field_name in capability_labels:
+        print(f"{label}: {_format_yes_no(report[field_name])}")
+    _print_list("Blockers", report["blockers"])
+    _print_list("External checks still required", report["external_checks_required"])
 
 
 CODEX_INVOCATION_ALLOWED_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
