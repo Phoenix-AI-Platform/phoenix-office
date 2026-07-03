@@ -112,6 +112,26 @@ def test_dev_codex_handoff_missing_file_fails_cleanly(tmp_path, capsys):
     assert "CodexHandoffPackage JSON file does not exist" in captured.err
 
 
+def test_dev_codex_handoff_missing_file_json_outputs_failure_payload(
+    tmp_path, capsys
+):
+    missing_path = tmp_path / "missing.json"
+
+    exit_code = main(["dev", "codex-handoff", str(missing_path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload == {
+        "error_code": "missing_file",
+        "issues": [],
+        "message": f"CodexHandoffPackage JSON file does not exist: {missing_path}",
+        "ok": False,
+        "path": str(missing_path),
+    }
+
+
 def test_dev_codex_handoff_directory_path_fails_cleanly(tmp_path, capsys):
     exit_code = main(["dev", "codex-handoff", str(tmp_path)])
 
@@ -131,6 +151,25 @@ def test_dev_codex_handoff_invalid_json_fails_cleanly(tmp_path, capsys):
     assert "Invalid JSON" in captured.err
 
 
+def test_dev_codex_handoff_invalid_json_json_outputs_failure_payload(
+    tmp_path, capsys
+):
+    path = tmp_path / "invalid.json"
+    path.write_text("{not valid json", encoding="utf-8")
+
+    exit_code = main(["dev", "codex-handoff", str(path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload["error_code"] == "invalid_json"
+    assert payload["issues"] == []
+    assert payload["message"].startswith(f"Invalid JSON in {path}:")
+    assert payload["ok"] is False
+    assert payload["path"] == str(path)
+
+
 def test_dev_codex_handoff_invalid_utf8_fails_cleanly(tmp_path, capsys):
     path = tmp_path / "invalid-utf8.json"
     path.write_bytes(b"\xff")
@@ -140,6 +179,25 @@ def test_dev_codex_handoff_invalid_utf8_fails_cleanly(tmp_path, capsys):
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Invalid UTF-8" in captured.err
+
+
+def test_dev_codex_handoff_invalid_utf8_json_outputs_failure_payload(
+    tmp_path, capsys
+):
+    path = tmp_path / "invalid-utf8.json"
+    path.write_bytes(b"\xff")
+
+    exit_code = main(["dev", "codex-handoff", str(path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload["error_code"] == "invalid_json"
+    assert payload["issues"] == []
+    assert payload["message"].startswith(f"Invalid UTF-8 in {path}:")
+    assert payload["ok"] is False
+    assert payload["path"] == str(path)
 
 
 def test_dev_codex_handoff_non_object_json_fails_cleanly(tmp_path, capsys):
@@ -174,6 +232,28 @@ def test_dev_codex_handoff_missing_required_field_fails_closed(tmp_path, capsys)
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "expected_pr_title must be a non-empty string" in captured.err
+
+
+def test_dev_codex_handoff_unsafe_json_outputs_failure_payload(tmp_path, capsys):
+    package = _load_example()
+    package["invocation_authorized"] = True
+    path = _write_package(tmp_path, package)
+
+    exit_code = main(["dev", "codex-handoff", str(path), "--json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert exit_code == 1
+    assert captured.err == ""
+    assert payload == {
+        "error_code": "unsafe_or_invalid_package",
+        "issues": [
+            "invocation_authorized must be JSON boolean False; got True"
+        ],
+        "message": "unsafe or invalid CodexHandoffPackage",
+        "ok": False,
+        "path": str(path),
+    }
 
 
 def test_dev_codex_handoff_prompt_only_still_fails_closed_for_unsafe_package(
