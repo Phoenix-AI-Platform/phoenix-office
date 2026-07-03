@@ -2253,40 +2253,50 @@ def _detect_codex_runtime_capabilities(
     del version
     help_lower = exec_help.lower()
     return {
-        "ephemeral_option_detected": "--ephemeral" in help_lower,
-        "explicit_budget_option_detected": _detect_budget_option(help_lower),
-        "json_option_detected": "--json" in help_lower,
+        "ephemeral_option_detected": _contains_long_option(
+            exec_help, "--ephemeral"
+        ),
+        "explicit_budget_option_detected": _detect_budget_option(exec_help),
+        "json_option_detected": _contains_long_option(exec_help, "--json"),
         "non_interactive_exec_detected": (
             "codex exec" in help_lower
             or "usage: exec" in help_lower
             or "usage: codex exec" in help_lower
         ),
         "output_last_message_option_detected": (
-            "--output-last-message" in help_lower
+            _contains_long_option(exec_help, "--output-last-message")
             or _contains_short_option(exec_help, "-o")
         ),
-        "sandbox_option_detected": "--sandbox" in help_lower,
+        "sandbox_option_detected": _contains_long_option(exec_help, "--sandbox"),
         "stdin_prompt_input_detected": (
             "stdin" in help_lower
             or "standard input" in help_lower
             or "prompt from -" in help_lower
         ),
         "working_directory_option_detected": (
-            "--cd" in help_lower or _contains_short_option(exec_help, "-C")
+            _contains_long_option(exec_help, "--cd")
+            or _contains_short_option(exec_help, "-C")
         ),
     }
 
 
 def _detect_budget_option(help_text: str) -> bool:
     option_lines = [
-        line
+        line.lower()
         for line in help_text.splitlines()
         if line.strip().startswith("-") or " --" in line
     ]
     return any(
-        keyword in line
+        any(ceiling_word in line for ceiling_word in ["budget", "limit", "max", "ceiling"])
+        and any(metric_word in line for metric_word in ["token", "cost", "usage"])
         for line in option_lines
-        for keyword in ["budget", "cost", "token", "usage-ceiling", "usage ceiling"]
+    )
+
+
+def _contains_long_option(help_text: str, option: str) -> bool:
+    return any(
+        part == option
+        for part in help_text.lower().replace(",", " ").split()
     )
 
 

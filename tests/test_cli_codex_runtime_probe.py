@@ -274,6 +274,42 @@ def test_dev_codex_runtime_probe_missing_required_capability_fails_closed(
     assert f"missing capability: {blocker}" in payload["blockers"]
 
 
+def test_dev_codex_runtime_probe_near_match_long_options_fail_closed(
+    monkeypatch, capsys
+):
+    help_text = SUPPORTED_HELP
+    replacements = {
+        "  --ephemeral": "  --ephemeral-cache",
+        "  --sandbox <MODE>": "  --sandbox-policy <MODE>",
+        "  --cd <DIR>": "  --cd-path <DIR>",
+        "  -C <DIR>": "",
+        "  --json": "  --json-schema",
+        "  --output-last-message <FILE>": "  --output-last-message-file <FILE>",
+        "  -o <FILE>": "",
+    }
+    for old, new in replacements.items():
+        help_text = help_text.replace(old, new)
+    _install_probe_mocks(monkeypatch, help_stdout=help_text)
+
+    exit_code = main(["dev", "codex-runtime-probe", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["ephemeral_option_detected"] is False
+    assert payload["sandbox_option_detected"] is False
+    assert payload["working_directory_option_detected"] is False
+    assert payload["json_option_detected"] is False
+    assert payload["output_last_message_option_detected"] is False
+    assert "missing capability: --ephemeral option" in payload["blockers"]
+    assert "missing capability: --sandbox option" in payload["blockers"]
+    assert "missing capability: --cd or -C option" in payload["blockers"]
+    assert "missing capability: --json option" in payload["blockers"]
+    assert (
+        "missing capability: --output-last-message or -o option"
+        in payload["blockers"]
+    )
+
+
 def test_dev_codex_runtime_probe_budget_option_detected(monkeypatch, capsys):
     _install_probe_mocks(monkeypatch)
 
@@ -285,13 +321,21 @@ def test_dev_codex_runtime_probe_budget_option_detected(monkeypatch, capsys):
     assert payload["pilot_ready"] is False
 
 
-def test_dev_codex_runtime_probe_budget_option_not_inferred(
-    monkeypatch, capsys
+@pytest.mark.parametrize(
+    "reporting_option",
+    [
+        "--show-token-usage",
+        "--cost-report",
+        "--token-format <FORMAT>",
+    ],
+)
+def test_dev_codex_runtime_probe_budget_option_not_inferred_from_reporting_flags(
+    monkeypatch, capsys, reporting_option
 ):
     _install_probe_mocks(
         monkeypatch,
         help_stdout=SUPPORTED_HELP.replace("  --token-budget <TOKENS>", "")
-        + "\nAccount usage limits may apply.\n",
+        + f"\n  {reporting_option}\nAccount usage limits may apply.\n",
     )
 
     exit_code = main(["dev", "codex-runtime-probe", "--json"])
