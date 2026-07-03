@@ -168,6 +168,19 @@ def _run_json(
     return exit_code, json.loads(captured.out), captured.out
 
 
+def _run_text(
+    handoff_path: Path,
+    evidence_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> tuple[int, str]:
+    exit_code = main(
+        ["dev", "codex-pilot-preflight", str(handoff_path), str(evidence_path)]
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return exit_code, captured.out
+
+
 def test_codex_pilot_preflight_all_checks_passing_json_and_text(
     tmp_path, capsys, monkeypatch
 ):
@@ -232,8 +245,89 @@ def test_codex_pilot_preflight_invalid_handoff_fails_closed(
     assert exit_code == 1
     assert report["handoff_static_preflight_passed"] is False
     assert report["eligible_for_authorization_review"] is False
-    assert report["blockers_by_source"]["handoff"]
+    assert report["blockers_by_source"]["handoff"] == [
+        "handoff package failed static preflight"
+    ]
     assert "Rendered prompt" not in output
+    assert "feature" not in output
+
+
+def test_codex_pilot_preflight_missing_handoff_file_uses_sanitized_blocker(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff_path = tmp_path / "missing.json"
+    evidence_path = _write_json(tmp_path / "evidence.json", _valid_evidence_package())
+
+    exit_code, report, json_output = _run_json(handoff_path, evidence_path, capsys)
+    text_exit, text_output = _run_text(handoff_path, evidence_path, capsys)
+
+    assert exit_code == 1
+    assert text_exit == 1
+    assert report["eligible_for_authorization_review"] is False
+    assert report["blockers_by_source"]["handoff"] == ["handoff package is missing"]
+    assert str(tmp_path) not in json_output
+    assert str(handoff_path) not in json_output
+    assert str(tmp_path) not in text_output
+    assert str(handoff_path) not in text_output
+
+
+def test_codex_pilot_preflight_malformed_handoff_json_uses_sanitized_blocker(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff_path = tmp_path / "handoff.json"
+    handoff_path.write_text("{not-json-secret-token-value", encoding="utf-8")
+    evidence_path = _write_json(tmp_path / "evidence.json", _valid_evidence_package())
+
+    exit_code, report, output = _run_json(handoff_path, evidence_path, capsys)
+
+    assert exit_code == 1
+    assert report["eligible_for_authorization_review"] is False
+    assert report["blockers_by_source"]["handoff"] == ["handoff package is malformed"]
+    assert "not-json-secret-token-value" not in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.parametrize(
+    ("field_path", "unsafe_value"),
+        [
+            (("repository",), "C:/Users/private-name"),
+            (("base_branch",), "/home/private-name"),
+            (("invocation_authorized",), "https://example.com/secret"),
+            (("required_repo_paths",), ["sk-proj-super-secret"]),
+            (("task", "allowed_resources", "paths"), ["password=secret"]),
+        ],
+)
+def test_codex_pilot_preflight_adversarial_handoff_values_are_sanitized(
+    tmp_path, capsys, monkeypatch, field_path, unsafe_value
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff = _valid_handoff_package()
+    target = handoff
+    for segment in field_path[:-1]:
+        target = target[segment]
+    target[field_path[-1]] = unsafe_value
+    handoff_path, evidence_path = _write_pair(tmp_path, handoff=handoff)
+
+    exit_code, report, json_output = _run_json(handoff_path, evidence_path, capsys)
+    text_exit, text_output = _run_text(handoff_path, evidence_path, capsys)
+
+    assert exit_code == 1
+    assert text_exit == 1
+    assert report["eligible_for_authorization_review"] is False
+    assert report["handoff_static_preflight_passed"] is False
+    assert report["blockers_by_source"]["handoff"] == [
+        "handoff package failed static preflight"
+    ]
+    for output in [json_output, text_output]:
+        assert "C:/Users/private-name" not in output
+        assert "/home/private-name" not in output
+        assert "https://example.com/secret" not in output
+        assert "sk-proj-super-secret" not in output
+        assert "token-value" not in output
+        assert "password=secret" not in output
+        assert "AppData" not in output
 
 
 @pytest.mark.parametrize(
@@ -334,6 +428,7 @@ def test_codex_pilot_preflight_repository_or_pilot_kind_mismatch_fails_closed(
         ({"timeout_argv": ["codex", "--version"]}, "timeout"),
         ({"version_returncode": 7}, "nonzero_exit"),
         ({"version_stdout": ""}, "version output was empty or malformed"),
+        ({"help_stdout": ""}, "exec-help output was empty or malformed"),
         (
             {"help_stdout": SUPPORTED_HELP.replace("  --sandbox <MODE>", "")},
             "missing capability: --sandbox option",
@@ -355,21 +450,57 @@ def test_codex_pilot_preflight_runtime_failures_fail_closed(
     assert "codex-cli 1.2.3" not in output
 
 
-def test_codex_pilot_preflight_safe_filename_suppression(
+def test_codex_pilot_preflight_unsafe_handoff_filename_blocks_eligibility(
     tmp_path, capsys, monkeypatch
 ):
     _install_runtime_mocks(monkeypatch)
     handoff_path = _write_json(tmp_path / "token-value.json", _valid_handoff_package())
-    evidence_path = _write_json(tmp_path / "password=secret.json", _valid_evidence_package())
+    evidence_path = _write_json(tmp_path / "evidence.json", _valid_evidence_package())
 
-    exit_code, report, output = _run_json(handoff_path, evidence_path, capsys)
+    exit_code, report, json_output = _run_json(handoff_path, evidence_path, capsys)
+    text_exit, text_output = _run_text(handoff_path, evidence_path, capsys)
 
     assert exit_code == 1
+    assert text_exit == 1
     assert report["handoff_filename"] is None
+    assert report["evidence_filename"] == "evidence.json"
+    assert report["eligible_for_authorization_review"] is False
+    assert "handoff input filename is unsafe" in report["blockers_by_source"]["handoff"]
+    assert "token-value" not in json_output
+    assert "token-value" not in text_output
+
+
+def test_codex_pilot_preflight_unsafe_evidence_filename_blocks_eligibility(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff_path = _write_json(tmp_path / "handoff.json", _valid_handoff_package())
+    evidence_path = _write_json(tmp_path / "password=secret.json", _valid_evidence_package())
+
+    exit_code, report, json_output = _run_json(handoff_path, evidence_path, capsys)
+    text_exit, text_output = _run_text(handoff_path, evidence_path, capsys)
+
+    assert exit_code == 1
+    assert text_exit == 1
+    assert report["handoff_filename"] == "handoff.json"
     assert report["evidence_filename"] is None
-    assert "input filename is unsafe" in report["blockers_by_source"]["evidence"]
-    assert "token-value" not in output
-    assert "password=secret" not in output
+    assert report["eligible_for_authorization_review"] is False
+    assert "evidence input filename is unsafe" in report["blockers_by_source"]["evidence"]
+    assert "password=secret" not in json_output
+    assert "password=secret" not in text_output
+
+
+def test_codex_pilot_preflight_safe_filenames_have_no_filename_blockers(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    handoff_path, evidence_path = _write_pair(tmp_path)
+
+    exit_code, report, _output = _run_json(handoff_path, evidence_path, capsys)
+
+    assert exit_code == 0
+    assert "handoff input filename is unsafe" not in report["blockers_by_source"]["handoff"]
+    assert "evidence input filename is unsafe" not in report["blockers_by_source"]["evidence"]
 
 
 def test_codex_pilot_preflight_no_prompt_evidence_or_runtime_leakage(

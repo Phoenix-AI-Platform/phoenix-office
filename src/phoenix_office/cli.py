@@ -2197,6 +2197,8 @@ def _run_codex_pilot_preflight(
     handoff_path: Path,
     evidence_path: Path,
 ) -> dict[str, Any]:
+    handoff_filename = _safe_codex_pilot_evidence_input_filename(handoff_path)
+    evidence_filename = _safe_codex_pilot_evidence_input_filename(evidence_path)
     handoff_package, handoff_report = _load_codex_invocation_preflight(
         handoff_path
     )
@@ -2212,9 +2214,17 @@ def _run_codex_pilot_preflight(
         else None
     )
 
-    handoff_blockers = sorted(handoff_report.get("package_blockers", []))
+    handoff_blockers = _codex_pilot_preflight_handoff_blockers(
+        handoff_package=handoff_package,
+        handoff_report=handoff_report,
+        handoff_filename=handoff_filename,
+    )
     runtime_blockers = sorted(runtime_report.get("blockers", []))
     evidence_blockers = sorted(evidence_report.get("blockers", []))
+    if evidence_filename is None:
+        evidence_blockers = sorted(
+            {*evidence_blockers, "evidence input filename is unsafe"}
+        )
     binding_blockers = _codex_pilot_preflight_binding_blockers(
         handoff_report=handoff_report,
         evidence_report=evidence_report,
@@ -2229,6 +2239,8 @@ def _run_codex_pilot_preflight(
     binding_passed = not binding_blockers
     eligible_for_authorization_review = all(
         [
+            handoff_filename is not None,
+            evidence_filename is not None,
             handoff_static_preflight_passed,
             runtime_local_cli_ready,
             evidence_structural_valid,
@@ -2250,12 +2262,10 @@ def _run_codex_pilot_preflight(
         "command": CODEX_PILOT_PREFLIGHT_COMMAND,
         "eligible_for_authorization_review": eligible_for_authorization_review,
         "evidence_complete": evidence_package_complete,
-        "evidence_filename": _safe_codex_pilot_evidence_input_filename(
-            evidence_path
-        ),
+        "evidence_filename": evidence_filename,
         "evidence_structural_valid": evidence_structural_valid,
         "github_access_performed": False,
-        "handoff_filename": _safe_codex_pilot_evidence_input_filename(handoff_path),
+        "handoff_filename": handoff_filename,
         "handoff_id": handoff_id if handoff_id == evidence_handoff_id else None,
         "handoff_static_preflight_passed": handoff_static_preflight_passed,
         "invocation_authorized": False,
@@ -2290,6 +2300,32 @@ def _codex_pilot_preflight_binding_blockers(
         blockers.append("handoff id binding is unavailable")
     elif handoff_id != evidence_handoff_id:
         blockers.append("handoff id does not match evidence package")
+    return sorted(blockers)
+
+
+def _codex_pilot_preflight_handoff_blockers(
+    *,
+    handoff_package: dict[str, Any] | None,
+    handoff_report: dict[str, Any],
+    handoff_filename: str | None,
+) -> list[str]:
+    blockers: set[str] = set()
+    if handoff_filename is None:
+        blockers.add("handoff input filename is unsafe")
+
+    raw_blockers = handoff_report.get("package_blockers", [])
+    if not raw_blockers:
+        return sorted(blockers)
+
+    if handoff_package is None:
+        if any("does not exist" in blocker for blocker in raw_blockers):
+            blockers.add("handoff package is missing")
+        elif any("Invalid JSON" in blocker for blocker in raw_blockers):
+            blockers.add("handoff package is malformed")
+        else:
+            blockers.add("handoff package is unreadable")
+    else:
+        blockers.add("handoff package failed static preflight")
     return sorted(blockers)
 
 

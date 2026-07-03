@@ -66,7 +66,7 @@ Structural validity means the package is internally well formed. A structurally 
 
 `python -m phoenix_office.cli dev codex-pilot-preflight <handoff.json> <evidence.json>` composes the reviewed local/package checks before a separate authorization review. It reuses the handoff static preflight, local runtime capability probe, and evidence package inspection, then verifies the handoff/evidence binding. `--json` emits the same sanitized report as deterministic JSON.
 
-This command does not verify the truth, freshness, enforceability, review quality, or sufficiency of external evidence. Exit zero means only `eligible_for_authorization_review: true`; it does not mean that invocation is authorized, ready, or performed. It must not emit the handoff prompt, rendered prompt, raw evidence references, raw runtime output, workspace paths, environment values, credentials, usernames, home directories, or machine-specific values, and it must keep all invocation, GitHub, network, branch, PR, and mutation flags false.
+This command does not verify the truth, freshness, enforceability, review quality, or sufficiency of external evidence. Exit zero means only `eligible_for_authorization_review: true`; it does not mean that invocation is authorized, ready, or performed. Unsafe input filenames block the composite preflight. Detailed standalone handoff diagnostics are reduced to sanitized categories in the composite report. The command must not emit the handoff prompt, rendered prompt, raw evidence references, raw runtime output, workspace paths, environment values, credentials, usernames, home directories, or machine-specific values, and it must keep all invocation, GitHub, network, branch, PR, and mutation flags false.
 
 ## Supervised Invocation Pilot Boundary
 
