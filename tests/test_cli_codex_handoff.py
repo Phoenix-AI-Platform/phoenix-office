@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from phoenix_office.cli import main
 
 ROOT = Path(__file__).parents[1]
@@ -99,6 +101,17 @@ def test_dev_codex_handoff_invalid_json_fails_cleanly(tmp_path, capsys):
     assert "Invalid JSON" in captured.err
 
 
+def test_dev_codex_handoff_invalid_utf8_fails_cleanly(tmp_path, capsys):
+    path = tmp_path / "invalid-utf8.json"
+    path.write_bytes(b"\xff")
+
+    exit_code = main(["dev", "codex-handoff", str(path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Invalid UTF-8" in captured.err
+
+
 def test_dev_codex_handoff_non_object_json_fails_cleanly(tmp_path, capsys):
     path = _write_package(tmp_path, [])
 
@@ -144,7 +157,22 @@ def test_dev_codex_handoff_invocation_authorized_true_fails_closed(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "invocation_authorized must be False" in captured.err
+    assert "invocation_authorized must be JSON boolean False" in captured.err
+
+
+@pytest.mark.parametrize("numeric_value", [0, 1])
+def test_dev_codex_handoff_invocation_authorized_numeric_fails_closed(
+    tmp_path, capsys, numeric_value
+):
+    package = _load_example()
+    package["invocation_authorized"] = numeric_value
+    path = _write_package(tmp_path, package)
+
+    exit_code = main(["dev", "codex-handoff", str(path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "invocation_authorized must be JSON boolean False" in captured.err
 
 
 def test_dev_codex_handoff_review_required_false_fails_closed(tmp_path, capsys):
@@ -156,7 +184,22 @@ def test_dev_codex_handoff_review_required_false_fails_closed(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "review_required must be True" in captured.err
+    assert "review_required must be JSON boolean True" in captured.err
+
+
+@pytest.mark.parametrize("numeric_value", [0, 1])
+def test_dev_codex_handoff_review_required_numeric_fails_closed(
+    tmp_path, capsys, numeric_value
+):
+    package = _load_example()
+    package["review_required"] = numeric_value
+    path = _write_package(tmp_path, package)
+
+    exit_code = main(["dev", "codex-handoff", str(path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "review_required must be JSON boolean True" in captured.err
 
 
 def test_dev_codex_handoff_worker_may_merge_true_fails_closed(tmp_path, capsys):
@@ -168,7 +211,22 @@ def test_dev_codex_handoff_worker_may_merge_true_fails_closed(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "worker_may_merge must be False" in captured.err
+    assert "worker_may_merge must be JSON boolean False" in captured.err
+
+
+@pytest.mark.parametrize("numeric_value", [0, 1])
+def test_dev_codex_handoff_worker_may_merge_numeric_fails_closed(
+    tmp_path, capsys, numeric_value
+):
+    package = _load_example()
+    package["worker_may_merge"] = numeric_value
+    path = _write_package(tmp_path, package)
+
+    exit_code = main(["dev", "codex-handoff", str(path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "worker_may_merge must be JSON boolean False" in captured.err
 
 
 def test_dev_codex_handoff_wrong_worker_type_fails_closed(tmp_path, capsys):

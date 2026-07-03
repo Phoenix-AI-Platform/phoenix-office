@@ -1865,6 +1865,8 @@ def _load_codex_handoff_package_json(path: Path) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as file:
             data: Any = json.load(file)
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Invalid UTF-8 in {path}: {exc.reason}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON in {path}: {exc.msg}") from exc
 
@@ -1879,15 +1881,25 @@ def _validate_codex_handoff_package(package: dict[str, Any]) -> list[str]:
         "schema_version": "codex-handoff-package.v1",
         "worker_type": "codex",
         "invocation_mode": "manual",
-        "invocation_authorized": False,
-        "review_required": True,
-        "worker_may_merge": False,
     }
     for field_name, expected_value in expected_values.items():
         if package.get(field_name) != expected_value:
             issues.append(
                 f"{field_name} must be {expected_value!r}; "
                 f"got {package.get(field_name)!r}"
+            )
+
+    expected_booleans = {
+        "invocation_authorized": False,
+        "review_required": True,
+        "worker_may_merge": False,
+    }
+    for field_name, expected_value in expected_booleans.items():
+        value = package.get(field_name)
+        if type(value) is not bool or value is not expected_value:
+            issues.append(
+                f"{field_name} must be JSON boolean {expected_value!r}; "
+                f"got {value!r}"
             )
 
     for field_name in [
