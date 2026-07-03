@@ -68,6 +68,8 @@ Structural validity means the package is internally well formed. A structurally 
 
 This command does not verify the truth, freshness, enforceability, review quality, or sufficiency of external evidence. Exit zero means only `eligible_for_authorization_review: true`; it does not mean that invocation is authorized, ready, or performed. Unsafe input filenames block the composite preflight. Detailed standalone handoff diagnostics are reduced to sanitized categories in the composite report. The command must not emit the handoff prompt, rendered prompt, raw evidence references, raw runtime output, workspace paths, environment values, credentials, usernames, home directories, or machine-specific values, and it must keep all invocation, GitHub, network, branch, PR, and mutation flags false.
 
+The first one-time pilot authorization process is defined in `docs/process/supervised-codex-pilot-authorization.md`. That runbook keeps human authorization separate from preflight eligibility and requires Codex to stop after opening one authorized documentation-only PR.
+
 ## Supervised Invocation Pilot Boundary
 
 The narrowest future pilot boundary is: a human-triggered supervised invocation that consumes one already-committed `CodexHandoffPackage` after local or workflow validation has succeeded.
