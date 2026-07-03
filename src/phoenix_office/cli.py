@@ -135,6 +135,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the runtime capability probe report as JSON",
     )
     codex_runtime_probe_parser.set_defaults(func=codex_runtime_probe)
+    codex_pilot_evidence_parser = dev_subparsers.add_parser(
+        "codex-pilot-evidence",
+        help="Inspect supervised Codex pilot evidence package completeness",
+    )
+    codex_pilot_evidence_parser.add_argument(
+        "evidence_json",
+        type=Path,
+        help="Path to Codex pilot evidence package JSON",
+    )
+    codex_pilot_evidence_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the evidence inspection report as JSON",
+    )
+    codex_pilot_evidence_parser.set_defaults(func=codex_pilot_evidence)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -922,6 +937,15 @@ def codex_runtime_probe(args: argparse.Namespace) -> int:
     else:
         _print_codex_runtime_probe(report)
     return 0 if report["local_cli_ready"] else 1
+
+
+def codex_pilot_evidence(args: argparse.Namespace) -> int:
+    report = _inspect_codex_pilot_evidence_package(args.evidence_json)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_evidence_report(report)
+    return 0 if report["evidence_package_complete"] else 1
 
 
 def _load_codex_invocation_preflight(
@@ -2087,6 +2111,299 @@ CODEX_RUNTIME_CAPABILITY_FIELDS = {
     "output_last_message_option_detected": "--output-last-message or -o option",
     "explicit_budget_option_detected": "explicit per-run budget option",
 }
+
+
+CODEX_PILOT_EVIDENCE_SCHEMA_VERSION = "codex-pilot-evidence.v1"
+CODEX_PILOT_EVIDENCE_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
+CODEX_PILOT_EVIDENCE_KIND = "docs-only-supervised"
+CODEX_PILOT_EVIDENCE_COMMAND = "dev codex-pilot-evidence"
+CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS = {
+    "authentication_runner_access": "human_operator",
+    "per_run_budget_ceiling": "human_operator_and_assistant_reviewer",
+    "operator_cancellation_timeout": "human_operator",
+    "github_branch_creation_permission": "human_operator",
+    "github_pr_creation_permission": "human_operator_and_assistant_reviewer",
+    "codex_cannot_approve_or_merge": "assistant_reviewer",
+    "duplicate_active_pr_detection": "assistant_reviewer",
+    "branch_collision_detection": "assistant_reviewer",
+    "codex_task_time_availability": "human_operator",
+    "final_ci_requirement": "assistant_reviewer",
+    "assistant_architecture_review": "assistant_reviewer",
+}
+CODEX_PILOT_EVIDENCE_CONTROL_IDS = list(
+    CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
+)
+CODEX_PILOT_EVIDENCE_STATUSES = {"verified", "blocked", "unverified"}
+CODEX_PILOT_EVIDENCE_REVIEWER_ROLES = {
+    "human_operator",
+    "assistant_reviewer",
+    "human_operator_and_assistant_reviewer",
+}
+CODEX_PILOT_EVIDENCE_PACKAGE_FIELDS = {
+    "schema_version",
+    "repository",
+    "pilot_kind",
+    "handoff_id",
+    "controls",
+    "pilot_ready",
+    "invocation_authorized",
+}
+CODEX_PILOT_EVIDENCE_CONTROL_FIELDS = {
+    "control_id",
+    "status",
+    "evidence_ref",
+    "reviewer_role",
+}
+
+
+def _inspect_codex_pilot_evidence_package(path: Path) -> dict[str, Any]:
+    blockers: list[str] = []
+    package: dict[str, Any] | None = None
+    input_filename = path.name
+    try:
+        package = _read_json_object_file(path)
+    except ValueError as exc:
+        blockers.append(str(exc))
+
+    if package is not None:
+        blockers.extend(_validate_codex_pilot_evidence_package(package))
+
+    control_summary = _codex_pilot_evidence_control_summary(package)
+    structural_valid = not blockers
+    evidence_package_complete = (
+        structural_valid
+        and control_summary["required_control_count"]
+        == control_summary["verified_control_count"]
+    )
+    return {
+        "blocked_controls": control_summary["blocked_controls"],
+        "blockers": sorted(blockers),
+        "command": CODEX_PILOT_EVIDENCE_COMMAND,
+        "evidence_package_complete": evidence_package_complete,
+        "github_access_performed": False,
+        "handoff_id": _safe_codex_pilot_evidence_value(package, "handoff_id"),
+        "input_filename": input_filename,
+        "invocation_authorized": False,
+        "invocation_performed": False,
+        "mutation_performed": False,
+        "network_access_performed": False,
+        "pilot_kind": package.get("pilot_kind") if package else None,
+        "pilot_ready": False,
+        "repository": package.get("repository") if package else None,
+        "required_control_count": len(CODEX_PILOT_EVIDENCE_CONTROL_IDS),
+        "schema_version": CODEX_PILOT_EVIDENCE_SCHEMA_VERSION,
+        "structural_valid": structural_valid,
+        "unverified_controls": control_summary["unverified_controls"],
+        "verified_control_count": control_summary["verified_control_count"],
+    }
+
+
+def _read_json_object_file(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8") as file:
+            value: Any = json.load(file)
+    except FileNotFoundError as exc:
+        raise ValueError("input file is missing") from exc
+    except PermissionError as exc:
+        raise ValueError("input file is unreadable") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError("input file is not valid UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError("input file is malformed JSON") from exc
+    except OSError as exc:
+        raise ValueError("input file is unreadable") from exc
+
+    if not isinstance(value, dict):
+        raise ValueError("input JSON root must be an object")
+    return value
+
+
+def _validate_codex_pilot_evidence_package(package: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    extra_fields = sorted(set(package) - CODEX_PILOT_EVIDENCE_PACKAGE_FIELDS)
+    for field_name in extra_fields:
+        blockers.append(f"unknown package field: {field_name}")
+
+    expected_values = {
+        "schema_version": CODEX_PILOT_EVIDENCE_SCHEMA_VERSION,
+        "repository": CODEX_PILOT_EVIDENCE_REPOSITORY,
+        "pilot_kind": CODEX_PILOT_EVIDENCE_KIND,
+    }
+    for field_name, expected_value in expected_values.items():
+        if package.get(field_name) != expected_value:
+            blockers.append(f"{field_name} must be {expected_value!r}")
+
+    handoff_id = package.get("handoff_id")
+    if not _is_safe_evidence_identifier(handoff_id):
+        blockers.append("handoff_id must be a bounded safe identifier")
+
+    for field_name in ["pilot_ready", "invocation_authorized"]:
+        value = package.get(field_name)
+        if type(value) is not bool or value is not False:
+            blockers.append(f"{field_name} must be JSON boolean false")
+
+    controls = package.get("controls")
+    if not isinstance(controls, list):
+        blockers.append("controls must be a list")
+        return blockers
+
+    seen_control_ids: set[str] = set()
+    for index, control in enumerate(controls):
+        if not isinstance(control, dict):
+            blockers.append(f"controls[{index}] must be an object")
+            continue
+        extra_control_fields = sorted(
+            set(control) - CODEX_PILOT_EVIDENCE_CONTROL_FIELDS
+        )
+        for field_name in extra_control_fields:
+            blockers.append(f"controls[{index}] unknown field: {field_name}")
+
+        control_id = control.get("control_id")
+        if not isinstance(control_id, str):
+            blockers.append(f"controls[{index}].control_id must be a string")
+        elif control_id not in CODEX_PILOT_EVIDENCE_CONTROL_IDS:
+            blockers.append(f"unknown control_id: {control_id}")
+        elif control_id in seen_control_ids:
+            blockers.append(f"duplicate control_id: {control_id}")
+        else:
+            seen_control_ids.add(control_id)
+
+        status = control.get("status")
+        if status not in CODEX_PILOT_EVIDENCE_STATUSES:
+            blockers.append(
+                f"controls[{index}].status must be verified, blocked, or unverified"
+            )
+        elif isinstance(control_id, str) and status in {"blocked", "unverified"}:
+            blockers.append(f"{control_id} status is {status}")
+
+        reviewer_role = control.get("reviewer_role")
+        if reviewer_role not in CODEX_PILOT_EVIDENCE_REVIEWER_ROLES:
+            blockers.append(f"controls[{index}].reviewer_role is invalid")
+        elif isinstance(control_id, str) and control_id in (
+            CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
+        ):
+            expected_role = CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS[control_id]
+            if reviewer_role != expected_role:
+                blockers.append(
+                    f"{control_id} reviewer_role must be {expected_role!r}"
+                )
+
+        evidence_ref = control.get("evidence_ref")
+        if status == "verified" and not _is_safe_evidence_identifier(evidence_ref):
+            blockers.append(
+                f"{control_id or f'controls[{index}]'} verified evidence_ref "
+                "must be a safe opaque identifier"
+            )
+        elif evidence_ref not in (None, "") and not _is_safe_evidence_identifier(
+            evidence_ref
+        ):
+            blockers.append(
+                f"{control_id or f'controls[{index}]'} evidence_ref is unsafe"
+            )
+
+    for control_id in CODEX_PILOT_EVIDENCE_CONTROL_IDS:
+        if control_id not in seen_control_ids:
+            blockers.append(f"missing control_id: {control_id}")
+
+    return blockers
+
+
+def _safe_codex_pilot_evidence_value(
+    package: dict[str, Any] | None,
+    field_name: str,
+) -> str | None:
+    if package is None:
+        return None
+    value = package.get(field_name)
+    return value if _is_safe_evidence_identifier(value) else None
+
+
+def _codex_pilot_evidence_control_summary(
+    package: dict[str, Any] | None,
+) -> dict[str, Any]:
+    blocked_controls: list[str] = []
+    unverified_controls: list[str] = []
+    verified_control_count = 0
+    controls = package.get("controls") if package else None
+    if not isinstance(controls, list):
+        return {
+            "blocked_controls": blocked_controls,
+            "required_control_count": len(CODEX_PILOT_EVIDENCE_CONTROL_IDS),
+            "unverified_controls": unverified_controls,
+            "verified_control_count": verified_control_count,
+        }
+
+    for control in controls:
+        if not isinstance(control, dict):
+            continue
+        control_id = control.get("control_id")
+        status = control.get("status")
+        if control_id not in CODEX_PILOT_EVIDENCE_CONTROL_IDS:
+            continue
+        if status == "verified":
+            verified_control_count += 1
+        elif status == "blocked":
+            blocked_controls.append(control_id)
+        elif status == "unverified":
+            unverified_controls.append(control_id)
+
+    return {
+        "blocked_controls": sorted(blocked_controls),
+        "required_control_count": len(CODEX_PILOT_EVIDENCE_CONTROL_IDS),
+        "unverified_controls": sorted(unverified_controls),
+        "verified_control_count": verified_control_count,
+    }
+
+
+def _is_safe_evidence_identifier(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if not value or len(value) > 80:
+        return False
+    lowered = value.lower()
+    unsafe_fragments = [
+        "://",
+        "\\",
+        "/",
+        ":",
+        "=",
+        "sk-",
+        "token",
+        "secret",
+        "password",
+        "users",
+        "home",
+        "appdata",
+    ]
+    if any(fragment in lowered for fragment in unsafe_fragments):
+        return False
+    return all(character.isalnum() or character in {"-", "_", "."} for character in value)
+
+
+def _print_codex_pilot_evidence_report(report: dict[str, Any]) -> None:
+    print("Codex pilot evidence package inspection")
+    print(f"Schema version: {report['schema_version']}")
+    print(f"Command: {report['command']}")
+    print(f"Input filename: {report['input_filename']}")
+    print(f"Repository: {report['repository']}")
+    print(f"Pilot kind: {report['pilot_kind']}")
+    print(f"Handoff ID: {report['handoff_id']}")
+    print(f"Required controls: {report['required_control_count']}")
+    print(f"Verified controls: {report['verified_control_count']}")
+    print(f"Structural valid: {_format_yes_no(report['structural_valid'])}")
+    print(
+        "Evidence package complete: "
+        f"{_format_yes_no(report['evidence_package_complete'])}"
+    )
+    print("Pilot ready: no")
+    print("Invocation authorized: no")
+    print("Invocation performed: no")
+    print("GitHub access performed: no")
+    print("Network access performed: no")
+    print("Mutation performed: no")
+    _print_list("Blocked controls", report["blocked_controls"])
+    _print_list("Unverified controls", report["unverified_controls"])
+    _print_list("Blockers", report["blockers"])
 
 
 def _run_codex_runtime_probe() -> dict[str, Any]:

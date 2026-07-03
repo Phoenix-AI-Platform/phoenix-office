@@ -15,6 +15,10 @@ from phoenix_office.core.contracts import (
     ApprovalStatus,
     ApprovedScope,
     CodexHandoffPackage,
+    CodexPilotEvidenceControl,
+    CodexPilotEvidencePackage,
+    CodexPilotEvidenceReviewerRole,
+    CodexPilotEvidenceStatus,
     EventSeverity,
     EvidenceResult,
     EvidenceType,
@@ -321,6 +325,40 @@ def test_codex_handoff_package_creation_and_serialization():
     assert data["invocation_authorized"] is False
     assert data["review_required"] is True
     assert data["worker_may_merge"] is False
+    assert json.loads(package.to_json()) == data
+
+
+def test_codex_pilot_evidence_package_creation_and_serialization():
+    from phoenix_office.core import (
+        CodexPilotEvidencePackage as ExportedCodexPilotEvidencePackage,
+    )
+
+    assert ExportedCodexPilotEvidencePackage is CodexPilotEvidencePackage
+
+    package = CodexPilotEvidencePackage(
+        schema_version="codex-pilot-evidence.v1",
+        repository="Phoenix-AI-Platform/phoenix-office",
+        pilot_kind="docs-only-supervised",
+        handoff_id="pilot-evidence-issue-285",
+        controls=[
+            CodexPilotEvidenceControl(
+                control_id="authentication_runner_access",
+                status=CodexPilotEvidenceStatus.VERIFIED,
+                evidence_ref="auth-runner-access-001",
+                reviewer_role=CodexPilotEvidenceReviewerRole.HUMAN_OPERATOR,
+            )
+        ],
+    )
+
+    data = package.to_dict()
+
+    assert data["schema_version"] == "codex-pilot-evidence.v1"
+    assert data["repository"] == "Phoenix-AI-Platform/phoenix-office"
+    assert data["pilot_kind"] == "docs-only-supervised"
+    assert data["pilot_ready"] is False
+    assert data["invocation_authorized"] is False
+    assert data["controls"][0]["status"] == "verified"
+    assert data["controls"][0]["reviewer_role"] == "human_operator"
     assert json.loads(package.to_json()) == data
 
 
