@@ -22,6 +22,17 @@ CONTROL_REVIEWERS = {
     "final_ci_requirement": "assistant_reviewer",
     "assistant_architecture_review": "assistant_reviewer",
 }
+UNSAFE_FRAGMENTS = [
+    "C:/Users/private-name",
+    "/home/private-name",
+    "https://example.com/secret",
+    "sk-proj-super-secret",
+    "token-value",
+    "password=secret",
+    "AppData",
+]
+CONTROL_FIELDS = ["control_id", "status", "evidence_ref", "reviewer_role"]
+BAD_JSON_VALUES = [None, 0, True, [], {}]
 
 
 def _valid_package() -> dict[str, object]:
@@ -54,6 +65,28 @@ def _run_json(path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, dict
     captured = capsys.readouterr()
     assert captured.err == ""
     return exit_code, json.loads(captured.out)
+
+
+def _run_text(path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    exit_code = main(["dev", "codex-pilot-evidence", str(path)])
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return exit_code, captured.out
+
+
+def _assert_no_unsafe_fragments(output: str) -> None:
+    for fragment in UNSAFE_FRAGMENTS:
+        assert fragment not in output
+    for fragment in [
+        "private-name",
+        "example.com",
+        "sk-proj",
+        "super-secret",
+        "token-value",
+        "password=secret",
+        "AppData",
+    ]:
+        assert fragment not in output
 
 
 def test_codex_pilot_evidence_valid_package_text_output(tmp_path, capsys):
@@ -94,6 +127,8 @@ def test_codex_pilot_evidence_valid_package_json_output(tmp_path, capsys):
     assert payload["verified_control_count"] == 11
     assert payload["structural_valid"] is True
     assert payload["evidence_package_complete"] is True
+    assert payload["structural_errors"] == []
+    assert payload["completion_blockers"] == []
     assert payload["pilot_ready"] is False
     assert payload["invocation_authorized"] is False
     assert payload["invocation_performed"] is False
@@ -135,7 +170,7 @@ def test_codex_pilot_evidence_bad_json_inputs_fail_closed(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert expected in report["blockers"]
+    assert expected in report["structural_errors"]
     assert report["evidence_package_complete"] is False
 
 
@@ -143,7 +178,7 @@ def test_codex_pilot_evidence_missing_file_fails_closed(tmp_path, capsys):
     exit_code, report = _run_json(tmp_path / "missing.json", capsys)
 
     assert exit_code == 1
-    assert "input file is missing" in report["blockers"]
+    assert "input file is missing" in report["structural_errors"]
     assert report["input_filename"] == "missing.json"
 
 
@@ -161,17 +196,17 @@ def test_codex_pilot_evidence_unreadable_file_fails_closed(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert "input file is unreadable" in report["blockers"]
+    assert "input file is unreadable" in report["structural_errors"]
     assert "nope" not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
     [
-        ("schema_version", "wrong", "schema_version must be"),
-        ("repository", "other/repo", "repository must be"),
-        ("pilot_kind", "runtime", "pilot_kind must be"),
-        ("handoff_id", "C:/Users/name/file", "handoff_id must be"),
+        ("schema_version", "wrong", "schema_version is invalid"),
+        ("repository", "other/repo", "repository is invalid"),
+        ("pilot_kind", "runtime", "pilot_kind is invalid"),
+        ("handoff_id", "C:/Users/private-name/file", "handoff_id is invalid"),
     ],
 )
 def test_codex_pilot_evidence_top_level_contract_failures(
@@ -184,10 +219,14 @@ def test_codex_pilot_evidence_top_level_contract_failures(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert any(expected in blocker for blocker in report["blockers"])
+    assert expected in report["structural_errors"]
     if field == "handoff_id":
         assert report["handoff_id"] is None
-        assert "C:/Users" not in json.dumps(report)
+        _assert_no_unsafe_fragments(json.dumps(report))
+    if field == "repository":
+        assert report["repository"] is None
+    if field == "pilot_kind":
+        assert report["pilot_kind"] is None
 
 
 @pytest.mark.parametrize("field", ["pilot_ready", "invocation_authorized"])
@@ -202,7 +241,7 @@ def test_codex_pilot_evidence_authorization_flags_must_be_json_false(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert f"{field} must be JSON boolean false" in report["blockers"]
+    assert f"{field} must be JSON boolean false" in report["structural_errors"]
     assert report["pilot_ready"] is False
     assert report["invocation_authorized"] is False
 
@@ -222,7 +261,7 @@ def test_codex_pilot_evidence_missing_control_fails_closed(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert f"missing control_id: {missing_control_id}" in report["blockers"]
+    assert f"missing control_id: {missing_control_id}" in report["structural_errors"]
     assert report["verified_control_count"] == 10
 
 
@@ -246,8 +285,12 @@ def test_codex_pilot_evidence_duplicate_and_unknown_controls_fail_closed(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert "duplicate control_id: authentication_runner_access" in report["blockers"]
-    assert "unknown control_id: unknown_control" in report["blockers"]
+    assert (
+        "duplicate control_id: authentication_runner_access"
+        in report["structural_errors"]
+    )
+    assert "controls[12].control_id is unknown" in report["structural_errors"]
+    assert "unknown_control" not in json.dumps(report)
 
 
 def test_codex_pilot_evidence_invalid_status_and_reviewer_fail_closed(
@@ -262,11 +305,11 @@ def test_codex_pilot_evidence_invalid_status_and_reviewer_fail_closed(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert any("status must be verified" in blocker for blocker in report["blockers"])
-    assert any("reviewer_role is invalid" in blocker for blocker in report["blockers"])
+    assert "controls[0].status is invalid" in report["structural_errors"]
+    assert "controls[1].reviewer_role is invalid" in report["structural_errors"]
     assert (
-        "operator_cancellation_timeout reviewer_role must be 'human_operator'"
-        in report["blockers"]
+        "controls[2].reviewer_role does not match required role"
+        in report["structural_errors"]
     )
 
 
@@ -280,18 +323,23 @@ def test_codex_pilot_evidence_verified_control_requires_safe_reference(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert any("verified evidence_ref" in blocker for blocker in report["blockers"])
+    assert (
+        "controls[0].verified evidence_ref is invalid"
+        in report["structural_errors"]
+    )
 
 
 @pytest.mark.parametrize(
     "unsafe_ref",
     [
         "https://example.com/evidence",
-        "C:/Users/name/file",
+        "C:/Users/private-name/file",
         "token-value",
-        "sk-proj-secret",
+        "sk-proj-super-secret",
         "password=secret",
         "folder/evidence",
+        ".",
+        "..",
     ],
 )
 def test_codex_pilot_evidence_rejects_unsafe_evidence_refs(
@@ -305,10 +353,8 @@ def test_codex_pilot_evidence_rejects_unsafe_evidence_refs(
 
     output = json.dumps(report, sort_keys=True)
     assert exit_code == 1
-    assert "C:/Users" not in output
-    assert "sk-proj" not in output
-    assert "password=secret" not in output
-    assert any("evidence_ref" in blocker for blocker in report["blockers"])
+    _assert_no_unsafe_fragments(output)
+    assert any("evidence_ref" in blocker for blocker in report["structural_errors"])
 
 
 @pytest.mark.parametrize("status", ["blocked", "unverified"])
@@ -323,9 +369,14 @@ def test_codex_pilot_evidence_blocked_or_unverified_controls_return_nonzero(
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
+    assert report["structural_valid"] is True
     assert report["evidence_package_complete"] is False
     assert report[f"{status}_controls"] == ["authentication_runner_access"]
-    assert f"authentication_runner_access status is {status}" in report["blockers"]
+    assert report["structural_errors"] == []
+    assert (
+        f"authentication_runner_access status is {status}"
+        in report["completion_blockers"]
+    )
 
 
 def test_codex_pilot_evidence_rejects_unknown_fields(tmp_path, capsys):
@@ -337,8 +388,154 @@ def test_codex_pilot_evidence_rejects_unknown_fields(tmp_path, capsys):
     exit_code, report = _run_json(path, capsys)
 
     assert exit_code == 1
-    assert "unknown package field: raw_evidence" in report["blockers"]
-    assert "controls[0] unknown field: raw_log" in report["blockers"]
+    assert "unknown package fields present" in report["structural_errors"]
+    assert "controls[0] contains unknown fields" in report["structural_errors"]
+    assert "raw_evidence" not in json.dumps(report)
+    assert "raw_log" not in json.dumps(report)
+
+
+def test_codex_pilot_evidence_adversarial_values_do_not_leak_json_or_text(
+    tmp_path, capsys
+):
+    package = _valid_package()
+    package.update(
+        {
+            "schema_version": UNSAFE_FRAGMENTS[3],
+            "repository": UNSAFE_FRAGMENTS[0],
+            "pilot_kind": UNSAFE_FRAGMENTS[2],
+            "handoff_id": UNSAFE_FRAGMENTS[1],
+            UNSAFE_FRAGMENTS[4]: "unsafe key",
+        }
+    )
+    package["controls"][0]["control_id"] = UNSAFE_FRAGMENTS[5]
+    package["controls"][0]["status"] = UNSAFE_FRAGMENTS[6]
+    package["controls"][0]["reviewer_role"] = UNSAFE_FRAGMENTS[2]
+    package["controls"][0]["evidence_ref"] = UNSAFE_FRAGMENTS[3]
+    package["controls"][0][UNSAFE_FRAGMENTS[0]] = "unsafe control key"
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    json_exit, report = _run_json(path, capsys)
+    text_exit, text_output = _run_text(path, capsys)
+
+    json_output = json.dumps(report, sort_keys=True)
+    assert json_exit == 1
+    assert text_exit == 1
+    _assert_no_unsafe_fragments(json_output)
+    _assert_no_unsafe_fragments(text_output)
+    assert report["repository"] is None
+    assert report["pilot_kind"] is None
+    assert report["handoff_id"] is None
+    assert "schema_version is invalid" in report["structural_errors"]
+    assert "repository is invalid" in report["structural_errors"]
+    assert "pilot_kind is invalid" in report["structural_errors"]
+    assert "handoff_id is invalid" in report["structural_errors"]
+    assert "unknown package fields present" in report["structural_errors"]
+    assert "controls[0] contains unknown fields" in report["structural_errors"]
+    assert "controls[0].control_id is unknown" in report["structural_errors"]
+    assert "controls[0].status is invalid" in report["structural_errors"]
+    assert "controls[0].reviewer_role is invalid" in report["structural_errors"]
+    assert "controls[0].evidence_ref is invalid" in report["structural_errors"]
+
+
+@pytest.mark.parametrize("filename", ["token-value.json", "password=secret.json"])
+def test_codex_pilot_evidence_unsafe_input_filename_is_suppressed(
+    tmp_path, capsys, filename
+):
+    path = _write_json(tmp_path / filename, _valid_package())
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert report["input_filename"] is None
+    assert "input filename is unsafe" in report["structural_errors"]
+    _assert_no_unsafe_fragments(json.dumps(report, sort_keys=True))
+
+
+@pytest.mark.parametrize("field", CONTROL_FIELDS)
+def test_codex_pilot_evidence_missing_control_fields_fail_closed(
+    tmp_path, capsys, field
+):
+    package = _valid_package()
+    del package["controls"][0][field]
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert "controls[0] is missing required fields" in report["structural_errors"]
+    assert report["structural_valid"] is False
+
+
+@pytest.mark.parametrize("field", CONTROL_FIELDS)
+@pytest.mark.parametrize("value", BAD_JSON_VALUES)
+def test_codex_pilot_evidence_control_fields_require_strings(
+    tmp_path, capsys, field, value
+):
+    package = _valid_package()
+    package["controls"][0][field] = value
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert f"controls[0].{field} must be a string" in report["structural_errors"]
+    assert report["structural_valid"] is False
+    output = json.dumps(report, sort_keys=True)
+    assert "Traceback" not in output
+    _assert_no_unsafe_fragments(output)
+
+
+@pytest.mark.parametrize("status", ["blocked", "unverified"])
+@pytest.mark.parametrize("missing_or_null", ["missing", None])
+def test_codex_pilot_evidence_non_verified_controls_require_string_evidence_ref(
+    tmp_path, capsys, status, missing_or_null
+):
+    package = _valid_package()
+    package["controls"][0]["status"] = status
+    if missing_or_null == "missing":
+        del package["controls"][0]["evidence_ref"]
+    else:
+        package["controls"][0]["evidence_ref"] = missing_or_null
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert "controls[0].evidence_ref must be a string" in report["structural_errors"]
+    assert report["structural_valid"] is False
+
+
+@pytest.mark.parametrize("status", ["blocked", "unverified"])
+def test_codex_pilot_evidence_non_verified_controls_allow_empty_evidence_ref(
+    tmp_path, capsys, status
+):
+    package = _valid_package()
+    package["controls"][0]["status"] = status
+    package["controls"][0]["evidence_ref"] = ""
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert report["structural_valid"] is True
+    assert report["evidence_package_complete"] is False
+    assert report["structural_errors"] == []
+    assert report[f"{status}_controls"] == ["authentication_runner_access"]
+
+
+@pytest.mark.parametrize("missing_or_null", ["", None])
+def test_codex_pilot_evidence_verified_control_requires_non_empty_string_ref(
+    tmp_path, capsys, missing_or_null
+):
+    package = _valid_package()
+    package["controls"][0]["evidence_ref"] = missing_or_null
+    path = _write_json(tmp_path / "evidence.json", package)
+
+    exit_code, report = _run_json(path, capsys)
+
+    assert exit_code == 1
+    assert report["structural_valid"] is False
+    assert any("evidence_ref" in error for error in report["structural_errors"])
 
 
 def test_codex_pilot_evidence_does_not_call_external_tools(
