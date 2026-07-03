@@ -97,6 +97,27 @@ The inspection command is read-only. It reads one local JSON file, validates the
 
 The command fails closed for malformed, incomplete, unsupported, or unsafe packages. A successful inspection means only that the package satisfies the current read-only handoff checks; it does not authorize Codex invocation, PR approval, merge behavior, proposal generation, DOCX rendering, or any background work.
 
+## Manual Dry-Run Workflow
+
+Operators can run the `Codex handoff dry-run` workflow manually from GitHub Actions when they want CI to validate a committed handoff package.
+
+The workflow has only a `workflow_dispatch` trigger. Its required `handoff_path` input must be a repository-relative path to a committed `CodexHandoffPackage` JSON file, such as:
+
+```text
+examples/tasks/codex_handoff_package.json
+```
+
+The workflow checks out the selected ref, installs Phoenix Office with the repository-supported Python setup, safely resolves the requested path inside the workspace, and validates the package with:
+
+```bash
+python -m phoenix_office.cli dev codex-handoff <resolved-handoff-path>
+python -m phoenix_office.cli dev codex-handoff <resolved-handoff-path> --json
+```
+
+Only the normalized validated JSON is uploaded, as artifact `codex-handoff-dry-run`, with a 7-day retention period. The normalized JSON is written under runner temporary storage, not into the tracked repository tree.
+
+The dry-run workflow does not invoke Codex, call GitHub APIs, dispatch other workflows, approve PRs, merge PRs, create comments, mutate labels, update branches, or perform any other GitHub mutation. It is preparation and validation only.
+
 Future CLI commands, workflow behavior, issue fetching, package validation automation, or Codex invocation behavior require separate reviewed PRs.
 
 ## Reusable Codex Prompt Template
