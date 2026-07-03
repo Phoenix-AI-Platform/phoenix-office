@@ -15,6 +15,7 @@ from phoenix_office.core.contracts import (
     ApprovalStatus,
     ApprovedScope,
     CodexHandoffPackage,
+    CodexPilotAuthorizationPacket,
     CodexPilotEvidenceControl,
     CodexPilotEvidencePackage,
     CodexPilotEvidenceReviewerRole,
@@ -359,6 +360,68 @@ def test_codex_pilot_evidence_package_creation_and_serialization():
     assert data["invocation_authorized"] is False
     assert data["controls"][0]["status"] == "verified"
     assert data["controls"][0]["reviewer_role"] == "human_operator"
+    assert json.loads(package.to_json()) == data
+
+
+def test_codex_pilot_authorization_packet_creation_and_serialization():
+    from phoenix_office.core import (
+        CodexPilotAuthorizationPacket as ExportedCodexPilotAuthorizationPacket,
+    )
+
+    assert ExportedCodexPilotAuthorizationPacket is CodexPilotAuthorizationPacket
+
+    package = CodexPilotAuthorizationPacket(
+        schema_version="codex-pilot-authorization.v1",
+        authorization_id="pilot-auth-issue-292",
+        repository="Phoenix-AI-Platform/phoenix-office",
+        pilot_kind="docs-only-supervised",
+        decision_state="human_authorized_for_one_run",
+        authorizer_role="human_operator",
+        base_commit_sha="0" * 40,
+        handoff_path="handoff.json",
+        evidence_path="evidence.json",
+        handoff_id="codex-handoff-issue-259",
+        objective="Document the supervised Codex pilot authorization packet.",
+        allowed_paths=["docs/process/supervised-codex-pilot-authorization.md"],
+        expected_pr_title="docs: update supervised Codex pilot authorization",
+        branch_name="codex/supervised-pilot-authorization",
+        validation_commands=[
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp",
+            "python -m ruff check . --no-cache",
+            "git diff --check",
+        ],
+        budget_metric="tokens",
+        budget_ceiling=50000,
+        budget_enforcement_ref="budget-control-reviewed",
+        timeout_seconds=1800,
+        cancellation_ref="operator-cancel-reviewed",
+        authentication_runner_ref="runner-access-reviewed",
+        branch_permission_ref="branch-permission-reviewed",
+        pr_permission_ref="pr-permission-reviewed",
+        duplicate_pr_check_ref="duplicate-pr-check-reviewed",
+        branch_collision_check_ref="branch-collision-check-reviewed",
+        codex_no_approve_merge_ref="no-approve-merge-reviewed",
+        final_ci_required=True,
+        assistant_review_required=True,
+        worker_may_approve=False,
+        worker_may_merge=False,
+        one_invocation_only=True,
+        retry_authorized=False,
+        background_execution_authorized=False,
+    )
+
+    data = package.to_dict()
+
+    assert data["schema_version"] == "codex-pilot-authorization.v1"
+    assert data["authorization_id"] == "pilot-auth-issue-292"
+    assert data["repository"] == "Phoenix-AI-Platform/phoenix-office"
+    assert data["pilot_kind"] == "docs-only-supervised"
+    assert data["decision_state"] == "human_authorized_for_one_run"
+    assert data["authorizer_role"] == "human_operator"
+    assert data["worker_may_approve"] is False
+    assert data["worker_may_merge"] is False
+    assert data["retry_authorized"] is False
+    assert data["background_execution_authorized"] is False
     assert json.loads(package.to_json()) == data
 
 

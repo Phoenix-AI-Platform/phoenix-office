@@ -337,6 +337,45 @@ class CodexPilotEvidencePackage(SerializableContract):
 
 
 @dataclass(slots=True)
+class CodexPilotAuthorizationPacket(SerializableContract):
+    """One-attempt human authorization record for a supervised Codex pilot."""
+
+    schema_version: str
+    authorization_id: str
+    repository: str
+    pilot_kind: str
+    decision_state: str
+    authorizer_role: str
+    base_commit_sha: str
+    handoff_path: str
+    evidence_path: str
+    handoff_id: str
+    objective: str
+    allowed_paths: list[str]
+    expected_pr_title: str
+    branch_name: str
+    validation_commands: list[str]
+    budget_metric: str
+    budget_ceiling: int
+    budget_enforcement_ref: str
+    timeout_seconds: int
+    cancellation_ref: str
+    authentication_runner_ref: str
+    branch_permission_ref: str
+    pr_permission_ref: str
+    duplicate_pr_check_ref: str
+    branch_collision_check_ref: str
+    codex_no_approve_merge_ref: str
+    final_ci_required: bool
+    assistant_review_required: bool
+    worker_may_approve: bool
+    worker_may_merge: bool
+    one_invocation_only: bool
+    retry_authorized: bool
+    background_execution_authorized: bool
+
+
+@dataclass(slots=True)
 class WorkerError(SerializableContract):
     """Structured worker failure details."""
 

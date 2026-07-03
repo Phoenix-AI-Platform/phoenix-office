@@ -21,13 +21,21 @@ The first three inputs establish eligibility for human authorization review only
 
 Before a human may authorize the pilot, the operator must assemble a bounded authorization packet. The packet must be reviewed without including credentials, tokens, raw command output, private customer data, usernames, home directories, machine paths, config contents, raw evidence bodies, or prompt secrets.
 
+`python -m phoenix_office.cli dev codex-pilot-authorization <handoff.json> <evidence.json> <authorization.json>` inspects this packet locally. `--json` emits the same deterministic sanitized report as JSON.
+
+The inspector reruns the current composite pilot preflight for the supplied handoff and evidence package before it evaluates authorization bindings. It does not invoke Codex, submit prompts, authenticate, access GitHub, access the network, inspect live issues or PRs, create branches, create PRs, approve, merge, persist state, consume authorization, retry, schedule, or run in the background.
+
+Structural validity means the authorization record is well formed and safe to inspect. Structural validity does not prove that external controls are truthful, fresh, enforceable, sufficient, or still available. A structurally valid packet can still fail binding when it does not match the current handoff, evidence package, or preflight result.
+
+For `handoff_path` and `evidence_path`, the inspector validates that the authorization packet values are safe repository-relative JSON paths, then compares only each declared path's basename with the corresponding CLI input filename. It blocks when a declared basename differs from the supplied CLI filename. It does not verify that the supplied CLI file is committed at the declared repository path, and it does not inspect Git history, repository state, or GitHub. Human authorization review must independently confirm the exact committed repository locations.
+
 The authorization packet must confirm:
 
 - repository: `Phoenix-AI-Platform/phoenix-office`
 - exact `main` commit SHA used as the pilot base
-- exact committed handoff-package path
+- exact intended committed handoff-package path
 - handoff ID from the committed handoff package
-- exact committed evidence-package path
+- exact intended committed evidence-package path
 - matching handoff ID from the evidence package
 - exact successful `python -m phoenix_office.cli dev codex-pilot-preflight <handoff.json> <evidence.json>` command
 - sanitized preflight result showing eligibility for human authorization review
@@ -52,9 +60,13 @@ The authorization packet must confirm:
 
 The package must not rely on issue text as executable authority. If any value differs from the reviewed handoff package, evidence package, preflight output, branch name, base SHA, or expected PR title, the pilot is blocked.
 
+Exit zero from packet inspection means only `authorization_packet_valid_for_one_attempt: true`. It does not authorize the inspector to perform the invocation and does not prove that a future invocation implementation may reuse the packet indefinitely.
+
 ## One-Time Boundary
 
 A human-authorized pilot is limited to one invocation attempt. Authorization expires after that attempt or after any reviewed input changes.
+
+This inspector cannot detect prior use. A future invocation implementation must add a separately reviewed consumption and audit contract before it can treat a valid packet as operational authorization. That later contract must fail closed when a packet has already been used, when any reviewed input changes, or when evidence becomes stale.
 
 The pilot boundary is:
 

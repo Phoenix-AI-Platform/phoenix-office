@@ -170,6 +170,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the composite pilot preflight report as JSON",
     )
     codex_pilot_preflight_parser.set_defaults(func=codex_pilot_preflight)
+    codex_pilot_authorization_parser = dev_subparsers.add_parser(
+        "codex-pilot-authorization",
+        help="Inspect a read-only supervised Codex pilot authorization packet",
+    )
+    codex_pilot_authorization_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_pilot_authorization_parser.add_argument(
+        "evidence_json",
+        type=Path,
+        help="Path to Codex pilot evidence package JSON",
+    )
+    codex_pilot_authorization_parser.add_argument(
+        "authorization_json",
+        type=Path,
+        help="Path to Codex pilot authorization packet JSON",
+    )
+    codex_pilot_authorization_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the authorization packet inspection report as JSON",
+    )
+    codex_pilot_authorization_parser.set_defaults(
+        func=codex_pilot_authorization
+    )
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -978,6 +1005,19 @@ def codex_pilot_preflight(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_preflight_report(report)
     return 0 if report["eligible_for_authorization_review"] else 1
+
+
+def codex_pilot_authorization(args: argparse.Namespace) -> int:
+    report = _run_codex_pilot_authorization(
+        handoff_path=args.handoff_json,
+        evidence_path=args.evidence_json,
+        authorization_path=args.authorization_json,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_authorization_report(report)
+    return 0 if report["authorization_packet_valid_for_one_attempt"] else 1
 
 
 def _load_codex_invocation_preflight(
@@ -2190,6 +2230,84 @@ CODEX_PILOT_EVIDENCE_CONTROL_FIELDS = {
 
 CODEX_PILOT_PREFLIGHT_SCHEMA_VERSION = "codex-pilot-preflight.v1"
 CODEX_PILOT_PREFLIGHT_COMMAND = "dev codex-pilot-preflight"
+CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
+CODEX_PILOT_AUTHORIZATION_COMMAND = "dev codex-pilot-authorization"
+CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
+CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
+CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS = {
+    "schema_version",
+    "authorization_id",
+    "repository",
+    "pilot_kind",
+    "decision_state",
+    "authorizer_role",
+    "base_commit_sha",
+    "handoff_path",
+    "evidence_path",
+    "handoff_id",
+    "objective",
+    "allowed_paths",
+    "expected_pr_title",
+    "branch_name",
+    "validation_commands",
+    "budget_metric",
+    "budget_ceiling",
+    "budget_enforcement_ref",
+    "timeout_seconds",
+    "cancellation_ref",
+    "authentication_runner_ref",
+    "branch_permission_ref",
+    "pr_permission_ref",
+    "duplicate_pr_check_ref",
+    "branch_collision_check_ref",
+    "codex_no_approve_merge_ref",
+    "final_ci_required",
+    "assistant_review_required",
+    "worker_may_approve",
+    "worker_may_merge",
+    "one_invocation_only",
+    "retry_authorized",
+    "background_execution_authorized",
+}
+CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS = [
+    "authorization_id",
+    "handoff_id",
+    "budget_enforcement_ref",
+    "cancellation_ref",
+    "authentication_runner_ref",
+    "branch_permission_ref",
+    "pr_permission_ref",
+    "duplicate_pr_check_ref",
+    "branch_collision_check_ref",
+    "codex_no_approve_merge_ref",
+]
+CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS = [
+    "final_ci_required",
+    "assistant_review_required",
+    "one_invocation_only",
+]
+CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS = [
+    "worker_may_approve",
+    "worker_may_merge",
+    "retry_authorized",
+    "background_execution_authorized",
+]
+CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS = [
+    "authorization_id",
+    "repository",
+    "pilot_kind",
+    "decision_state",
+    "authorizer_role",
+    "base_commit_sha",
+    "handoff_id",
+    "objective",
+    "allowed_paths",
+    "expected_pr_title",
+    "branch_name",
+    "budget_metric",
+    "budget_ceiling",
+    "timeout_seconds",
+]
 
 
 def _run_codex_pilot_preflight(
@@ -2367,6 +2485,469 @@ def _print_codex_pilot_preflight_report(report: dict[str, Any]) -> None:
     blockers_by_source = report["blockers_by_source"]
     for source in ["handoff", "runtime", "evidence", "binding"]:
         _print_list(f"{source.title()} blockers", blockers_by_source[source])
+
+
+def _run_codex_pilot_authorization(
+    *,
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+) -> dict[str, Any]:
+    preflight_report = _run_codex_pilot_preflight(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+    )
+    authorization_filename = _safe_codex_pilot_evidence_input_filename(
+        authorization_path
+    )
+    package, structural_errors = _load_codex_pilot_authorization_packet(
+        authorization_path=authorization_path,
+        authorization_filename=authorization_filename,
+    )
+    if package is not None:
+        structural_errors.extend(
+            _validate_codex_pilot_authorization_packet(package)
+        )
+
+    structural_valid = not structural_errors
+    binding_blockers = _codex_pilot_authorization_binding_blockers(
+        package=package,
+        structural_valid=structural_valid,
+        preflight_report=preflight_report,
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+    )
+    composite_blockers = _codex_pilot_authorization_composite_blockers(
+        preflight_report
+    )
+    composite_preflight_passed = bool(
+        preflight_report.get("eligible_for_authorization_review")
+    )
+    authorization_binding_passed = (
+        structural_valid
+        and package is not None
+        and not binding_blockers
+    )
+    authorization_packet_valid_for_one_attempt = (
+        composite_preflight_passed
+        and structural_valid
+        and authorization_binding_passed
+    )
+    safe_fields = _safe_codex_pilot_authorization_fields(
+        package=package,
+        structural_valid=structural_valid,
+    )
+    return {
+        **safe_fields,
+        "authorization_binding_blockers": sorted(binding_blockers),
+        "authorization_binding_passed": authorization_binding_passed,
+        "authorization_filename": authorization_filename,
+        "authorization_packet_valid_for_one_attempt": (
+            authorization_packet_valid_for_one_attempt
+        ),
+        "authorization_structural_errors": sorted(structural_errors),
+        "authorization_structural_valid": structural_valid,
+        "blockers_by_source": {
+            "authorization_binding": sorted(binding_blockers),
+            "authorization_structural": sorted(structural_errors),
+            "composite_preflight": composite_blockers,
+        },
+        "branch_created": False,
+        "command": CODEX_PILOT_AUTHORIZATION_COMMAND,
+        "composite_preflight_passed": composite_preflight_passed,
+        "github_access_performed": False,
+        "handoff_filename": preflight_report.get("handoff_filename"),
+        "evidence_filename": preflight_report.get("evidence_filename"),
+        "invocation_performed": False,
+        "mutation_performed": False,
+        "network_access_performed": False,
+        "pilot_ready": False,
+        "prompt_submitted": False,
+        "pull_request_created": False,
+        "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
+    }
+
+
+def _load_codex_pilot_authorization_packet(
+    *,
+    authorization_path: Path,
+    authorization_filename: str | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    errors: list[str] = []
+    if authorization_filename is None:
+        errors.append("authorization input filename is unsafe")
+    try:
+        return _read_json_object_file(authorization_path), errors
+    except ValueError as exc:
+        error = str(exc)
+        if error == "input file is missing":
+            errors.append("authorization package is missing")
+        elif error == "input file is malformed JSON":
+            errors.append("authorization package is malformed")
+        elif error == "input JSON root must be an object":
+            errors.append("authorization package root must be an object")
+        else:
+            errors.append("authorization package is unreadable")
+        return None, errors
+
+
+def _validate_codex_pilot_authorization_packet(
+    package: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    package_fields = set(package)
+    if CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS - package_fields:
+        errors.append("authorization package is missing required fields")
+    if package_fields - CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
+        errors.append("authorization package contains unknown fields")
+
+    expected_values = {
+        "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
+        "repository": CODEX_PILOT_EVIDENCE_REPOSITORY,
+        "pilot_kind": CODEX_PILOT_EVIDENCE_KIND,
+        "decision_state": CODEX_PILOT_AUTHORIZATION_DECISION_STATE,
+        "authorizer_role": CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE,
+        "budget_metric": "tokens",
+    }
+    for field_name, expected_value in expected_values.items():
+        if package.get(field_name) != expected_value:
+            errors.append(f"authorization {field_name} is invalid")
+
+    for field_name in CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS:
+        if not _is_safe_evidence_identifier(package.get(field_name)):
+            errors.append(f"authorization {field_name} is invalid")
+
+    if not _is_lower_hex_sha(package.get("base_commit_sha")):
+        errors.append("authorization base_commit_sha is invalid")
+    for field_name in ["handoff_path", "evidence_path"]:
+        if not _is_safe_authorization_json_path(package.get(field_name)):
+            errors.append(f"authorization {field_name} is invalid")
+    if not _is_safe_authorization_objective(package.get("objective")):
+        errors.append("authorization objective is invalid")
+    if not _validate_authorization_allowed_paths(package.get("allowed_paths")):
+        errors.append("authorization allowed paths are invalid")
+    if not _is_safe_authorization_pr_title(package.get("expected_pr_title")):
+        errors.append("authorization expected_pr_title is invalid")
+    if not _is_safe_authorization_branch_name(package.get("branch_name")):
+        errors.append("authorization branch_name is invalid")
+    if package.get("validation_commands") != (
+        CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS
+    ):
+        errors.append("authorization validation commands are invalid")
+
+    budget_ceiling = package.get("budget_ceiling")
+    if (
+        type(budget_ceiling) is not int
+        or budget_ceiling < 1
+        or budget_ceiling > 1_000_000
+    ):
+        errors.append("authorization budget is invalid")
+    timeout_seconds = package.get("timeout_seconds")
+    if (
+        type(timeout_seconds) is not int
+        or timeout_seconds < 60
+        or timeout_seconds > 7200
+    ):
+        errors.append("authorization timeout is invalid")
+
+    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS:
+        if type(package.get(field_name)) is not bool or package.get(field_name) is not True:
+            errors.append(f"authorization {field_name} must be JSON boolean true")
+    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS:
+        if type(package.get(field_name)) is not bool or package.get(field_name) is not False:
+            errors.append(f"authorization {field_name} must be JSON boolean false")
+    return sorted(errors)
+
+
+def _codex_pilot_authorization_binding_blockers(
+    *,
+    package: dict[str, Any] | None,
+    structural_valid: bool,
+    preflight_report: dict[str, Any],
+    handoff_path: Path,
+    evidence_path: Path,
+) -> list[str]:
+    if package is None or not structural_valid:
+        return []
+    blockers: list[str] = []
+    if package.get("repository") != preflight_report.get("repository"):
+        blockers.append("authorization repository does not match")
+    if package.get("pilot_kind") != preflight_report.get("pilot_kind"):
+        blockers.append("authorization pilot kind does not match")
+    if package.get("handoff_id") != preflight_report.get("handoff_id"):
+        blockers.append("authorization handoff id does not match")
+    if Path(str(package.get("handoff_path"))).name != handoff_path.name:
+        blockers.append("authorization handoff path does not match input")
+    if Path(str(package.get("evidence_path"))).name != evidence_path.name:
+        blockers.append("authorization evidence path does not match input")
+
+    handoff_package, handoff_report = _load_codex_invocation_preflight(handoff_path)
+    if handoff_package is None or not handoff_report.get("static_eligible"):
+        return sorted({*blockers, "authorization handoff package is unavailable"})
+    task = _as_dict(handoff_package.get("task"))
+    declared_paths = _codex_invocation_declared_changed_files(handoff_package)
+    if package.get("objective") != task.get("objective"):
+        blockers.append("authorization objective does not match handoff")
+    if package.get("allowed_paths") != declared_paths:
+        blockers.append("authorization allowed paths do not match handoff")
+    if package.get("expected_pr_title") != handoff_package.get("expected_pr_title"):
+        blockers.append("authorization expected PR title does not match handoff")
+    commands = _as_dict(task.get("verification_plan")).get("commands")
+    if package.get("validation_commands") != commands:
+        blockers.append("authorization validation commands do not match handoff")
+    return sorted(blockers)
+
+
+def _codex_pilot_authorization_composite_blockers(
+    preflight_report: dict[str, Any],
+) -> list[str]:
+    if preflight_report.get("eligible_for_authorization_review"):
+        return []
+    blockers: list[str] = []
+    for source in ["handoff", "runtime", "evidence", "binding"]:
+        if preflight_report.get("blockers_by_source", {}).get(source):
+            blockers.append(f"composite {source} preflight blocked")
+    if not blockers:
+        blockers.append("composite preflight is not eligible")
+    return sorted(blockers)
+
+
+def _safe_codex_pilot_authorization_fields(
+    *,
+    package: dict[str, Any] | None,
+    structural_valid: bool,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        field_name: None for field_name in CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS
+    }
+    if package is None:
+        return fields
+    if structural_valid:
+        for field_name in CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS:
+            fields[field_name] = package.get(field_name)
+
+    return fields
+
+
+def _is_lower_hex_sha(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and value == value.strip()
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _contains_control_character(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
+
+
+def _is_safe_printable_ascii(value: str) -> bool:
+    return all(32 <= ord(character) <= 126 for character in value)
+
+
+def _contains_url_marker(value: str) -> bool:
+    lowered = value.lower()
+    return "://" in lowered or lowered.startswith("www.")
+
+
+def _contains_drive_like_path(value: str) -> bool:
+    return any(
+        character.isalpha()
+        and value[index + 1] == ":"
+        and value[index + 2] in {"/", "\\"}
+        for index, character in enumerate(value[:-2])
+    )
+
+
+def _contains_sensitive_authorization_marker(value: str) -> bool:
+    lowered = value.lower()
+    markers = [
+        "appdata",
+        "credential",
+        "customer name",
+        "password",
+        "private customer",
+        "private-name",
+        "secret",
+        "sk-",
+        "token",
+        "users",
+        "/home",
+        "home/",
+        "~",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _has_safe_authorization_text_shape(value: str, max_length: int) -> bool:
+    return (
+        bool(value)
+        and value == value.strip()
+        and len(value) <= max_length
+        and not _contains_control_character(value)
+        and _is_safe_printable_ascii(value)
+        and "\t" not in value
+        and "\r" not in value
+        and "\n" not in value
+    )
+
+
+def _is_conservative_path_segment(segment: str) -> bool:
+    return (
+        bool(segment)
+        and segment not in {".", ".."}
+        and all(character.isalnum() or character in "._-" for character in segment)
+    )
+
+
+def _is_safe_git_branch_component(component: str) -> bool:
+    lowered = component.lower()
+    return (
+        _is_conservative_path_segment(component)
+        and not component.startswith(".")
+        and not lowered.endswith(".lock")
+    )
+
+
+def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> bool:
+    if (
+        not _has_safe_authorization_text_shape(value, max_length)
+        or " " in value
+        or "\\" in value
+        or ":" in value
+        or "//" in value
+        or value.startswith("/")
+        or value.startswith("~")
+        or not value.endswith(suffix)
+        or _contains_url_marker(value)
+        or _contains_sensitive_authorization_marker(value)
+    ):
+        return False
+    return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
+
+
+def _is_safe_authorization_json_path(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
+    )
+
+
+def _is_safe_authorization_objective(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if (
+        not _has_safe_authorization_text_shape(value, 200)
+        or "/" in value
+        or "\\" in value
+        or "=" in value
+        or _contains_url_marker(value)
+        or _contains_drive_like_path(value)
+        or _contains_sensitive_authorization_marker(value)
+    ):
+        return False
+    lowered = value.lower()
+    return "document" in lowered or "docs" in lowered or "documentation" in lowered
+
+
+def _validate_authorization_allowed_paths(value: Any) -> bool:
+    if not isinstance(value, list) or not 1 <= len(value) <= 3:
+        return False
+    if not all(isinstance(path, str) for path in value):
+        return False
+    if len(set(value)) != len(value) or value != sorted(value):
+        return False
+    return all(_is_allowed_codex_pilot_authorization_doc_path(path) for path in value)
+
+
+def _is_safe_authorization_pr_title(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 6 <= len(value) <= 120
+        and value.startswith("docs: ")
+        and _has_safe_authorization_text_shape(value, 120)
+        and "/" not in value
+        and "\\" not in value
+        and "=" not in value
+        and not _contains_url_marker(value)
+        and not _contains_drive_like_path(value)
+        and not _contains_sensitive_authorization_marker(value)
+    )
+
+
+def _is_safe_authorization_branch_name(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if (
+        not _has_safe_authorization_text_shape(value, 100)
+        or not value.startswith("codex/")
+        or " " in value
+        or ".." in value
+        or "@{" in value
+        or value.endswith("/")
+        or value.startswith(".")
+        or value.endswith(".")
+        or "//" in value
+        or _contains_url_marker(value)
+        or _contains_drive_like_path(value)
+        or _contains_sensitive_authorization_marker(value)
+    ):
+        return False
+    return all(_is_safe_git_branch_component(segment) for segment in value.split("/"))
+
+def _print_codex_pilot_authorization_report(report: dict[str, Any]) -> None:
+    print("Codex pilot authorization packet inspection")
+    print(f"Schema version: {report['schema_version']}")
+    print(f"Command: {report['command']}")
+    print(f"Handoff filename: {report['handoff_filename']}")
+    print(f"Evidence filename: {report['evidence_filename']}")
+    print(f"Authorization filename: {report['authorization_filename']}")
+    print(f"Authorization ID: {report['authorization_id']}")
+    print(f"Repository: {report['repository']}")
+    print(f"Pilot kind: {report['pilot_kind']}")
+    print(f"Decision state: {report['decision_state']}")
+    print(f"Authorizer role: {report['authorizer_role']}")
+    print(f"Base commit SHA: {report['base_commit_sha']}")
+    print(f"Handoff ID: {report['handoff_id']}")
+    print(f"Objective: {report['objective']}")
+    _print_list("Allowed paths", report["allowed_paths"] or [])
+    print(f"Expected PR title: {report['expected_pr_title']}")
+    print(f"Branch name: {report['branch_name']}")
+    print(f"Budget metric: {report['budget_metric']}")
+    print(f"Budget ceiling: {report['budget_ceiling']}")
+    print(f"Timeout seconds: {report['timeout_seconds']}")
+    print(
+        "Composite preflight passed: "
+        f"{_format_yes_no(report['composite_preflight_passed'])}"
+    )
+    print(
+        "Authorization structural valid: "
+        f"{_format_yes_no(report['authorization_structural_valid'])}"
+    )
+    print(
+        "Authorization binding passed: "
+        f"{_format_yes_no(report['authorization_binding_passed'])}"
+    )
+    print(
+        "Authorization packet valid for one attempt: "
+        f"{_format_yes_no(report['authorization_packet_valid_for_one_attempt'])}"
+    )
+    print("Pilot ready: no")
+    print("Invocation performed: no")
+    print("Prompt submitted: no")
+    print("GitHub access performed: no")
+    print("Network access performed: no")
+    print("Mutation performed: no")
+    print("Branch created: no")
+    print("Pull request created: no")
+    blockers_by_source = report["blockers_by_source"]
+    for source in [
+        "composite_preflight",
+        "authorization_structural",
+        "authorization_binding",
+    ]:
+        _print_list(f"{source.replace('_', ' ').title()} blockers", blockers_by_source[source])
 
 
 def _inspect_codex_pilot_evidence_package(path: Path) -> dict[str, Any]:
@@ -3358,13 +3939,44 @@ def _print_codex_invocation_preflight_report(report: dict[str, Any]) -> None:
 
 
 def _is_allowed_codex_invocation_doc_path(path: str) -> bool:
-    if not path or path.startswith("/") or ":" in path:
+    if not isinstance(path, str):
         return False
-    parts = path.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
+    if not _is_safe_repo_relative_path(path, suffix=".md", max_length=200):
         return False
-    return path.endswith(".md") and path.startswith(
-        CODEX_INVOCATION_ALLOWED_DOC_PREFIXES
+    if not path.startswith(CODEX_INVOCATION_ALLOWED_DOC_PREFIXES):
+        return False
+    lowered_segments = {segment.lower() for segment in path.split("/")}
+    forbidden_segments = {
+        "api",
+        "customer",
+        "customers",
+        "docx",
+        "example",
+        "examples",
+        "fixture",
+        "fixtures",
+        "mcp",
+        "orchestration",
+        "proposal",
+        "proposals",
+        "server",
+        "src",
+        "template",
+        "templates",
+        "test",
+        "tests",
+        "workflow",
+        "workflows",
+        "worker",
+        "workers",
+    }
+    return lowered_segments.isdisjoint(forbidden_segments)
+
+
+def _is_allowed_codex_pilot_authorization_doc_path(path: str) -> bool:
+    return (
+        _is_allowed_codex_invocation_doc_path(path)
+        and path != "docs/development/project_state.md"
     )
 
 
