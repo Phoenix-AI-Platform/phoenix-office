@@ -1,0 +1,91 @@
+{
+  "base_branch": "main",
+  "expected_pr_title": "feat: add machine-readable Codex handoff package",
+  "handoff_id": "codex-handoff-issue-259",
+  "invocation_authorized": false,
+  "invocation_mode": "manual",
+  "prompt": "Use the verified Phoenix Office checkout only. Implement Issue #259 by adding the CodexHandoffPackage contract, focused tests, one sanitized example, and a concise handoff documentation note. Do not add CLI behavior, Codex invocation, GitHub issue fetching, workflow changes, background work, proposal generation changes, DOCX rendering changes, or project-state updates. Open one PR only and stop.",
+  "repository": "Phoenix-AI-Platform/phoenix-office",
+  "required_pr_body_headings": [
+    "Summary",
+    "Scope",
+    "Changed files",
+    "Out-of-scope confirmation",
+    "Validation performed",
+    "Risks"
+  ],
+  "required_repo_paths": [
+    "AGENTS.md",
+    "src/phoenix_office/core/contracts.py",
+    "docs/process/issue-to-codex-handoff.md"
+  ],
+  "review_required": true,
+  "schema_version": "codex-handoff-package.v1",
+  "task": {
+    "acceptance_criteria": [
+      "CodexHandoffPackage serializes deterministically.",
+      "The example JSON parses with stable safety defaults."
+    ],
+    "allowed_resources": {
+      "paths": [
+        "src/phoenix_office/core/contracts.py",
+        "src/phoenix_office/core/__init__.py",
+        "tests/test_core_contracts.py",
+        "examples/tasks/codex_handoff_package.json",
+        "docs/process/issue-to-codex-handoff.md"
+      ],
+      "repositories": [
+        "Phoenix-AI-Platform/phoenix-office"
+      ]
+    },
+    "approval_policy": {
+      "approvers": [],
+      "required_before": []
+    },
+    "constraints": [
+      "Do not add CLI behavior.",
+      "Do not invoke Codex or GitHub workflows.",
+      "Do not include sensitive data."
+    ],
+    "context_refs": [
+      "AGENTS.md",
+      "src/phoenix_office/core/contracts.py",
+      "docs/process/issue-to-codex-handoff.md"
+    ],
+    "created_at": "2026-06-26T12:00:00+00:00",
+    "objective": "Define and test a deterministic Codex handoff package contract.",
+    "permissions": {
+      "destructive": false,
+      "execute": false,
+      "network": false,
+      "read": true,
+      "write": true
+    },
+    "priority": "normal",
+    "requester": {
+      "id": "human:operator",
+      "type": "human"
+    },
+    "source": {
+      "kind": "github_issue",
+      "uri": "https://github.com/Phoenix-AI-Platform/phoenix-office/issues/259"
+    },
+    "status": "requested",
+    "task_id": "task-issue-259-codex-handoff-package",
+    "title": "Add machine-readable Codex handoff package",
+    "updated_at": "2026-06-26T12:00:00+00:00",
+    "verification_plan": {
+      "commands": [
+        "python -m pytest --basetemp .pytest_tmp",
+        "python -m ruff check . --no-cache",
+        "git diff --check"
+      ],
+      "evidence_required": [
+        "test_output"
+      ]
+    }
+  },
+  "worker_may_merge": false,
+  "worker_type": "codex",
+  "workspace_path": "C:/tmp/phoenix-office"
+}

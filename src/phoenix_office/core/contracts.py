@@ -275,6 +275,27 @@ class TaskEnvelope(SerializableContract):
 
 
 @dataclass(slots=True)
+class CodexHandoffPackage(SerializableContract):
+    """Machine-readable package for preparing a manual Codex handoff."""
+
+    schema_version: str
+    handoff_id: str
+    task: TaskEnvelope
+    repository: str
+    base_branch: str
+    expected_pr_title: str
+    prompt: str
+    workspace_path: str | None = None
+    required_repo_paths: list[str] = field(default_factory=list)
+    required_pr_body_headings: list[str] = field(default_factory=list)
+    worker_type: WorkerType = WorkerType.CODEX
+    invocation_mode: str = "manual"
+    invocation_authorized: bool = False
+    review_required: bool = True
+    worker_may_merge: bool = False
+
+
+@dataclass(slots=True)
 class WorkerError(SerializableContract):
     """Structured worker failure details."""
 
