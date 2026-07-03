@@ -106,6 +106,23 @@ def build_parser() -> argparse.ArgumentParser:
     codex_invocation_preflight_parser.set_defaults(
         func=codex_invocation_preflight
     )
+    codex_invocation_request_parser = dev_subparsers.add_parser(
+        "codex-invocation-request",
+        help="Draft a read-only supervised Codex invocation request",
+    )
+    codex_invocation_request_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_invocation_request_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the deterministic request draft as JSON",
+    )
+    codex_invocation_request_parser.set_defaults(
+        func=codex_invocation_request
+    )
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -853,7 +870,42 @@ def inspect_codex_handoff(args: argparse.Namespace) -> int:
 
 
 def codex_invocation_preflight(args: argparse.Namespace) -> int:
-    package_path = args.handoff_json
+    package, report = _load_codex_invocation_preflight(args.handoff_json)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_invocation_preflight_report(report)
+
+    return 0 if report["static_eligible"] else 1
+
+
+def codex_invocation_request(args: argparse.Namespace) -> int:
+    package, preflight_report = _load_codex_invocation_preflight(args.handoff_json)
+    if package is None or not preflight_report["static_eligible"]:
+        failure = _build_codex_invocation_request_failure_report(
+            path=args.handoff_json,
+            preflight_report=preflight_report,
+        )
+        if args.json:
+            print(json.dumps(failure, indent=2, sort_keys=True))
+        else:
+            _print_codex_invocation_request_failure(failure)
+        return 1
+
+    request = _build_codex_invocation_request_draft(
+        package=package,
+        preflight_report=preflight_report,
+    )
+    if args.json:
+        print(json.dumps(request, indent=2, sort_keys=True))
+    else:
+        _print_codex_invocation_request_draft(request)
+    return 0
+
+
+def _load_codex_invocation_preflight(
+    package_path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     package: dict[str, Any] | None = None
     package_blockers: list[str] = []
 
@@ -885,12 +937,7 @@ def codex_invocation_preflight(args: argparse.Namespace) -> int:
         path=package_path,
         package_blockers=package_blockers,
     )
-    if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
-        _print_codex_invocation_preflight_report(report)
-
-    return 0 if report["static_eligible"] else 1
+    return package, report
 
 
 def load_proposal(path: Path) -> ProposalInput:
@@ -2217,6 +2264,176 @@ def _codex_invocation_declared_changed_files(
         for path in allowed_paths
         if isinstance(path, str)
     ]
+
+
+def _build_codex_invocation_request_failure_report(
+    *,
+    path: Path,
+    preflight_report: dict[str, Any],
+) -> dict[str, Any]:
+    safe_blockers = [
+        blocker.replace(str(path), path.name)
+        for blocker in preflight_report["package_blockers"]
+    ]
+    return {
+        "command": "dev codex-invocation-request",
+        "error_code": "static_preflight_failed",
+        "external_checks_required": preflight_report["external_checks_required"],
+        "input_filename": path.name,
+        "invocation_authorized": False,
+        "message": "Codex invocation request draft was not produced.",
+        "package_blockers": safe_blockers,
+        "review_required": True,
+        "send_performed": False,
+        "static_eligible": False,
+        "static_success_authorizes_invocation": False,
+        "status": "blocked",
+        "worker_may_merge": False,
+    }
+
+
+def _build_codex_invocation_request_draft(
+    *,
+    package: dict[str, Any],
+    preflight_report: dict[str, Any],
+) -> dict[str, Any]:
+    task = _as_dict(package["task"])
+    request_identity = f"codex-invocation-request:{package['handoff_id']}"
+    rendered_prompt = _render_codex_invocation_request_prompt(
+        package=package,
+        preflight_report=preflight_report,
+    )
+    return {
+        "base_branch": preflight_report["base_branch"],
+        "declared_changed_files": preflight_report["declared_changed_files"],
+        "expected_pr_title": package["expected_pr_title"],
+        "external_checks_required": preflight_report["external_checks_required"],
+        "handoff_id": package["handoff_id"],
+        "invocation_authorized": False,
+        "original_reviewed_package_prompt": package["prompt"],
+        "rendered_prompt": rendered_prompt,
+        "repository": preflight_report["repository"],
+        "request_id": request_identity,
+        "required_pr_body_headings": package["required_pr_body_headings"],
+        "required_repository_validation_commands": (
+            CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS
+        ),
+        "review_required": True,
+        "schema_version": "codex-invocation-request-draft.v1",
+        "send_performed": False,
+        "source_issue_number": preflight_report["source_issue_number"],
+        "status": "draft",
+        "task_id": task["task_id"],
+        "task_title": task["title"],
+        "worker_may_merge": False,
+    }
+
+
+def _render_codex_invocation_request_prompt(
+    *,
+    package: dict[str, Any],
+    preflight_report: dict[str, Any],
+) -> str:
+    task = _as_dict(package["task"])
+    return "\n".join(
+        [
+            "# Supervised Codex Invocation Request Draft",
+            "",
+            "## 1. Supervised Pilot Identity",
+            "This is a provider-neutral supervised invocation request draft.",
+            "The request is unsent and does not authorize Codex invocation.",
+            "",
+            "## 2. Source Issue And Handoff",
+            f"Source issue number: {preflight_report['source_issue_number']}",
+            f"Handoff ID: {package['handoff_id']}",
+            f"Task ID: {task['task_id']}",
+            f"Task title: {task['title']}",
+            "",
+            "## 3. Repository And Base Branch",
+            f"Repository: {preflight_report['repository']}",
+            f"Base branch: {preflight_report['base_branch']}",
+            "",
+            "## 4. Expected PR Title",
+            package["expected_pr_title"],
+            "",
+            "## 5. Allowed Changed Files",
+            *_format_prompt_bullets(preflight_report["declared_changed_files"]),
+            "",
+            "## 6. Original Reviewed Package Prompt",
+            package["prompt"],
+            "",
+            "## 7. Required Validation Commands",
+            *_format_prompt_bullets(CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS),
+            "",
+            "## 8. Required PR Body Headings",
+            *_format_prompt_bullets(package["required_pr_body_headings"]),
+            "",
+            "## 9. Mandatory Execution Boundaries",
+            "- one issue, one branch, one PR",
+            "- modify only the declared documentation files",
+            "- do not broaden scope",
+            "- do not use private customer data",
+            "- run and report every required validation",
+            "- open one PR and stop",
+            "- never approve or merge",
+            (
+                "- do not comment, label, dispatch workflows, automatically "
+                "retry, schedule, queue, or continue in the background"
+            ),
+            (
+                "- stop without mutation when any scope or identity binding "
+                "is ambiguous"
+            ),
+            "",
+            "## 10. External Checks Not Claimed",
+            *_format_prompt_bullets(preflight_report["external_checks_required"]),
+        ]
+    )
+
+
+def _format_prompt_bullets(values: list[Any]) -> list[str]:
+    return [f"- {value}" for value in values]
+
+
+def _print_codex_invocation_request_failure(report: dict[str, Any]) -> None:
+    print("Codex invocation request draft: blocked")
+    print(f"Input filename: {report['input_filename']}")
+    print("Static eligibility: no")
+    print("Send performed: no")
+    print("Invocation authorized: no")
+    print("Worker may merge: no")
+    print("Review required: yes")
+    print("Rendered prompt: not produced")
+    print("Package blockers:")
+    for blocker in report["package_blockers"]:
+        print(f"  - {blocker}")
+    print("External checks still required:")
+    for check in report["external_checks_required"]:
+        print(f"  - {check}")
+
+
+def _print_codex_invocation_request_draft(request: dict[str, Any]) -> None:
+    print("Codex invocation request draft")
+    print(f"Schema version: {request['schema_version']}")
+    print(f"Status: {request['status']}")
+    print(f"Handoff ID: {request['handoff_id']}")
+    print(f"Task ID: {request['task_id']}")
+    print(f"Task title: {request['task_title']}")
+    print(f"Source issue number: {request['source_issue_number']}")
+    print(f"Repository: {request['repository']}")
+    print(f"Base branch: {request['base_branch']}")
+    print(f"Expected PR title: {request['expected_pr_title']}")
+    print("Send performed: no")
+    print("Invocation authorized: no")
+    print("Worker may merge: no")
+    print("Review required: yes")
+    _print_list("Declared changed files", request["declared_changed_files"])
+    _print_list(
+        "External checks still required",
+        request["external_checks_required"],
+    )
+    print("Rendered prompt:")
+    print(request["rendered_prompt"])
 
 
 def _print_codex_invocation_preflight_report(report: dict[str, Any]) -> None:
