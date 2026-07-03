@@ -70,6 +70,22 @@ class WorkerType(_StringEnum):
     FUTURE = "future"
 
 
+class CodexPilotEvidenceStatus(_StringEnum):
+    """Status values for supervised Codex pilot external-control evidence."""
+
+    VERIFIED = "verified"
+    BLOCKED = "blocked"
+    UNVERIFIED = "unverified"
+
+
+class CodexPilotEvidenceReviewerRole(_StringEnum):
+    """Reviewer roles for supervised Codex pilot external controls."""
+
+    HUMAN_OPERATOR = "human_operator"
+    ASSISTANT_REVIEWER = "assistant_reviewer"
+    HUMAN_OPERATOR_AND_ASSISTANT_REVIEWER = "human_operator_and_assistant_reviewer"
+
+
 class WorkerEventType(_StringEnum):
     """Worker lifecycle event types."""
 
@@ -293,6 +309,29 @@ class CodexHandoffPackage(SerializableContract):
     invocation_authorized: bool = False
     review_required: bool = True
     worker_may_merge: bool = False
+
+
+@dataclass(slots=True)
+class CodexPilotEvidenceControl(SerializableContract):
+    """Evidence status for one supervised Codex pilot external control."""
+
+    control_id: str
+    status: CodexPilotEvidenceStatus
+    evidence_ref: str
+    reviewer_role: CodexPilotEvidenceReviewerRole
+
+
+@dataclass(slots=True)
+class CodexPilotEvidencePackage(SerializableContract):
+    """Machine-readable external-control evidence package for Codex pilots."""
+
+    schema_version: str
+    repository: str
+    pilot_kind: str
+    handoff_id: str
+    controls: list[CodexPilotEvidenceControl] = field(default_factory=list)
+    pilot_ready: bool = False
+    invocation_authorized: bool = False
 
 
 @dataclass(slots=True)
