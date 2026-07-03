@@ -23,6 +23,7 @@ Read prompt from stdin or prompt from -
   --json
   --output-last-message <FILE>
   -o <FILE>
+  --token-budget <TOKENS>
 """
 
 
@@ -39,6 +40,7 @@ def _install_probe_mocks(
     help_returncode: int = 0,
     executable_found: bool = True,
     timeout_argv: list[str] | None = None,
+    launch_error_argv: list[str] | None = None,
 ) -> list[tuple[list[str], dict[str, Any]]]:
     calls: list[tuple[list[str], dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -53,6 +55,8 @@ def _install_probe_mocks(
         calls.append((list(argv), kwargs))
         if timeout_argv is not None and list(argv) == timeout_argv:
             raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        if launch_error_argv is not None and list(argv) == launch_error_argv:
+            raise FileNotFoundError("C:/Users/example/bin/codex.exe")
         if list(argv) == ["codex", "--version"]:
             return _completed(list(argv), version_stdout, version_returncode)
         if list(argv) == ["codex", "exec", "--help"]:
@@ -82,7 +86,7 @@ def test_dev_codex_runtime_probe_fully_supported_cli_report(monkeypatch, capsys)
     assert "Working-directory option: yes" in captured.out
     assert "JSON option: yes" in captured.out
     assert "Output last message option: yes" in captured.out
-    assert "Explicit budget option: no" in captured.out
+    assert "Explicit budget option: yes" in captured.out
     assert "Pilot ready: no" in captured.out
     assert "Invocation performed: no" in captured.out
     assert "Prompt submitted: no" in captured.out
@@ -112,7 +116,7 @@ def test_dev_codex_runtime_probe_json_supported_cli(monkeypatch, capsys):
     assert payload["working_directory_option_detected"] is True
     assert payload["json_option_detected"] is True
     assert payload["output_last_message_option_detected"] is True
-    assert payload["explicit_budget_option_detected"] is False
+    assert payload["explicit_budget_option_detected"] is True
     assert payload["pilot_ready"] is False
     assert payload["invocation_performed"] is False
     assert payload["prompt_submitted"] is False
@@ -175,6 +179,30 @@ def test_dev_codex_runtime_probe_nonzero_exits_fail_closed(
     assert exit_code == 1
     assert payload[probe_name]["status"] == "nonzero_exit"
     assert any("nonzero_exit" in blocker for blocker in payload["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("launch_error_argv", "probe_name"),
+    [
+        (["codex", "--version"], "version_probe"),
+        (["codex", "exec", "--help"], "exec_help_probe"),
+    ],
+)
+def test_dev_codex_runtime_probe_launch_errors_fail_closed_without_path_leak(
+    monkeypatch, capsys, launch_error_argv, probe_name
+):
+    _install_probe_mocks(monkeypatch, launch_error_argv=launch_error_argv)
+
+    exit_code = main(["dev", "codex-runtime-probe", "--json"])
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert exit_code == 1
+    assert payload[probe_name]["status"] == "launch_error"
+    assert payload[probe_name]["timed_out"] is False
+    assert any("launch_error" in blocker for blocker in payload["blockers"])
+    assert "C:/Users" not in output
+    assert "codex.exe" not in output
 
 
 @pytest.mark.parametrize("bad_version", ["", "\n", "C:/Users/name/codex"])
@@ -247,10 +275,7 @@ def test_dev_codex_runtime_probe_missing_required_capability_fails_closed(
 
 
 def test_dev_codex_runtime_probe_budget_option_detected(monkeypatch, capsys):
-    _install_probe_mocks(
-        monkeypatch,
-        help_stdout=f"{SUPPORTED_HELP}\n  --token-budget <TOKENS>\n",
-    )
+    _install_probe_mocks(monkeypatch)
 
     exit_code = main(["dev", "codex-runtime-probe", "--json"])
 
@@ -265,14 +290,35 @@ def test_dev_codex_runtime_probe_budget_option_not_inferred(
 ):
     _install_probe_mocks(
         monkeypatch,
-        help_stdout=f"{SUPPORTED_HELP}\nAccount usage limits may apply.\n",
+        help_stdout=SUPPORTED_HELP.replace("  --token-budget <TOKENS>", "")
+        + "\nAccount usage limits may apply.\n",
     )
 
     exit_code = main(["dev", "codex-runtime-probe", "--json"])
 
     payload = json.loads(capsys.readouterr().out)
-    assert exit_code == 0
+    assert exit_code == 1
     assert payload["explicit_budget_option_detected"] is False
+    assert (
+        "missing capability: explicit per-run budget option"
+        in payload["blockers"]
+    )
+
+
+def test_dev_codex_runtime_probe_lowercase_c_does_not_satisfy_cd_capability(
+    monkeypatch, capsys
+):
+    help_text = SUPPORTED_HELP.replace("  --cd <DIR>", "").replace(
+        "  -C <DIR>", "  -c <CONFIG>"
+    )
+    _install_probe_mocks(monkeypatch, help_stdout=help_text)
+
+    exit_code = main(["dev", "codex-runtime-probe", "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["working_directory_option_detected"] is False
+    assert "missing capability: --cd or -C option" in payload["blockers"]
 
 
 def test_dev_codex_runtime_probe_uses_exact_fixed_argv_and_safe_subprocess(

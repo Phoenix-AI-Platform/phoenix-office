@@ -2085,6 +2085,7 @@ CODEX_RUNTIME_CAPABILITY_FIELDS = {
     "working_directory_option_detected": "--cd or -C option",
     "json_option_detected": "--json option",
     "output_last_message_option_detected": "--output-last-message or -o option",
+    "explicit_budget_option_detected": "explicit per-run budget option",
 }
 
 
@@ -2200,6 +2201,13 @@ def _run_fixed_codex_probe(argv: list[str]) -> dict[str, Any]:
             "stdout": "",
             "timed_out": True,
         }
+    except OSError:
+        return {
+            "returncode": None,
+            "status": "launch_error",
+            "stdout": "",
+            "timed_out": False,
+        }
 
     status = "success" if completed.returncode == 0 else "nonzero_exit"
     return {
@@ -2255,7 +2263,7 @@ def _detect_codex_runtime_capabilities(
         ),
         "output_last_message_option_detected": (
             "--output-last-message" in help_lower
-            or _contains_short_option(help_lower, "-o")
+            or _contains_short_option(exec_help, "-o")
         ),
         "sandbox_option_detected": "--sandbox" in help_lower,
         "stdin_prompt_input_detected": (
@@ -2264,7 +2272,7 @@ def _detect_codex_runtime_capabilities(
             or "prompt from -" in help_lower
         ),
         "working_directory_option_detected": (
-            "--cd" in help_lower or _contains_short_option(help_lower, "-c")
+            "--cd" in help_lower or _contains_short_option(exec_help, "-C")
         ),
     }
 
