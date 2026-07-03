@@ -118,6 +118,17 @@ Only the normalized validated JSON is uploaded, as artifact `codex-handoff-dry-r
 
 The dry-run workflow does not invoke Codex, call GitHub APIs, dispatch other workflows, approve PRs, merge PRs, create comments, mutate labels, update branches, or perform any other GitHub mutation. It is preparation and validation only.
 
+### Validation Record
+
+The manual workflow boundary was validated on `main` after PR #264 merged:
+
+- Successful run: [28631252154](https://github.com/Phoenix-AI-Platform/phoenix-office/actions/runs/28631252154) used `examples/tasks/codex_handoff_package.json`. The validation, text inspection, normalized JSON write, artifact upload, and summary steps all completed successfully.
+- The successful run uploaded exactly one artifact named `codex-handoff-dry-run`. The artifact contained `codex-handoff-package.json`, retained the expected normalized safety fields including `invocation_authorized: false`, `invocation_mode: "manual"`, `review_required: true`, and `worker_may_merge: false`, and was configured to expire after 7 days.
+- Unsafe-path run: [28631594213](https://github.com/Phoenix-AI-Platform/phoenix-office/actions/runs/28631594213) used `../codex_handoff_package.json`. It failed in `Resolve handoff path safely`; inspection, normalized JSON generation, artifact upload, and summary were skipped.
+- The unsafe-path run uploaded no artifacts.
+
+These runs verify the intended fail-closed boundary without authorizing or performing Codex invocation, GitHub mutation, PR approval, or merge behavior.
+
 Future CLI commands, workflow behavior, issue fetching, package validation automation, or Codex invocation behavior require separate reviewed PRs.
 
 ## Reusable Codex Prompt Template
