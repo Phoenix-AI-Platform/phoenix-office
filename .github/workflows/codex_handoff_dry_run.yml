@@ -1,0 +1,93 @@
+name: Codex handoff dry-run
+
+on:
+  workflow_dispatch:
+    inputs:
+      handoff_path:
+        description: Repository-relative path to a committed Codex handoff package JSON file
+        required: true
+        type: string
+        default: examples/tasks/codex_handoff_package.json
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Validate Codex handoff package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+
+      - name: Resolve handoff path safely
+        env:
+          HANDOFF_PATH: ${{ inputs.handoff_path }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import sys
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          raw_handoff_path = os.environ["HANDOFF_PATH"]
+          candidate = Path(raw_handoff_path)
+
+          if candidate.is_absolute():
+              print("handoff_path must be repository-relative", file=sys.stderr)
+              sys.exit(1)
+
+          resolved = (workspace / candidate).resolve()
+          try:
+              resolved.relative_to(workspace)
+          except ValueError:
+              print("handoff_path resolves outside GITHUB_WORKSPACE", file=sys.stderr)
+              sys.exit(1)
+
+          if not resolved.exists():
+              print(f"handoff_path does not exist: {resolved}", file=sys.stderr)
+              sys.exit(1)
+          if not resolved.is_file():
+              print(f"handoff_path is not a regular file: {resolved}", file=sys.stderr)
+              sys.exit(1)
+
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"RESOLVED_HANDOFF_PATH={resolved}\n")
+          PY
+
+      - name: Inspect handoff package
+        run: python -m phoenix_office.cli dev codex-handoff "$RESOLVED_HANDOFF_PATH"
+
+      - name: Write normalized handoff JSON
+        run: |
+          python -m phoenix_office.cli dev codex-handoff "$RESOLVED_HANDOFF_PATH" --json \
+            > "$RUNNER_TEMP/codex-handoff-package.json"
+
+      - name: Upload normalized handoff JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-handoff-dry-run
+          path: ${{ runner.temp }}/codex-handoff-package.json
+          retention-days: 7
+
+      - name: Summarize dry run
+        run: |
+          {
+            echo "## Codex handoff dry run"
+            echo ""
+            echo "- Dry run completed."
+            echo "- The handoff package was validated."
+            echo "- Normalized artifact name: codex-handoff-dry-run."
+            echo "- Codex invocation was not authorized or performed."
+            echo "- PR approval was not authorized or performed."
+            echo "- PR merge was not authorized or performed."
+          } >> "$GITHUB_STEP_SUMMARY"
