@@ -191,6 +191,8 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #262 feat: add read-only Codex handoff inspection CLI (adds `python -m phoenix_office.cli dev codex-handoff` text/JSON inspection with fail-closed safety validation; no package writing or Codex invocation added)
 #264 ci: add manual Codex handoff dry-run workflow (adds manual-only read-permission workflow validation for committed handoff packages, uploading only normalized validated JSON; no automatic trigger or GitHub mutation added)
 #266 docs/process: validate Codex handoff dry-run workflow (records successful main-branch manual dry-run validation and unsafe escaping-path fail-closed behavior; documentation only)
+#270 feat: add prompt-only Codex handoff output (adds `dev codex-handoff --prompt-only` to print only the validated prompt for manual copy/paste; Codex invocation remains manual and unauthorized, with no PR approval, merge, GitHub mutation, workflow execution, or orchestration execution added)
+#272 feat: add structured Codex handoff JSON failures (updates `dev codex-handoff --json` to emit deterministic JSON failure payloads for missing, malformed, unreadable, or unsafe packages while preserving human-readable failure behavior without `--json`; no invocation or mutation behavior added)
 ```
 
 ## Current Manual A-1 Proposal Workflow
