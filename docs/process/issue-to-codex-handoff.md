@@ -64,6 +64,25 @@ A Codex handoff should include these sections in order:
 
 The handoff should be self-contained enough that Codex does not need to infer the repository, branch, risk class, validation commands, or PR body shape.
 
+## Machine-Readable Handoff Package
+
+`CodexHandoffPackage` is the machine-readable form of this handoff. It wraps an existing `TaskEnvelope` and keeps that envelope as the source of task intent, scope, constraints, acceptance criteria, context references, allowed resources, permissions, approval policy, and verification commands.
+
+The package adds only Codex-specific preparation metadata:
+
+- repository and base branch identity
+- verified workspace path expectations
+- required repository identity paths
+- expected PR title and required PR body headings
+- the self-contained Codex prompt to paste manually
+- worker, review, and invocation boundaries
+
+Creating, reading, validating, displaying, or reviewing a `CodexHandoffPackage` does not invoke Codex, fetch GitHub issues, trigger workflows, run workers, or perform background behavior.
+
+`invocation_authorized: false` means the package is preparation only. A human still decides whether to start Codex and what prompt to paste. `worker_may_merge: false` means Codex must stop after opening its PR; reviewer approval and the repository merge process remain separate human-controlled gates.
+
+Future CLI commands, workflow behavior, issue fetching, package validation automation, or Codex invocation behavior require separate reviewed PRs.
+
 ## Reusable Codex Prompt Template
 
 ```text

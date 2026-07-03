@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 from phoenix_office.core.contracts import (
     ApprovalDecision,
@@ -13,6 +14,7 @@ from phoenix_office.core.contracts import (
     ApprovalRequest,
     ApprovalStatus,
     ApprovedScope,
+    CodexHandoffPackage,
     EventSeverity,
     EvidenceResult,
     EvidenceType,
@@ -221,3 +223,157 @@ def test_verification_evidence_creation_and_serialization():
     assert data["verified_by_type"] == "worker"
     assert data["observed_state"] == {"tests": 42}
     assert json.loads(evidence.to_json()) == data
+
+CODEX_HANDOFF_EXAMPLE = Path("examples/tasks/codex_handoff_package.json")
+
+
+def _codex_handoff_task() -> TaskEnvelope:
+    return TaskEnvelope(
+        task_id="task-issue-259-codex-handoff-package",
+        title="Add machine-readable Codex handoff package",
+        objective="Define and test a deterministic Codex handoff package contract.",
+        requester=Requester(type=RequesterType.HUMAN, id="human:operator"),
+        source=TaskSource(
+            kind=SourceKind.GITHUB_ISSUE,
+            uri="https://github.com/Phoenix-AI-Platform/phoenix-office/issues/259",
+        ),
+        constraints=[
+            "Do not add CLI behavior.",
+            "Do not invoke Codex or GitHub workflows.",
+        ],
+        acceptance_criteria=[
+            "CodexHandoffPackage serializes deterministically.",
+            "The example JSON parses with stable safety defaults.",
+        ],
+        context_refs=[
+            "AGENTS.md",
+            "src/phoenix_office/core/contracts.py",
+            "docs/process/issue-to-codex-handoff.md",
+        ],
+        allowed_resources={
+            "paths": [
+                "src/phoenix_office/core/contracts.py",
+                "src/phoenix_office/core/__init__.py",
+                "tests/test_core_contracts.py",
+                "examples/tasks/codex_handoff_package.json",
+                "docs/process/issue-to-codex-handoff.md",
+            ],
+            "repositories": ["Phoenix-AI-Platform/phoenix-office"],
+        },
+        permissions=TaskPermissions(
+            read=True,
+            write=True,
+            execute=False,
+            network=False,
+            destructive=False,
+        ),
+        approval_policy=ApprovalPolicy(required_before=[], approvers=[]),
+        verification_plan=VerificationPlan(
+            commands=[
+                "python -m pytest --basetemp .pytest_tmp",
+                "python -m ruff check . --no-cache",
+                "git diff --check",
+            ],
+            evidence_required=[EvidenceType.TEST_OUTPUT],
+        ),
+        created_at=FIXED_TIME,
+        updated_at=FIXED_TIME,
+    )
+
+
+def test_codex_handoff_package_creation_and_serialization():
+    from phoenix_office.core import CodexHandoffPackage as ExportedCodexHandoffPackage
+
+    assert ExportedCodexHandoffPackage is CodexHandoffPackage
+
+    task = _codex_handoff_task()
+    package = CodexHandoffPackage(
+        schema_version="codex-handoff-package.v1",
+        handoff_id="codex-handoff-issue-259",
+        task=task,
+        repository="Phoenix-AI-Platform/phoenix-office",
+        base_branch="main",
+        expected_pr_title="feat: add machine-readable Codex handoff package",
+        prompt="Implement Issue #259 from the verified Phoenix Office checkout.",
+        workspace_path="C:/tmp/phoenix-office",
+        required_repo_paths=[
+            "AGENTS.md",
+            "src/phoenix_office/core/contracts.py",
+            "docs/process/issue-to-codex-handoff.md",
+        ],
+        required_pr_body_headings=[
+            "Summary",
+            "Scope",
+            "Changed files",
+            "Out-of-scope confirmation",
+            "Validation performed",
+            "Risks",
+        ],
+    )
+
+    data = package.to_dict()
+
+    assert data["schema_version"] == "codex-handoff-package.v1"
+    assert data["handoff_id"] == "codex-handoff-issue-259"
+    assert data["task"] == task.to_dict()
+    assert data["worker_type"] == "codex"
+    assert data["invocation_mode"] == "manual"
+    assert data["invocation_authorized"] is False
+    assert data["review_required"] is True
+    assert data["worker_may_merge"] is False
+    assert json.loads(package.to_json()) == data
+
+
+def _collect_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        strings: list[str] = []
+        for key, item in value.items():
+            strings.extend(_collect_strings(key))
+            strings.extend(_collect_strings(item))
+        return strings
+    if isinstance(value, list):
+        strings = []
+        for item in value:
+            strings.extend(_collect_strings(item))
+        return strings
+    return []
+
+
+def test_codex_handoff_package_example_has_expected_stable_fields():
+    data = json.loads(CODEX_HANDOFF_EXAMPLE.read_text(encoding="utf-8"))
+
+    assert data["schema_version"] == "codex-handoff-package.v1"
+    assert data["handoff_id"] == "codex-handoff-issue-259"
+    assert data["repository"] == "Phoenix-AI-Platform/phoenix-office"
+    assert data["base_branch"] == "main"
+    assert data["expected_pr_title"] == (
+        "feat: add machine-readable Codex handoff package"
+    )
+    assert data["task"]["task_id"] == "task-issue-259-codex-handoff-package"
+    assert data["task"]["source"]["kind"] == "github_issue"
+    assert data["worker_type"] == "codex"
+    assert data["invocation_mode"] == "manual"
+    assert data["invocation_authorized"] is False
+    assert data["review_required"] is True
+    assert data["worker_may_merge"] is False
+    assert "AGENTS.md" in data["required_repo_paths"]
+    assert "Summary" in data["required_pr_body_headings"]
+
+
+def test_codex_handoff_package_example_contains_no_private_data_or_secrets():
+    data = json.loads(CODEX_HANDOFF_EXAMPLE.read_text(encoding="utf-8"))
+    searchable_text = "\n".join(_collect_strings(data)).lower()
+
+    forbidden_fragments = [
+        "sk-proj-",
+        "sk-live-",
+        "begin private key",
+        "password=",
+        "rambler",
+        "abby hill",
+        "schloss",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in searchable_text
