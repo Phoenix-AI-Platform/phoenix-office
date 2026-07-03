@@ -568,6 +568,12 @@ def test_codex_pilot_authorization_unknown_fields_do_not_leak_names(
         ("branch_name", "codex/bad@{branch", "authorization branch_name is invalid"),
         ("branch_name", "codex/bad branch", "authorization branch_name is invalid"),
         ("branch_name", "codex/bad/", "authorization branch_name is invalid"),
+        ("branch_name", "codex/.hidden", "authorization branch_name is invalid"),
+        ("branch_name", "codex/group/.hidden", "authorization branch_name is invalid"),
+        ("branch_name", "codex/topic.lock", "authorization branch_name is invalid"),
+        ("branch_name", "codex/group/topic.lock", "authorization branch_name is invalid"),
+        ("branch_name", "codex/topic.LOCK", "authorization branch_name is invalid"),
+        ("branch_name", "codex/group/topic.LoCk", "authorization branch_name is invalid"),
         ("budget_metric", "cost", "authorization budget_metric is invalid"),
         ("budget_ceiling", 0, "authorization budget is invalid"),
         ("budget_ceiling", True, "authorization budget is invalid"),
@@ -601,6 +607,66 @@ def test_codex_pilot_authorization_structural_field_failures(
     _assert_authorization_structural_failure(report)
     assert expected in report["blockers_by_source"]["authorization_structural"]
     _assert_no_unsafe_output(output)
+
+
+@pytest.mark.parametrize(
+    "branch_name",
+    [
+        "codex/.hidden",
+        "codex/group/.hidden",
+        "codex/topic.lock",
+        "codex/group/topic.lock",
+        "codex/topic.LOCK",
+        "codex/group/topic.LoCk",
+    ],
+)
+def test_codex_pilot_authorization_git_invalid_branch_components_do_not_leak(
+    tmp_path, capsys, monkeypatch, branch_name
+):
+    _install_runtime_mocks(monkeypatch)
+    authorization = _valid_authorization_packet()
+    authorization["branch_name"] = branch_name
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+    text_exit, text_output = _run_text(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert text_exit == 1
+    _assert_authorization_structural_failure(report)
+    assert "authorization branch_name is invalid" in (
+        report["blockers_by_source"]["authorization_structural"]
+    )
+    assert branch_name not in json_output
+    assert branch_name not in text_output
+
+
+@pytest.mark.parametrize("branch_name", ["codex/topic.v1", "codex/group/topic.v2"])
+def test_codex_pilot_authorization_valid_dotted_branch_components(
+    tmp_path, capsys, monkeypatch, branch_name
+):
+    _install_runtime_mocks(monkeypatch)
+    authorization = _valid_authorization_packet()
+    authorization["branch_name"] = branch_name
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=authorization
+    )
+
+    exit_code, report, _output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 0
+    assert report["branch_name"] == branch_name
+    assert report["authorization_structural_valid"] is True
+    assert report["authorization_binding_passed"] is True
+    assert report["authorization_packet_valid_for_one_attempt"] is True
 
 
 @pytest.mark.parametrize(
@@ -961,6 +1027,28 @@ def test_codex_pilot_authorization_binding_mismatches_are_not_structural(
         assert report["authorization_structural_valid"] is True
         assert expected in report["blockers_by_source"]["authorization_binding"]
     assert report["authorization_packet_valid_for_one_attempt"] is False
+
+
+def test_codex_pilot_authorization_binds_package_paths_by_basename_only(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    authorization = _valid_authorization_packet()
+    authorization["handoff_path"] = "reviewed/packages/handoff.json"
+    authorization["evidence_path"] = "reviewed/packages/evidence.json"
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=authorization
+    )
+
+    exit_code, report, output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 0
+    assert report["authorization_structural_valid"] is True
+    assert report["authorization_binding_passed"] is True
+    assert report["authorization_packet_valid_for_one_attempt"] is True
+    assert str(tmp_path) not in output
 
 
 def test_codex_pilot_authorization_leakage_prevention(

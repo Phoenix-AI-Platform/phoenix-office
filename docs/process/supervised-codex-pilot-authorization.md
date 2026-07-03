@@ -27,13 +27,15 @@ The inspector reruns the current composite pilot preflight for the supplied hand
 
 Structural validity means the authorization record is well formed and safe to inspect. Structural validity does not prove that external controls are truthful, fresh, enforceable, sufficient, or still available. A structurally valid packet can still fail binding when it does not match the current handoff, evidence package, or preflight result.
 
+For `handoff_path` and `evidence_path`, the inspector validates that the authorization packet values are safe repository-relative JSON paths, then compares only each declared path's basename with the corresponding CLI input filename. It blocks when a declared basename differs from the supplied CLI filename. It does not verify that the supplied CLI file is committed at the declared repository path, and it does not inspect Git history, repository state, or GitHub. Human authorization review must independently confirm the exact committed repository locations.
+
 The authorization packet must confirm:
 
 - repository: `Phoenix-AI-Platform/phoenix-office`
 - exact `main` commit SHA used as the pilot base
-- exact committed handoff-package path
+- exact intended committed handoff-package path
 - handoff ID from the committed handoff package
-- exact committed evidence-package path
+- exact intended committed evidence-package path
 - matching handoff ID from the evidence package
 - exact successful `python -m phoenix_office.cli dev codex-pilot-preflight <handoff.json> <evidence.json>` command
 - sanitized preflight result showing eligibility for human authorization review

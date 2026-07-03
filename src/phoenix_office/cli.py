@@ -2801,6 +2801,15 @@ def _is_conservative_path_segment(segment: str) -> bool:
     )
 
 
+def _is_safe_git_branch_component(component: str) -> bool:
+    lowered = component.lower()
+    return (
+        _is_conservative_path_segment(component)
+        and not component.startswith(".")
+        and not lowered.endswith(".lock")
+    )
+
+
 def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> bool:
     if (
         not _has_safe_authorization_text_shape(value, max_length)
@@ -2885,7 +2894,7 @@ def _is_safe_authorization_branch_name(value: Any) -> bool:
         or _contains_sensitive_authorization_marker(value)
     ):
         return False
-    return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
+    return all(_is_safe_git_branch_component(segment) for segment in value.split("/"))
 
 def _print_codex_pilot_authorization_report(report: dict[str, Any]) -> None:
     print("Codex pilot authorization packet inspection")
