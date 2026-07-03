@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Output the validated Codex handoff package as JSON",
     )
+    codex_handoff_parser.add_argument(
+        "--prompt-only",
+        action="store_true",
+        help="Output only the validated Codex handoff package prompt",
+    )
     codex_handoff_parser.set_defaults(func=inspect_codex_handoff)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
@@ -752,6 +757,13 @@ def dev_status(args: argparse.Namespace) -> int:
 def inspect_codex_handoff(args: argparse.Namespace) -> int:
     package_path = args.handoff_json
 
+    if args.json and args.prompt_only:
+        print(
+            "Error: --prompt-only cannot be combined with --json",
+            file=sys.stderr,
+        )
+        return 1
+
     if not package_path.exists():
         print(
             f"Error: CodexHandoffPackage JSON file does not exist: {package_path}",
@@ -786,6 +798,8 @@ def inspect_codex_handoff(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(package, indent=2, sort_keys=True))
+    elif args.prompt_only:
+        print(package["prompt"])
     else:
         _print_codex_handoff_summary(package)
     return 0

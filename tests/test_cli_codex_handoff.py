@@ -72,6 +72,36 @@ def test_dev_codex_handoff_json_output_equals_loaded_package(capsys):
     assert json.loads(captured.out) == expected
 
 
+def test_dev_codex_handoff_prompt_only_outputs_validated_prompt(capsys):
+    package = _load_example()
+
+    exit_code = main(
+        ["dev", "codex-handoff", str(HANDOFF_EXAMPLE), "--prompt-only"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == f"{package['prompt']}\n"
+    assert captured.err == ""
+
+
+def test_dev_codex_handoff_prompt_only_and_json_conflict_fails(capsys):
+    exit_code = main(
+        [
+            "dev",
+            "codex-handoff",
+            str(HANDOFF_EXAMPLE),
+            "--json",
+            "--prompt-only",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "--prompt-only cannot be combined with --json" in captured.err
+
+
 def test_dev_codex_handoff_missing_file_fails_cleanly(tmp_path, capsys):
     missing_path = tmp_path / "missing.json"
 
@@ -144,6 +174,21 @@ def test_dev_codex_handoff_missing_required_field_fails_closed(tmp_path, capsys)
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "expected_pr_title must be a non-empty string" in captured.err
+
+
+def test_dev_codex_handoff_prompt_only_still_fails_closed_for_unsafe_package(
+    tmp_path, capsys
+):
+    package = _load_example()
+    package["invocation_authorized"] = True
+    path = _write_package(tmp_path, package)
+
+    exit_code = main(["dev", "codex-handoff", str(path), "--prompt-only"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert package["prompt"] not in captured.out
+    assert "invocation_authorized must be JSON boolean False" in captured.err
 
 
 def test_dev_codex_handoff_invocation_authorized_true_fails_closed(

@@ -93,7 +93,15 @@ They can also inspect the same package as deterministic machine-readable JSON:
 python -m phoenix_office.cli dev codex-handoff examples/tasks/codex_handoff_package.json --json
 ```
 
-The inspection command is read-only. It reads one local JSON file, validates the current v1 safety boundary, and prints either a text summary or sorted, indented JSON. It does not create or rewrite packages, invoke Codex, call GitHub APIs, dispatch workflows, execute workers, mutate files, or merge a PR.
+After validation succeeds, operators can print only the package prompt for manual copy/paste:
+
+```bash
+python -m phoenix_office.cli dev codex-handoff examples/tasks/codex_handoff_package.json --prompt-only
+```
+
+`--prompt-only` cannot be combined with `--json`.
+
+The inspection command is read-only. It reads one local JSON file, validates the current v1 safety boundary, and prints either a text summary, sorted indented JSON, or only the validated prompt. It does not create or rewrite packages, invoke Codex, call GitHub APIs, dispatch workflows, execute workers, mutate files, or merge a PR.
 
 The command fails closed for malformed, incomplete, unsupported, or unsafe packages. A successful inspection means only that the package satisfies the current read-only handoff checks; it does not authorize Codex invocation, PR approval, merge behavior, proposal generation, DOCX rendering, or any background work.
 
