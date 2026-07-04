@@ -22,7 +22,7 @@ All string fields must be printable ASCII, single-line, trimmed, bounded, and fr
 
 Opaque identifiers allow only alphanumeric characters plus `-`, `_`, and internal `.`. They reject `.`, `..`, `/`, `\`, `:`, `=`, URL markers, path markers, credential-like content, and values longer than 80 characters.
 
-Repository-relative Markdown paths must be sorted, unique strings under `docs/process/**/*.md` or `docs/development/**/*.md`, must not include `docs/development/project_state.md`, and must reject traversal, absolute paths, backslashes, URLs, workflow paths, source paths, tests, fixtures, examples, JSON, templates, DOCX, package files, proposal paths, customer-data paths, API/MCP/server/worker paths, and generated outputs.
+Repository-relative Markdown paths must be unique strings under `docs/process/**/*.md` or `docs/development/**/*.md`, must preserve the exact validated authorization list order, must not include `docs/development/project_state.md`, and must reject traversal, absolute paths, backslashes, URLs, workflow paths, source paths, tests, fixtures, examples, JSON, templates, DOCX, package files, proposal paths, customer-data paths, API/MCP/server/worker paths, and generated outputs.
 
 Repository-relative JSON paths must be safe `.json` paths with no traversal, absolute path, drive marker, repeated separator, URL, backslash, credential-like content, machine-specific content, or ambiguous path segment.
 
@@ -51,7 +51,7 @@ Required fields and JSON types:
 - `expected_pr_title`: safe one-line string beginning with `docs:`
 - `objective_digest_schema_version`: string, exactly `codex-pilot-objective-digest.v1`
 - `objective_digest`: lowercase 64-character SHA-256 hex string over the validated safe objective string using prefix `codex-pilot-objective-digest.v1\n`
-- `allowed_paths`: one to three sorted unique repository-relative Markdown paths
+- `allowed_paths`: one to three unique repository-relative Markdown paths in the exact order from the inspected authorization packet
 - `validation_commands`: exact ordered list:
   - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp`
   - `python -m ruff check . --no-cache`
@@ -102,6 +102,8 @@ Future claim construction must use this exact proof procedure:
    - every required safety boolean
 5. Compute `objective_digest` from the same validated safe authorization `objective` string.
 
+The claim `allowed_paths` list must equal the authorization object's list value-for-value and position-for-position. Claim construction and claim validation must not sort, normalize, or rewrite that list. Any different ordering is a claim identity mismatch.
+
 `objective_digest` uses schema `codex-pilot-objective-digest.v1`. The digest input is UTF-8 bytes of:
 
 ```text
@@ -149,7 +151,7 @@ Required fields:
 
 Optional fields are allowed only when the transition table permits them:
 
-- `branch_identity`: branch identity string matching `codex/[A-Za-z0-9._/-]{1,80}` with no spaces, `..`, `@{`, trailing slash, repeated slash, component beginning with `.`, component ending with `.lock` case-insensitively, secret markers, or machine markers
+- `branch_identity`: branch identity string with total length 1 through 100, beginning with `codex/`, and containing only `[A-Za-z0-9._/-]` with no spaces, `..`, `@{`, trailing slash, repeated slash, component beginning with `.`, component ending with `.lock` case-insensitively, secret markers, or machine markers
 - `pull_request_identity`: string matching `pr-[1-9][0-9]{0,9}`
 - `usage_category`: one of `within_budget`, `budget_exceeded`, `usage_unknown`
 - `timeout_category`: one of `timeout_not_reached`, `timeout_reached`, `timeout_unknown`
@@ -222,13 +224,15 @@ Transition matrix:
 | `invocation_started` | `failed` | `invocation_failed` | `failed` | `phoenix_audit` | `usage_category`, `recovery_category` | branch, PR, timeout, cancellation, CI, review | yes | yes |
 | `invocation_started` | `cancelled` | `invocation_cancelled` | `cancelled` | `phoenix_audit` | `usage_category`, `cancellation_category` | branch, PR, timeout, recovery, CI, review | yes | yes |
 | `invocation_started` | `timed_out` | `invocation_timed_out` | `timed_out` | `phoenix_audit` | `usage_category`, `timeout_category` | branch, PR, cancellation, recovery, CI, review | yes | yes |
-| `pr_opened_and_stopped` | `completed_pending_review` | `completed_pending_review` | `completed_pending_review` | `phoenix_audit` | `final_ci_category`, `assistant_review_verdict` | usage, timeout, cancellation, recovery | yes | no |
+| `pr_opened_and_stopped` | `completed_pending_review` | `completed_pending_review` | `completed_pending_review` | `phoenix_audit` | `branch_identity`, `pull_request_identity`, `final_ci_category`, `assistant_review_verdict` | usage, timeout, cancellation, recovery | yes | no |
 
 `codex_approved:false` and `codex_merged:false` are required on every event, including sequence `0`. The final transition requires `final_ci_category` to be `passed`, `failed`, `pending`, or `unknown`, and `assistant_review_verdict` to be `approved`, `changes_requested`, `commented`, `pending`, or `unknown`. Earlier transitions must omit both fields.
 
 When an optional category is absent by the matrix, the field must be absent rather than present as `null` or a placeholder value.
 
 Matrix shorthand maps to exact field names: branch = `branch_identity`; PR = `pull_request_identity`; usage = `usage_category`; timeout = `timeout_category`; cancellation = `cancellation_category`; recovery = `recovery_category`; CI = `final_ci_category`; review = `assistant_review_verdict`.
+
+For `pr_opened_and_stopped -> completed_pending_review`, `branch_identity` and `pull_request_identity` are required again and must exactly equal the values recorded by the immediately preceding `pr_opened_and_stopped` event. A mismatch fails with `event_binding_mismatch`.
 
 No transition may return to `claim_not_started`, delete a claim, reset an attempt, or make an authorization reusable. Terminal states remain consumed. Recovery may append only a permitted finalizing transition from the current non-terminal state and may never restart invocation.
 
@@ -247,6 +251,7 @@ Required snapshot fields:
 - `authorization_id`: authorization identifier
 - `authorization_fingerprint`: lowercase 64-character hex string
 - `latest_event_sequence`: integer, `0` for a newly claimed attempt with only the required claim-created event
+- `latest_event_digest`: lowercase 64-character hex string equal to the final authoritative event's `event_digest`
 - `current_lifecycle_state`: lifecycle enum string
 - `terminal`: boolean
 - `branch_identity`: branch identity using the audit-event branch format, or JSON `null` before a branch is known
@@ -264,12 +269,16 @@ Derivation rules:
 - Require the authoritative event stream to already be strictly increasing by `event_sequence`; validators must not sort a supplied stream to hide reordered input.
 - Require the first event to be sequence `0` with `claim_not_started -> claim_created`.
 - Require no gaps, duplicates, replacement, or reordering.
+- Require `latest_event_sequence` and `latest_event_digest` to identify the same final validated event.
 - Require every `previous_lifecycle_state` to match the prior derived state.
 - Apply transitions exactly from the table.
 - Derive current state from the final event.
 - Derive terminal status from the transition table.
+- Derive `branch_identity` and `pull_request_identity` as JSON `null` until `pr_opened_and_stopped`, then carry forward the exact recorded values through later events.
+- Derive `final_ci_category` and `assistant_review_verdict` as JSON `null` until `completed_pending_review`, then equal that event's exact values.
+- Reject conflicting duplicates, later rewrites, or contextual values from inapplicable transitions.
 
-If a stored snapshot disagrees with the immutable claim or ordered events, the snapshot fails with `snapshot_mismatch`. The claim remains consumed and not reusable.
+For a newly claimed state, `latest_event_sequence` is `0` and `latest_event_digest` equals event sequence `0`'s `event_digest`. If a stored snapshot disagrees with the immutable claim, ordered events, final event sequence, final event digest, or derived contextual fields, the snapshot fails with `snapshot_mismatch`. The claim remains consumed and not reusable.
 
 ## Event Ordering And Integrity
 
