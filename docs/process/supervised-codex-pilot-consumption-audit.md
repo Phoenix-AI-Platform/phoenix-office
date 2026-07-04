@@ -6,6 +6,8 @@ This document defines the fail-closed consumption and audit contract required be
 
 This is a documentation-only design contract. It does not consume authorization, invoke Codex, submit prompts, authenticate, access GitHub, access the network, inspect issues or PRs, create branches, open PRs, write audit records, persist state, schedule work, retry work, approve, merge, or run in the background.
 
+Exact v1 claim, audit event, and attempt snapshot schemas are defined in [Supervised Codex Pilot Claim Record Schemas](supervised-codex-pilot-claim-records.md).
+
 The required future boundary is:
 
 ```text

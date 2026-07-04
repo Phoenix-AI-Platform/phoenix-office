@@ -1,0 +1,301 @@
+# Supervised Codex Pilot Claim Record Schemas
+
+## Purpose
+
+This document defines the exact v1 record schemas for a future supervised Codex pilot claim and audit layer. It is documentation only. It does not create or inspect claims, persist state, write files, invoke Codex, submit prompts, authenticate, access GitHub, create branches, open PRs, approve, merge, retry, schedule, or run background work.
+
+The schemas preserve separate meanings for authorization identity, atomic claim creation, invocation lifecycle, post-run review, and merge authority. A valid record never means Codex may run, approve, merge, or reuse an authorization unless a later reviewed implementation explicitly adds that behavior behind the required gates.
+
+## Schema Versions
+
+The exact v1 schema versions are:
+
+- `codex-pilot-claim.v1`
+- `codex-pilot-audit-event.v1`
+- `codex-pilot-attempt-snapshot.v1`
+
+Each record root is a JSON object with exactly the fields defined for its schema. Missing fields, unknown fields, wrong JSON types, invalid enum values, duplicate list values, unsafe strings, or non-canonical ordering fail closed. Any schema, field, type, enum, transition, validation, ordering, or digest change requires a new schema version.
+
+## Shared Safe Types
+
+All string fields must be printable ASCII, single-line, trimmed, bounded, and free of control characters. Unicode normalization ambiguity is rejected rather than normalized. Strings must not contain URLs, absolute paths, home-directory markers, drive markers, `Users`, `AppData`, usernames, hostnames, credentials, tokens, `sk-` values, passwords, secrets, environment assignments, config contents, raw prompts, raw evidence, runtime stdout/stderr, private customer data, or arbitrary free-form error text.
+
+Opaque identifiers allow only alphanumeric characters plus `-`, `_`, and internal `.`. They reject `.`, `..`, `/`, `\`, `:`, `=`, URL markers, path markers, credential-like content, and values longer than 80 characters.
+
+Repository-relative Markdown paths must be sorted, unique strings under `docs/process/**/*.md` or `docs/development/**/*.md`, must not include `docs/development/project_state.md`, and must reject traversal, absolute paths, backslashes, URLs, workflow paths, source paths, tests, fixtures, examples, JSON, templates, DOCX, package files, proposal paths, customer-data paths, API/MCP/server/worker paths, and generated outputs.
+
+Repository-relative JSON paths must be safe `.json` paths with no traversal, absolute path, drive marker, repeated separator, URL, backslash, credential-like content, machine-specific content, or ambiguous path segment.
+
+Integers must be JSON integers, not booleans. Booleans must be actual JSON booleans. Lists must use deterministic ordering specified by the field definition and reject duplicates unless explicitly allowed. Diagnostics must use fixed categories and must not echo unsafe input values.
+
+## Atomic Claim Record
+
+Schema version: `codex-pilot-claim.v1`.
+
+The claim record is immutable. It binds an authorization fingerprint to exactly one attempt and starts in lifecycle state `claim_created`. It stores a safe authorization identity projection directly, so a reviewer can prove the claim belongs to the exact validated fingerprint without storing prompts, raw evidence, credentials, runtime output, or machine-specific data.
+
+Required fields and JSON types:
+
+- `schema_version`: string, exactly `codex-pilot-claim.v1`
+- `attempt_id`: opaque identifier string created by the trusted Phoenix gate
+- `authorization_id`: opaque identifier string
+- `authorization_fingerprint_schema_version`: string, exactly `phoenix-codex-authorization-fingerprint.v1`
+- `authorization_fingerprint`: lowercase 64-character SHA-256 hex string
+- `handoff_id`: opaque identifier string
+- `repository`: string, exactly `Phoenix-AI-Platform/phoenix-office`
+- `pilot_kind`: string, exactly `docs-only-supervised`
+- `base_commit_sha`: lowercase 40-character hex string
+- `branch_name`: safe branch string beginning with `codex/`
+- `expected_pr_title`: safe one-line string beginning with `docs:`
+- `objective_digest_schema_version`: string, exactly `codex-pilot-objective-digest.v1`
+- `objective_digest`: lowercase 64-character SHA-256 hex string over the validated safe objective string using prefix `codex-pilot-objective-digest.v1\n`
+- `allowed_paths`: one to three sorted unique repository-relative Markdown paths
+- `validation_commands`: exact ordered list:
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp`
+  - `python -m ruff check . --no-cache`
+  - `git diff --check`
+- `budget_metric`: string, exactly `tokens`
+- `budget_ceiling`: integer, `1` through `1000000`
+- `timeout_seconds`: integer, `60` through `7200`
+- `budget_enforcement_ref`: opaque identifier string
+- `cancellation_ref`: opaque identifier string
+- `authentication_runner_ref`: opaque identifier string
+- `branch_permission_ref`: opaque identifier string
+- `pr_permission_ref`: opaque identifier string
+- `duplicate_pr_check_ref`: opaque identifier string
+- `branch_collision_check_ref`: opaque identifier string
+- `codex_no_approve_merge_ref`: opaque identifier string
+- `final_ci_required`: boolean, exactly `true`
+- `assistant_review_required`: boolean, exactly `true`
+- `worker_may_approve`: boolean, exactly `false`
+- `worker_may_merge`: boolean, exactly `false`
+- `one_invocation_only`: boolean, exactly `true`
+- `retry_authorized`: boolean, exactly `false`
+- `background_execution_authorized`: boolean, exactly `false`
+- `initial_lifecycle_state`: string, exactly `claim_created`
+
+The claim record must never contain later lifecycle state, CI state, review state, PR result state, timestamps that affect identity, hostnames, process IDs, runner paths, mutable status fields, raw prompts, rendered prompts, raw evidence, credentials, tokens, environment values, or private customer data.
+
+## Attempt ID
+
+`attempt_id` is created only by the trusted Phoenix gate during atomic claim creation. Codex must not provide, choose, rewrite, delete, recover, or reuse it.
+
+The format is:
+
+```text
+pilot-attempt-[a-z0-9][a-z0-9._-]{11,62}
+```
+
+It is bounded to 80 characters including the prefix, safe to emit, and must not contain usernames, hostnames, paths, timestamps that reveal operator or machine details, credentials, tokens, secrets, or customer data. Randomness or time-derived material may be used only as non-authoritative audit metadata for uniqueness. It never changes the authorization fingerprint. A failed, cancelled, timed-out, aborted, crashed, or partially claimed attempt ID is never reused.
+
+## Lifecycle Audit Event
+
+Schema version: `codex-pilot-audit-event.v1`.
+
+An audit event is append-only or monotonic. It binds to the immutable claim and advances the lifecycle by exactly one permitted transition.
+
+Required fields:
+
+- `schema_version`: string, exactly `codex-pilot-audit-event.v1`
+- `attempt_id`: opaque attempt identifier matching the claim
+- `authorization_id`: opaque identifier matching the claim
+- `authorization_fingerprint`: lowercase 64-character hex string matching the claim
+- `event_sequence`: integer, zero-based, contiguous, no gaps, no duplicates
+- `previous_lifecycle_state`: lifecycle enum string
+- `next_lifecycle_state`: lifecycle enum string
+- `event_category`: bounded enum string from the transition table
+- `result_category`: bounded enum string
+- `actor_role`: sanitized actor role enum
+- `codex_approved`: boolean, exactly `false` when present
+- `codex_merged`: boolean, exactly `false` when present
+
+Optional fields are allowed only when the transition table permits them:
+
+- `branch_identity`: safe bounded branch identity
+- `pull_request_identity`: safe bounded PR identity
+- `usage_category`: bounded enum
+- `timeout_category`: bounded enum
+- `cancellation_category`: bounded enum
+- `final_ci_category`: bounded enum
+- `assistant_review_verdict`: bounded enum
+- `recovery_category`: bounded enum
+- `previous_event_digest`: lowercase 64-character hex string when event chaining is enabled
+
+Unknown fields, missing required fields, optional fields on inapplicable transitions, wrong JSON types, invalid enums, invalid previous-state binding, or unsafe values fail closed.
+
+## Event Chaining
+
+If a storage adapter supports event chaining, the digest schema is `codex-pilot-audit-event-digest.v1`. The digest input is UTF-8 bytes of:
+
+```text
+codex-pilot-audit-event-digest.v1\n
+```
+
+followed by compact canonical JSON for the event object with sorted keys, separators equivalent to `json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`, and no `previous_event_digest` field included in the digest payload. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex.
+
+For `event_sequence == 0`, `previous_event_digest` must be absent. For later events, it must equal the digest of the immediately preceding event. If a future implementation omits event chaining, it must still enforce exact sequence integers, previous-state binding, and append-only ordering.
+
+## Lifecycle States And Transitions
+
+Lifecycle states are fixed:
+
+- `claim_not_started`
+- `claim_created`
+- `invocation_starting`
+- `invocation_started`
+- `pr_opened_and_stopped`
+- `aborted`
+- `failed`
+- `cancelled`
+- `timed_out`
+- `completed_pending_review`
+
+Transition table:
+
+| Previous | Next | Event category | Required context | Forbidden context | Terminal | Recovery finalizing |
+| --- | --- | --- | --- | --- | --- | --- |
+| `claim_not_started` | `claim_created` | `claim_created` | immutable claim exists | branch, PR, CI, review | no | no |
+| `claim_created` | `invocation_starting` | `invocation_starting` | none | branch, PR, CI, review | no | no |
+| `claim_created` | `aborted` | `claim_aborted` | `recovery_category` or bounded result | branch, PR, CI, review | yes | yes |
+| `claim_created` | `failed` | `claim_failed` | bounded result | branch, PR, CI, review | yes | yes |
+| `claim_created` | `cancelled` | `claim_cancelled` | `cancellation_category` | branch, PR, CI, review | yes | yes |
+| `claim_created` | `timed_out` | `claim_timed_out` | `timeout_category` | branch, PR, CI, review | yes | yes |
+| `invocation_starting` | `invocation_started` | `invocation_started` | none | PR, CI, review | no | no |
+| `invocation_starting` | `aborted` | `invocation_start_aborted` | bounded result | PR, CI, review | yes | yes |
+| `invocation_starting` | `failed` | `invocation_start_failed` | bounded result | PR, CI, review | yes | yes |
+| `invocation_starting` | `cancelled` | `invocation_start_cancelled` | `cancellation_category` | PR, CI, review | yes | yes |
+| `invocation_starting` | `timed_out` | `invocation_start_timed_out` | `timeout_category` | PR, CI, review | yes | yes |
+| `invocation_started` | `pr_opened_and_stopped` | `pr_opened_and_stopped` | `branch_identity`, `pull_request_identity` | CI verdict, review verdict | no | no |
+| `invocation_started` | `aborted` | `invocation_aborted` | bounded result | final CI, review | yes | yes |
+| `invocation_started` | `failed` | `invocation_failed` | bounded result | final CI, review | yes | yes |
+| `invocation_started` | `cancelled` | `invocation_cancelled` | `cancellation_category` | final CI, review | yes | yes |
+| `invocation_started` | `timed_out` | `invocation_timed_out` | `timeout_category` | final CI, review | yes | yes |
+| `pr_opened_and_stopped` | `completed_pending_review` | `completed_pending_review` | `final_ci_category`, `assistant_review_verdict`, `codex_approved:false`, `codex_merged:false` | retry or reuse fields | yes | no |
+
+No transition may return to `claim_not_started`, delete a claim, reset an attempt, or make an authorization reusable. Terminal states remain consumed. Recovery may append only a permitted finalizing transition from the current non-terminal state and may never restart invocation.
+
+Duplicate events are rejected unless a future storage adapter defines an exact idempotency key consisting of the full canonical event digest, sequence number, attempt ID, and fingerprint. An idempotent duplicate may be recognized as already recorded, but it must not create a second event, skip a sequence number, or diverge history.
+
+## Attempt Snapshot
+
+Schema version: `codex-pilot-attempt-snapshot.v1`.
+
+The preferred v1 snapshot is derived entirely from the immutable claim plus ordered audit events. A stored snapshot is allowed only as a compare-and-set projection with a verified event sequence. It is never authoritative enough to erase, replace, delete, reset, or make reusable an immutable claim.
+
+Required snapshot fields:
+
+- `schema_version`: string, exactly `codex-pilot-attempt-snapshot.v1`
+- `attempt_id`: attempt identifier
+- `authorization_id`: authorization identifier
+- `authorization_fingerprint`: lowercase 64-character hex string
+- `latest_event_sequence`: integer
+- `current_lifecycle_state`: lifecycle enum string
+- `terminal`: boolean
+- `branch_identity`: safe bounded branch identity or `null`
+- `pull_request_identity`: safe bounded PR identity or `null`
+- `final_ci_category`: bounded enum or `null`
+- `assistant_review_verdict`: bounded enum or `null`
+- `codex_approved`: boolean, exactly `false`
+- `codex_merged`: boolean, exactly `false`
+- `authorization_reusable`: boolean, exactly `false`
+
+Derivation rules:
+
+- Validate the claim first.
+- Validate every event against the claim.
+- Sort by `event_sequence`.
+- Require no gaps, duplicates, or reordering.
+- Require every `previous_lifecycle_state` to match the prior derived state.
+- Apply transitions exactly from the table.
+- Derive current state from the final event.
+- Derive terminal status from the transition table.
+
+If a stored snapshot disagrees with the immutable claim or ordered events, the snapshot fails with `snapshot_mismatch`. The claim remains consumed and not reusable.
+
+## Event Ordering And Integrity
+
+`event_sequence` is zero-based and monotonically increasing. Required behavior:
+
+- no gaps
+- no duplicates
+- no reordering
+- no replacement
+- exact previous-state binding
+- exact attempt-ID binding
+- exact authorization-ID binding
+- exact fingerprint binding
+- corruption or uncertainty blocks reuse and invocation
+- recovery may append only a permitted finalizing transition
+- recovery may never submit a prompt, start Codex, create another branch, create another PR, approve, merge, retry, schedule, or run in the background
+
+## Actor Roles
+
+Allowed actor roles:
+
+- `phoenix_gate`
+- `phoenix_audit`
+- `human_operator`
+- `assistant_reviewer`
+
+Codex is not an authorized actor for claim creation, claim replacement, claim deletion, lifecycle recovery, final CI result, assistant review verdict, approval, merge, reuse decisions, record validation, or storage repair.
+
+If a Codex process result is recorded, it is recorded by `phoenix_gate` or `phoenix_audit` as bounded evidence. Codex output is never self-authoritative state.
+
+## Failure Categories
+
+Stable failure categories include:
+
+- `claim_record_invalid`
+- `claim_identity_mismatch`
+- `claim_already_exists`
+- `fingerprint_already_consumed`
+- `event_sequence_invalid`
+- `event_binding_mismatch`
+- `invalid_lifecycle_transition`
+- `event_digest_mismatch`
+- `snapshot_mismatch`
+- `claim_record_corrupt`
+- `audit_event_corrupt`
+- `claim_store_unavailable`
+- `claim_durability_uncertain`
+- `recovery_required`
+- `unsafe_record_value`
+- `unknown_record_fields`
+
+Diagnostics must not echo unsafe values, raw prompts, raw evidence, credentials, tokens, usernames, home directories, hostnames, machine paths, environment values, config contents, runtime output, or private customer data.
+
+## Storage Neutrality
+
+These schemas are storage-neutral. A later adapter may use a filesystem, database, service, or other durable store only if it proves:
+
+- exclusive create or compare-and-set semantics
+- durable write confirmation
+- no silent overwrite
+- no deletion as a reuse mechanism
+- append-only or monotonic event semantics
+- corruption detection
+- restrictive permissions
+- Codex worker write isolation from claim and audit storage
+- sanitized operator-readable failure categories
+- human-reviewed recovery
+- no background cleanup that can restore authorization reuse
+
+This document does not select or implement a backend.
+
+## Future Implementation Order
+
+The required implementation sequence is:
+
+1. Pure record contracts and validators.
+2. Read-only candidate-record inspection.
+3. Storage adapter contract tests.
+4. Atomic claim creation with no invocation.
+5. Lifecycle audit append with no invocation.
+6. Recovery inspection.
+7. Separately authorized one-run invocation gate.
+
+Each step requires its own reviewed PR. No step may silently add Codex invocation, prompt submission, GitHub access, branch creation, PR creation, approval, merge, retry, scheduling, background work, proposal behavior, DOCX behavior, orchestration execution, generated artifacts, or private customer data.
+
+## Non-Goals
+
+This document does not add Python changes, tests, CLI behavior, persistence, filesystem writes, database changes, locks, atomic create implementation, claim creation, authorization consumption, audit-log writes, recovery mutation, Codex invocation, prompt submission, AI/API calls, subprocess changes, authentication, network access, GitHub access, issue/PR lookup, branch/PR creation, comments, labels, approval, merge automation, workflow changes, retries, scheduling, background work, proposal/DOCX changes, orchestration execution, generated artifacts, private customer data, or project-state updates.
