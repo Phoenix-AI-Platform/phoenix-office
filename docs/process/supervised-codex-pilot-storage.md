@@ -132,6 +132,7 @@ If the backend cannot provide a single authoritative publication point plus a co
 A future trusted Phoenix gate/storage component must also expose a read operation that loads the complete committed unit and revalidates all stored data.
 
 The v1 read selector is `read_initial_claim_bundle(attempt_id, trusted_authorization_context)`. A backend may express the same rule as an internal precondition, but the authoritative committed unit must still be selected by exact `attempt_id` lookup.
+The trusted Phoenix component supplies both the selector and the trusted authorization context; the worker receives neither a store locator nor authority to choose alternate lookup keys.
 
 The read operation must:
 
@@ -173,6 +174,7 @@ Create operation categories:
 Read operation categories:
 
 - `read_success`
+- `attempt_id_invalid`
 - `authorization_context_invalid`
 - `bundle_binding_mismatch`
 - `missing_commit`
