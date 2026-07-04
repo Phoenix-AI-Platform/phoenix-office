@@ -120,6 +120,16 @@ sha256(
 ).hexdigest()
 ```
 
+The read-only inspector command:
+
+```bash
+python -m phoenix_office.cli dev codex-pilot-fingerprint <handoff_json> <evidence_json> <authorization_json>
+```
+
+reruns the current authorization inspection and reports the deterministic v1 fingerprint only when that inspection succeeds. The command does not create or inspect a consumption claim, persist state, invoke Codex, submit prompts, access GitHub, access the network, create branches, open PRs, approve, merge, or mutate anything.
+
+Successful fingerprinting means only that the reviewed authorization packet has a stable identity under the v1 contract. It does not prove the authorization is unconsumed, claimed, invocation-ready, invoked, externally authorized, enforceable, or sufficient. Claim creation remains a separately reviewed future capability, and the fingerprint is safe identity material rather than invocation authority.
+
 The fingerprint must not include raw prompts, rendered prompts, raw evidence, raw runtime output, credentials, tokens, machine-specific paths, usernames, home directories, environment values, config contents, private customer data, timestamps, hostnames, process IDs, attempt IDs, lifecycle states, audit metadata, or generated attempt metadata.
 
 Any schema, included-field, ordering, serialization, encoding, prefix, digest algorithm, or representation change requires a new fingerprint schema version. A future implementation must never silently change the meaning of `phoenix-codex-authorization-fingerprint.v1`.
@@ -334,7 +344,7 @@ This contract does not add or authorize:
 
 - Python changes
 - tests
-- CLI behavior
+- CLI behavior beyond the read-only fingerprint inspector
 - subprocess calls
 - Codex invocation
 - prompt submission

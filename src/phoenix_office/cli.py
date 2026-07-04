@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -197,6 +198,31 @@ def build_parser() -> argparse.ArgumentParser:
     codex_pilot_authorization_parser.set_defaults(
         func=codex_pilot_authorization
     )
+    codex_pilot_fingerprint_parser = dev_subparsers.add_parser(
+        "codex-pilot-fingerprint",
+        help="Inspect the deterministic supervised Codex pilot authorization fingerprint",
+    )
+    codex_pilot_fingerprint_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_pilot_fingerprint_parser.add_argument(
+        "evidence_json",
+        type=Path,
+        help="Path to Codex pilot evidence package JSON",
+    )
+    codex_pilot_fingerprint_parser.add_argument(
+        "authorization_json",
+        type=Path,
+        help="Path to Codex pilot authorization packet JSON",
+    )
+    codex_pilot_fingerprint_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the authorization fingerprint inspection report as JSON",
+    )
+    codex_pilot_fingerprint_parser.set_defaults(func=codex_pilot_fingerprint)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -1018,6 +1044,19 @@ def codex_pilot_authorization(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_authorization_report(report)
     return 0 if report["authorization_packet_valid_for_one_attempt"] else 1
+
+
+def codex_pilot_fingerprint(args: argparse.Namespace) -> int:
+    report = _run_codex_pilot_fingerprint(
+        handoff_path=args.handoff_json,
+        evidence_path=args.evidence_json,
+        authorization_path=args.authorization_json,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_fingerprint_report(report)
+    return 0 if report["authorization_fingerprint_valid"] else 1
 
 
 def _load_codex_invocation_preflight(
@@ -2232,6 +2271,14 @@ CODEX_PILOT_PREFLIGHT_SCHEMA_VERSION = "codex-pilot-preflight.v1"
 CODEX_PILOT_PREFLIGHT_COMMAND = "dev codex-pilot-preflight"
 CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_COMMAND = "dev codex-pilot-authorization"
+CODEX_PILOT_FINGERPRINT_SCHEMA_VERSION = "codex-pilot-fingerprint.v1"
+CODEX_PILOT_FINGERPRINT_COMMAND = "dev codex-pilot-fingerprint"
+CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
+    "phoenix-codex-authorization-fingerprint.v1"
+)
+CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX = (
+    f"{CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION}\n"
+)
 CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
 CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
 CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS = {
@@ -2307,6 +2354,41 @@ CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS = [
     "budget_metric",
     "budget_ceiling",
     "timeout_seconds",
+]
+CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS = [
+    "schema_version",
+    "authorization_id",
+    "repository",
+    "pilot_kind",
+    "decision_state",
+    "authorizer_role",
+    "base_commit_sha",
+    "handoff_path",
+    "evidence_path",
+    "handoff_id",
+    "objective",
+    "allowed_paths",
+    "expected_pr_title",
+    "branch_name",
+    "validation_commands",
+    "budget_metric",
+    "budget_ceiling",
+    "budget_enforcement_ref",
+    "timeout_seconds",
+    "cancellation_ref",
+    "authentication_runner_ref",
+    "branch_permission_ref",
+    "pr_permission_ref",
+    "duplicate_pr_check_ref",
+    "branch_collision_check_ref",
+    "codex_no_approve_merge_ref",
+    "final_ci_required",
+    "assistant_review_required",
+    "worker_may_approve",
+    "worker_may_merge",
+    "one_invocation_only",
+    "retry_authorized",
+    "background_execution_authorized",
 ]
 
 
@@ -2727,6 +2809,174 @@ def _safe_codex_pilot_authorization_fields(
             fields[field_name] = package.get(field_name)
 
     return fields
+
+
+def _run_codex_pilot_fingerprint(
+    *,
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+) -> dict[str, Any]:
+    authorization_report = _run_codex_pilot_authorization(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        authorization_path=authorization_path,
+    )
+    authorization_inspection_passed = bool(
+        authorization_report.get("authorization_packet_valid_for_one_attempt")
+    )
+    fingerprint_blockers: list[str] = []
+    fingerprint: str | None = None
+    if authorization_inspection_passed:
+        try:
+            package = _read_json_object_file(authorization_path)
+            fingerprint = _codex_pilot_authorization_fingerprint(package)
+        except (TypeError, ValueError):
+            fingerprint_blockers.append(
+                "authorization fingerprint payload is invalid"
+            )
+    authorization_blockers = _codex_pilot_fingerprint_authorization_blockers(
+        authorization_report
+    )
+    authorization_fingerprint_valid = (
+        authorization_inspection_passed
+        and fingerprint is not None
+        and not fingerprint_blockers
+    )
+    return {
+        "authorization_claimed": False,
+        "authorization_consumed": False,
+        "authorization_filename": authorization_report.get(
+            "authorization_filename"
+        ),
+        "authorization_fingerprint": fingerprint,
+        "authorization_fingerprint_valid": authorization_fingerprint_valid,
+        "authorization_id": authorization_report.get("authorization_id")
+        if authorization_inspection_passed
+        else None,
+        "authorization_inspection_passed": authorization_inspection_passed,
+        "blockers": sorted([*authorization_blockers, *fingerprint_blockers]),
+        "blockers_by_source": {
+            "authorization": authorization_blockers,
+            "fingerprint": sorted(fingerprint_blockers),
+        },
+        "branch_created": False,
+        "command": CODEX_PILOT_FINGERPRINT_COMMAND,
+        "evidence_filename": authorization_report.get("evidence_filename"),
+        "fingerprint_schema_version": (
+            CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION
+        ),
+        "github_access_performed": False,
+        "handoff_filename": authorization_report.get("handoff_filename"),
+        "handoff_id": authorization_report.get("handoff_id")
+        if authorization_inspection_passed
+        else None,
+        "invocation_performed": False,
+        "mutation_performed": False,
+        "network_access_performed": False,
+        "pilot_ready": False,
+        "prompt_submitted": False,
+        "pull_request_created": False,
+        "schema_version": CODEX_PILOT_FINGERPRINT_SCHEMA_VERSION,
+    }
+
+
+def _codex_pilot_authorization_fingerprint(package: dict[str, Any]) -> str:
+    if set(package) != CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
+        raise ValueError("authorization fingerprint field set is invalid")
+    payload = {
+        field_name: package[field_name]
+        for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
+    }
+    if set(payload) != set(CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS):
+        raise ValueError("authorization fingerprint payload is invalid")
+    _validate_codex_pilot_fingerprint_payload(payload)
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    digest_input = (
+        CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
+        + canonical.encode("utf-8")
+    )
+    return hashlib.sha256(digest_input).hexdigest()
+
+
+def _validate_codex_pilot_fingerprint_payload(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("authorization fingerprint payload is invalid")
+    for value in payload.values():
+        _validate_codex_pilot_fingerprint_value(value)
+
+
+def _validate_codex_pilot_fingerprint_value(value: Any) -> None:
+    if isinstance(value, str):
+        if not _has_safe_authorization_text_shape(value, 500):
+            raise ValueError("authorization fingerprint payload is invalid")
+    elif isinstance(value, bool):
+        return
+    elif type(value) is int:
+        return
+    elif isinstance(value, list):
+        for item in value:
+            _validate_codex_pilot_fingerprint_value(item)
+    else:
+        raise ValueError("authorization fingerprint payload is invalid")
+
+
+def _codex_pilot_fingerprint_authorization_blockers(
+    authorization_report: dict[str, Any],
+) -> list[str]:
+    if authorization_report.get("authorization_packet_valid_for_one_attempt"):
+        return []
+    blockers: list[str] = []
+    blockers_by_source = authorization_report.get("blockers_by_source", {})
+    for source in [
+        "composite_preflight",
+        "authorization_structural",
+        "authorization_binding",
+    ]:
+        if blockers_by_source.get(source):
+            blockers.append(f"{source.replace('_', ' ')} blocked")
+    if not blockers:
+        blockers.append("authorization inspection failed")
+    return sorted(blockers)
+
+
+def _print_codex_pilot_fingerprint_report(report: dict[str, Any]) -> None:
+    print("Codex pilot authorization fingerprint inspection")
+    print(f"Schema version: {report['schema_version']}")
+    print(f"Command: {report['command']}")
+    print(f"Handoff filename: {report['handoff_filename']}")
+    print(f"Evidence filename: {report['evidence_filename']}")
+    print(f"Authorization filename: {report['authorization_filename']}")
+    print(f"Authorization ID: {report['authorization_id']}")
+    print(f"Handoff ID: {report['handoff_id']}")
+    print(f"Fingerprint schema version: {report['fingerprint_schema_version']}")
+    print(f"Authorization fingerprint: {report['authorization_fingerprint']}")
+    print(
+        "Authorization inspection passed: "
+        f"{_format_yes_no(report['authorization_inspection_passed'])}"
+    )
+    print(
+        "Authorization fingerprint valid: "
+        f"{_format_yes_no(report['authorization_fingerprint_valid'])}"
+    )
+    print("Authorization claimed: no")
+    print("Authorization consumed: no")
+    print("Pilot ready: no")
+    print("Invocation performed: no")
+    print("Prompt submitted: no")
+    print("GitHub access performed: no")
+    print("Network access performed: no")
+    print("Mutation performed: no")
+    print("Branch created: no")
+    print("Pull request created: no")
+    blockers_by_source = report["blockers_by_source"]
+    for source in ["authorization", "fingerprint"]:
+        _print_list(f"{source.title()} blockers", blockers_by_source[source])
 
 
 def _is_lower_hex_sha(value: Any) -> bool:
