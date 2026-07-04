@@ -53,9 +53,76 @@ A future consumption record must bind at minimum:
 - `retry_authorized`
 - `background_execution_authorized`
 
-The future implementation must compute a deterministic canonical fingerprint over the validated safe authorization fields. The canonical form must use sorted keys, stable list ordering, and no nondeterministic metadata.
+The future implementation must compute a deterministic canonical fingerprint over the validated safe authorization fields.
 
-The fingerprint must not include raw prompts, rendered prompts, raw evidence, raw runtime output, credentials, tokens, machine-specific paths, usernames, home directories, environment values, config contents, private customer data, timestamps, hostnames, process IDs, or generated attempt metadata.
+Fingerprint schema version: `phoenix-codex-authorization-fingerprint.v1`.
+
+The v1 canonical payload must include exactly these fields from the structurally valid and binding-valid authorization packet:
+
+- `schema_version`
+- `authorization_id`
+- `repository`
+- `pilot_kind`
+- `decision_state`
+- `authorizer_role`
+- `base_commit_sha`
+- `handoff_path`
+- `evidence_path`
+- `handoff_id`
+- `objective`
+- `allowed_paths`
+- `expected_pr_title`
+- `branch_name`
+- `validation_commands`
+- `budget_metric`
+- `budget_ceiling`
+- `budget_enforcement_ref`
+- `timeout_seconds`
+- `cancellation_ref`
+- `authentication_runner_ref`
+- `branch_permission_ref`
+- `pr_permission_ref`
+- `duplicate_pr_check_ref`
+- `branch_collision_check_ref`
+- `codex_no_approve_merge_ref`
+- `final_ci_required`
+- `assistant_review_required`
+- `worker_may_approve`
+- `worker_may_merge`
+- `one_invocation_only`
+- `retry_authorized`
+- `background_execution_authorized`
+
+List ordering is preserved exactly as validated for `allowed_paths` and `validation_commands`; the implementation must not sort those list values during fingerprinting. Object keys are serialized with sorted keys. Canonical serialization is UTF-8 JSON using no insignificant whitespace and fixed separators equivalent to `json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+
+Before serialization, every string in the payload must already be validated as safe printable text by the authorization inspector. Non-ASCII, control characters, Unicode normalization ambiguity, invalid surrogates, or implementation-dependent Unicode handling must fail closed before fingerprinting rather than being normalized silently.
+
+The digest input is:
+
+```text
+phoenix-codex-authorization-fingerprint.v1\n
+```
+
+followed by the canonical UTF-8 JSON bytes. The digest algorithm is SHA-256, and the representation is lowercase 64-character hexadecimal.
+
+Illustrative canonical payload:
+
+```json
+{"allowed_paths":["docs/process/approved-pilot.md"],"assistant_review_required":true,"authentication_runner_ref":"runner-access-reviewed","authorization_id":"pilot-auth-example","authorizer_role":"human_operator","background_execution_authorized":false,"base_commit_sha":"0000000000000000000000000000000000000000","branch_collision_check_ref":"branch-collision-reviewed","branch_name":"codex/approved-pilot","branch_permission_ref":"branch-permission-reviewed","budget_ceiling":50000,"budget_enforcement_ref":"budget-control-reviewed","budget_metric":"tokens","cancellation_ref":"operator-cancel-reviewed","codex_no_approve_merge_ref":"no-approve-merge-reviewed","decision_state":"human_authorized_for_one_run","duplicate_pr_check_ref":"duplicate-pr-reviewed","evidence_path":"reviewed/evidence.json","expected_pr_title":"docs: update approved pilot documentation","final_ci_required":true,"handoff_id":"codex-handoff-example","handoff_path":"reviewed/handoff.json","objective":"Document the approved supervised pilot boundary.","one_invocation_only":true,"pilot_kind":"docs-only-supervised","pr_permission_ref":"pr-permission-reviewed","repository":"Phoenix-AI-Platform/phoenix-office","retry_authorized":false,"schema_version":"codex-pilot-authorization.v1","timeout_seconds":1800,"validation_commands":["PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp","python -m ruff check . --no-cache","git diff --check"],"worker_may_approve":false,"worker_may_merge":false}
+```
+
+A future implementation computes:
+
+```text
+sha256(
+  utf8("phoenix-codex-authorization-fingerprint.v1\n")
+  + utf8(canonical_json_payload)
+).hexdigest()
+```
+
+The fingerprint must not include raw prompts, rendered prompts, raw evidence, raw runtime output, credentials, tokens, machine-specific paths, usernames, home directories, environment values, config contents, private customer data, timestamps, hostnames, process IDs, attempt IDs, lifecycle states, audit metadata, or generated attempt metadata.
+
+Any schema, included-field, ordering, serialization, encoding, prefix, digest algorithm, or representation change requires a new fingerprint schema version. A future implementation must never silently change the meaning of `phoenix-codex-authorization-fingerprint.v1`.
 
 If any reviewed authorization field changes, the fingerprint changes and the previous claim cannot authorize the changed packet.
 
@@ -88,6 +155,18 @@ Minimum local-filesystem semantics, if a later implementation chooses local file
 - sanitized failure categories for operator review
 - a separate human-reviewed recovery procedure
 - no background cleanup that can make an authorization reusable
+
+Claim creation and audit mutation are privileged gate/audit operations. They must be performed only by a trusted Phoenix gate/audit component, not by the spawned Codex worker process.
+
+The claim/audit store must be outside every Codex-authorized working path and must never be exposed as an allowed resource. The Codex worker must receive no write, delete, rename, truncate, reset, permission-change, or ownership-change capability for claim records, audit records, or their parent store.
+
+Where operating-system identities, sandboxing, filesystem ACLs, or runner isolation are available, the Codex process must run under a principal that cannot mutate the claim/audit store. If technical write isolation cannot be proven before invocation, invocation is blocked.
+
+The worker may receive only the minimum sanitized attempt identity needed for execution. It must not receive storage credentials, mutable record handles, claim paths, audit paths, recovery credentials, or any capability that could alter, delete, reset, approve, merge, or mark its own attempt reusable.
+
+Recovery and lifecycle updates remain privileged gate/audit operations. Detecting unauthorized mutation, disappearance, replacement, ownership change, permission change, truncation, or corruption of claim/audit records blocks reuse and requires human-reviewed recovery.
+
+Codex must not be able to mark its own attempt reviewed, approved, mergeable, completed, recovered, reset, or reusable.
 
 ## Lifecycle States
 
