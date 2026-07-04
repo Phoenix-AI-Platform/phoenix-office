@@ -1435,7 +1435,9 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
         errors.append("snapshot contains unknown fields")
     if snapshot.get("schema_version") != CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION:
         errors.append("snapshot schema_version is invalid")
-    if not _is_attempt_id(snapshot.get("attempt_id")):
+    if not _is_safe_identifier(snapshot.get("attempt_id")) or not _is_attempt_id(
+        snapshot.get("attempt_id")
+    ):
         errors.append("snapshot attempt_id is invalid")
     if not _is_safe_identifier(snapshot.get("authorization_id")):
         errors.append("snapshot authorization_id is invalid")

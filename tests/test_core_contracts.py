@@ -1559,6 +1559,37 @@ def test_codex_pilot_attempt_snapshot_validation_rejects_cross_field_invariants(
         assert expected_error in result["snapshot_structural_errors"]
 
 
+def test_codex_pilot_attempt_snapshot_validation_matches_claim_attempt_id_safety():
+    claim, events = _valid_codex_audit_event_full_chain()
+    snapshot = _derived_snapshot_for_events(claim, events[:1])
+    unsafe_attempt_ids = [
+        "pilot-attempt-token-value",
+        "pilot-attempt-secret-value",
+        "pilot-attempt-password-value",
+        "pilot-attempt-users-value",
+        "pilot-attempt-AppData-value",
+        "pilot-attempt-C:/Users/private-name",
+    ]
+
+    for attempt_id in unsafe_attempt_ids:
+        invalid_claim = _valid_codex_claim_record()
+        invalid_claim["attempt_id"] = attempt_id
+        invalid_snapshot = dict(snapshot)
+        invalid_snapshot["attempt_id"] = attempt_id
+
+        claim_result = validate_codex_pilot_claim_record(invalid_claim)
+        snapshot_result = validate_codex_pilot_attempt_snapshot(invalid_snapshot)
+        snapshot_output = json.dumps(snapshot_result, sort_keys=True)
+
+        assert claim_result["claim_structural_valid"] is False
+        assert "attempt_id is invalid" in claim_result["claim_structural_errors"]
+        assert snapshot_result["snapshot_structural_valid"] is False
+        assert "snapshot attempt_id is invalid" in (
+            snapshot_result["snapshot_structural_errors"]
+        )
+        assert attempt_id not in snapshot_output
+
+
 def test_codex_pilot_attempt_snapshot_validation_rejects_context_partial_pairs():
     claim, events = _valid_codex_audit_event_full_chain()
     opened = _derived_snapshot_for_events(claim, events[:4])
@@ -1634,6 +1665,30 @@ def test_codex_pilot_attempt_snapshot_binding_rejects_candidate_mismatch():
         candidate[field_name] = value
 
         result = validate_codex_pilot_attempt_snapshot_binding(candidate, claim, events)
+
+        assert result["snapshot_structural_valid"] is True
+        assert result["snapshot_derivation_passed"] is True
+        assert result["snapshot_binding_passed"] is False
+        assert result["snapshot_binding_blockers"] == ["snapshot_mismatch"]
+
+
+def test_codex_pilot_attempt_snapshot_binding_rejects_sequence_state_terminal_mismatch():
+    claim, events = _valid_codex_audit_event_full_chain()
+    early_claim, event_zero, event_one = _valid_codex_audit_event_chain()
+    candidates = [
+        _derived_snapshot_for_events(early_claim, [event_zero, event_one]),
+        _derived_snapshot_for_events(claim, events),
+        _valid_terminal_snapshot("aborted", 1, recovery_category="operator_recovery"),
+    ]
+    candidates[2]["current_lifecycle_state"] = "failed"
+
+    event_sets = [events, events[:4], events]
+    for candidate, event_set in zip(candidates, event_sets, strict=True):
+        result = validate_codex_pilot_attempt_snapshot_binding(
+            candidate,
+            claim,
+            event_set,
+        )
 
         assert result["snapshot_structural_valid"] is True
         assert result["snapshot_derivation_passed"] is True
