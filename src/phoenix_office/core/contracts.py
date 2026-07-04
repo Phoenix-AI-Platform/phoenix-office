@@ -770,6 +770,26 @@ CODEX_PILOT_AUDIT_LIFECYCLE_STATES = {
     for transition in CODEX_PILOT_AUDIT_EVENT_TRANSITIONS
     for state in transition
 }
+CODEX_PILOT_ATTEMPT_SNAPSHOT_STATE_SEQUENCES = {
+    "claim_created": {0},
+    "invocation_starting": {1},
+    "invocation_started": {2},
+    "pr_opened_and_stopped": {3},
+    "completed_pending_review": {4},
+    "aborted": {1, 2, 3},
+    "failed": {1, 2, 3},
+    "cancelled": {1, 2, 3},
+    "timed_out": {1, 2, 3},
+}
+CODEX_PILOT_ATTEMPT_SNAPSHOT_NO_CONTEXT_STATES = {
+    "claim_created",
+    "invocation_starting",
+    "invocation_started",
+    "aborted",
+    "failed",
+    "cancelled",
+    "timed_out",
+}
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -1415,9 +1435,10 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
         errors.append("snapshot contains unknown fields")
     if snapshot.get("schema_version") != CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION:
         errors.append("snapshot schema_version is invalid")
-    for field_name in ["attempt_id", "authorization_id"]:
-        if not _is_safe_identifier(snapshot.get(field_name)):
-            errors.append(f"snapshot {field_name} is invalid")
+    if not _is_attempt_id(snapshot.get("attempt_id")):
+        errors.append("snapshot attempt_id is invalid")
+    if not _is_safe_identifier(snapshot.get("authorization_id")):
+        errors.append("snapshot authorization_id is invalid")
     if not _is_lower_hex(snapshot.get("authorization_fingerprint"), 64):
         errors.append("snapshot authorization_fingerprint is invalid")
     if (
@@ -1450,7 +1471,44 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
     for field_name in ["codex_approved", "codex_merged", "authorization_reusable"]:
         if type(snapshot.get(field_name)) is not bool or snapshot.get(field_name) is not False:
             errors.append(f"snapshot {field_name} must be JSON boolean false")
+    _validate_attempt_snapshot_invariants(snapshot, errors)
     return sorted(set(errors))
+
+
+def _validate_attempt_snapshot_invariants(
+    snapshot: dict[str, Any],
+    errors: list[str],
+) -> None:
+    state = snapshot.get("current_lifecycle_state")
+    sequence = snapshot.get("latest_event_sequence")
+    terminal = snapshot.get("terminal")
+    if state == "claim_not_started":
+        errors.append("snapshot current_lifecycle_state is invalid")
+    if state in CODEX_PILOT_ATTEMPT_SNAPSHOT_STATE_SEQUENCES and type(sequence) is int:
+        if sequence not in CODEX_PILOT_ATTEMPT_SNAPSHOT_STATE_SEQUENCES[state]:
+            errors.append("snapshot state sequence is invalid")
+    if (
+        state in CODEX_PILOT_AUDIT_LIFECYCLE_STATES
+        and type(terminal) is bool
+        and terminal != (state in CODEX_PILOT_AUDIT_TERMINAL_STATES)
+    ):
+        errors.append("snapshot terminal state is invalid")
+
+    branch_present = snapshot.get("branch_identity") is not None
+    pr_present = snapshot.get("pull_request_identity") is not None
+    ci_present = snapshot.get("final_ci_category") is not None
+    review_present = snapshot.get("assistant_review_verdict") is not None
+    if state in CODEX_PILOT_ATTEMPT_SNAPSHOT_NO_CONTEXT_STATES:
+        if branch_present or pr_present or ci_present or review_present:
+            errors.append("snapshot context is invalid")
+    elif state == "pr_opened_and_stopped":
+        if not branch_present or not pr_present or ci_present or review_present:
+            errors.append("snapshot context is invalid")
+    elif state == "completed_pending_review":
+        if not branch_present or not pr_present or not ci_present or not review_present:
+            errors.append("snapshot context is invalid")
+    elif state in CODEX_PILOT_AUDIT_LIFECYCLE_STATES:
+        errors.append("snapshot current_lifecycle_state is invalid")
 
 
 def _snapshot_derivation_result(
