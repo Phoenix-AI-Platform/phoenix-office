@@ -54,6 +54,7 @@ from phoenix_office.core.contracts import (
     codex_pilot_objective_digest,
     compose_codex_pilot_initial_claim_bundle,
     derive_codex_pilot_attempt_snapshot,
+    prepare_codex_pilot_initial_claim_commit,
     validate_codex_pilot_attempt_snapshot,
     validate_codex_pilot_attempt_snapshot_binding,
     validate_codex_pilot_audit_event_binding,
@@ -792,6 +793,260 @@ def test_compose_codex_pilot_initial_claim_bundle_does_not_touch_external_depend
 
     assert first == second
     assert authorization == original
+
+
+def test_prepare_codex_pilot_initial_claim_commit_is_deterministic_and_exact():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    bundle_original = copy.deepcopy(bundle)
+    authorization_original = copy.deepcopy(authorization)
+
+    first = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    second = prepare_codex_pilot_initial_claim_commit(
+        copy.deepcopy(bundle),
+        copy.deepcopy(authorization),
+    )
+
+    assert first == second
+    assert first["prepared_commit_passed"] is True
+    assert first["prepared_commit_blockers"] == []
+    prepared = first["prepared_commit"]
+    assert prepared is not None
+    assert prepared["claim_record"] == bundle["claim_record"]
+    assert prepared["sequence_zero_event"] == bundle["audit_events"][0]
+    assert prepared["snapshot"] == bundle["snapshot"]
+
+    claim_bytes = prepared["claim_record_bytes"]
+    event_bytes = prepared["sequence_zero_event_bytes"]
+    snapshot_bytes = prepared["snapshot_bytes"]
+    assert claim_bytes == json.dumps(
+        prepared["claim_record"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert event_bytes == json.dumps(
+        prepared["sequence_zero_event"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert snapshot_bytes == json.dumps(
+        prepared["snapshot"],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    assert json.loads(claim_bytes.decode("utf-8")) == prepared["claim_record"]
+    assert json.loads(event_bytes.decode("utf-8")) == prepared["sequence_zero_event"]
+    assert json.loads(snapshot_bytes.decode("utf-8")) == prepared["snapshot"]
+    for raw_bytes in [claim_bytes, event_bytes, snapshot_bytes]:
+        assert not raw_bytes.startswith(b"\xef\xbb\xbf")
+        assert not raw_bytes.endswith(b"\n")
+
+    attempt_id = bundle["claim_record"]["attempt_id"]
+    assert prepared["uniqueness_entries"] == [
+        {"attempt_id": {attempt_id: attempt_id}},
+        {
+            "authorization_id": {
+                bundle["claim_record"]["authorization_id"]: attempt_id
+            }
+        },
+        {
+            "authorization_fingerprint": {
+                bundle["claim_record"]["authorization_fingerprint"]: attempt_id
+            }
+        },
+    ]
+    assert bundle == bundle_original
+    assert authorization == authorization_original
+
+
+def test_prepare_codex_pilot_initial_claim_commit_rejects_invalid_bundle_shape_without_partial():
+    authorization = _valid_codex_authorization_dict()
+    valid_bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    invalid_cases = []
+
+    missing_field_bundle = dict(valid_bundle)
+    missing_field_bundle.pop("snapshot")
+    invalid_cases.append(missing_field_bundle)
+
+    extra_field_bundle = dict(valid_bundle)
+    extra_field_bundle["extra"] = "not-allowed"
+    invalid_cases.append(extra_field_bundle)
+
+    failed_bundle = dict(valid_bundle)
+    failed_bundle["claim_bundle_passed"] = False
+    invalid_cases.append(failed_bundle)
+
+    blocked_bundle = dict(valid_bundle)
+    blocked_bundle["claim_bundle_blockers"] = ["claim binding failed"]
+    invalid_cases.append(blocked_bundle)
+
+    extra_event_bundle = dict(valid_bundle)
+    extra_event_bundle["audit_events"] = list(valid_bundle["audit_events"]) * 2
+    invalid_cases.append(extra_event_bundle)
+
+    for candidate in invalid_cases:
+        result = prepare_codex_pilot_initial_claim_commit(candidate, authorization)
+
+        assert result == {
+            "prepared_commit_passed": False,
+            "prepared_commit_blockers": ["initial claim bundle is invalid"],
+            "prepared_commit": None,
+        }
+
+
+def test_prepare_codex_pilot_initial_claim_commit_revalidates_exact_bindings():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+
+    cross_linked_event = dict(bundle["audit_events"][0])
+    cross_linked_event["authorization_id"] = "pilot-auth-issue-999"
+    cross_linked_event["event_digest"] = codex_pilot_audit_event_digest(
+        {key: value for key, value in cross_linked_event.items() if key != "event_digest"}
+    )
+    mismatched_event_bundle = dict(bundle)
+    mismatched_event_bundle["audit_events"] = [cross_linked_event]
+    event_result = prepare_codex_pilot_initial_claim_commit(
+        mismatched_event_bundle,
+        authorization,
+    )
+    assert event_result == {
+        "prepared_commit_passed": False,
+        "prepared_commit_blockers": ["sequence zero audit event binding failed"],
+        "prepared_commit": None,
+    }
+
+    substituted_snapshot = dict(bundle["snapshot"])
+    substituted_snapshot["authorization_id"] = "pilot-auth-issue-999"
+    mismatched_snapshot_bundle = dict(bundle)
+    mismatched_snapshot_bundle["snapshot"] = substituted_snapshot
+    snapshot_result = prepare_codex_pilot_initial_claim_commit(
+        mismatched_snapshot_bundle,
+        authorization,
+    )
+    assert snapshot_result == {
+        "prepared_commit_passed": False,
+        "prepared_commit_blockers": ["snapshot binding failed"],
+        "prepared_commit": None,
+    }
+
+    nonzero_event = _valid_codex_audit_event(
+        bundle["claim_record"],
+        previous_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+        event_sequence=1,
+        previous_event_digest="a" * 64,
+    )
+    nonzero_bundle = dict(bundle)
+    nonzero_bundle["audit_events"] = [nonzero_event]
+    nonzero_result = prepare_codex_pilot_initial_claim_commit(
+        nonzero_bundle,
+        authorization,
+    )
+    assert nonzero_result == {
+        "prepared_commit_passed": False,
+        "prepared_commit_blockers": ["sequence zero audit event is invalid"],
+        "prepared_commit": None,
+    }
+
+
+def test_prepare_codex_pilot_initial_claim_commit_failure_is_sanitized():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    invalid_claim = copy.deepcopy(bundle["claim_record"])
+    invalid_claim["attempt_id"] = "pilot-attempt-token-value"
+    invalid_bundle = dict(bundle)
+    invalid_bundle["claim_record"] = invalid_claim
+
+    result = prepare_codex_pilot_initial_claim_commit(invalid_bundle, authorization)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "prepared_commit_passed": False,
+        "prepared_commit_blockers": ["claim record is invalid"],
+        "prepared_commit": None,
+    }
+    assert "token-value" not in output
+
+
+def test_prepare_codex_pilot_initial_claim_commit_preserves_utf8_non_ascii_bytes(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_authorization_packet",
+        lambda _authorization: {"authorization_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_claim_record",
+        lambda _claim: {"claim_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_claim_binding",
+        lambda _claim, _authorization: {"claim_binding_passed": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_record",
+        lambda _event: {"event_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_binding",
+        lambda _event, _claim, _previous: {"event_binding_passed": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot",
+        lambda _snapshot: {"snapshot_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot_binding",
+        lambda _snapshot, _claim, _events: {"snapshot_binding_passed": True},
+    )
+
+    bundle = {
+        "claim_bundle_passed": True,
+        "claim_bundle_blockers": [],
+        "claim_record": {
+            "attempt_id": "pilot-attempt-abc123def456",
+            "authorization_id": "pilot-auth-issue-292",
+            "authorization_fingerprint": "a" * 64,
+            "label": "café",
+        },
+        "audit_events": [{"event_sequence": 0, "title": "Résumé"}],
+        "snapshot": {"title": "東京"},
+    }
+
+    result = prepare_codex_pilot_initial_claim_commit(bundle, {"authorization": "ok"})
+    prepared = result["prepared_commit"]
+    assert prepared is not None
+    assert prepared["claim_record_bytes"].decode("utf-8").endswith('"label":"café"}')
+    assert prepared["sequence_zero_event_bytes"].decode("utf-8").endswith(
+        '"title":"Résumé"}'
+    )
+    assert prepared["snapshot_bytes"].decode("utf-8").endswith('"title":"東京"}')
+    assert b"caf\xc3\xa9" in prepared["claim_record_bytes"]
+    assert b"R\xc3\xa9sum\xc3\xa9" in prepared["sequence_zero_event_bytes"]
 
 
 def test_codex_pilot_objective_digest_known_vector():

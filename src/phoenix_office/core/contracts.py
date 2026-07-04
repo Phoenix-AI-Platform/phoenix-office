@@ -790,6 +790,18 @@ CODEX_PILOT_ATTEMPT_SNAPSHOT_NO_CONTEXT_STATES = {
     "cancelled",
     "timed_out",
 }
+CODEX_PILOT_INITIAL_CLAIM_BUNDLE_FIELDS = {
+    "claim_bundle_passed",
+    "claim_bundle_blockers",
+    "claim_record",
+    "audit_events",
+    "snapshot",
+}
+CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS = [
+    "attempt_id",
+    "authorization_id",
+    "authorization_fingerprint",
+]
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -1115,6 +1127,98 @@ def compose_codex_pilot_initial_claim_bundle(
     }
 
 
+def prepare_codex_pilot_initial_claim_commit(
+    bundle: object,
+    authorization_package: object,
+) -> dict[str, object]:
+    """Prepare one deterministic validated initial-claim commit unit."""
+    try:
+        bundle_mapping = _contract_mapping(bundle)
+    except ValueError:
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+
+    if set(bundle_mapping) != CODEX_PILOT_INITIAL_CLAIM_BUNDLE_FIELDS:
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+    if bundle_mapping.get("claim_bundle_passed") is not True:
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+    if bundle_mapping.get("claim_bundle_blockers") != []:
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+    if not isinstance(bundle_mapping.get("audit_events"), list):
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+
+    audit_events = bundle_mapping["audit_events"]
+    if len(audit_events) != 1:
+        return _prepared_initial_claim_failure("initial claim bundle is invalid")
+    sequence_zero_event = audit_events[0]
+
+    authorization_result = validate_codex_pilot_authorization_packet(
+        authorization_package
+    )
+    if not authorization_result["authorization_structural_valid"]:
+        return _prepared_initial_claim_failure("authorization package is invalid")
+
+    claim_record = bundle_mapping.get("claim_record")
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    if not claim_result["claim_structural_valid"]:
+        return _prepared_initial_claim_failure("claim record is invalid")
+
+    claim_binding = validate_codex_pilot_claim_binding(claim_record, authorization_package)
+    if not claim_binding["claim_binding_passed"]:
+        return _prepared_initial_claim_failure("claim binding failed")
+
+    event_record_result = validate_codex_pilot_audit_event_record(sequence_zero_event)
+    if not event_record_result["event_structural_valid"]:
+        return _prepared_initial_claim_failure("sequence zero audit event is invalid")
+
+    event_data = _contract_mapping(sequence_zero_event)
+    if event_data.get("event_sequence") != 0:
+        return _prepared_initial_claim_failure("sequence zero audit event is invalid")
+
+    event_binding = validate_codex_pilot_audit_event_binding(
+        sequence_zero_event,
+        claim_record,
+        None,
+    )
+    if not event_binding["event_binding_passed"]:
+        return _prepared_initial_claim_failure("sequence zero audit event binding failed")
+
+    snapshot = bundle_mapping.get("snapshot")
+    snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
+    if not snapshot_result["snapshot_structural_valid"]:
+        return _prepared_initial_claim_failure("snapshot is invalid")
+
+    snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
+        snapshot,
+        claim_record,
+        [sequence_zero_event],
+    )
+    if not snapshot_binding["snapshot_binding_passed"]:
+        return _prepared_initial_claim_failure("snapshot binding failed")
+
+    claim_data = _contract_mapping(claim_record)
+    attempt_identity = claim_data["attempt_id"]
+    uniqueness_entries = [
+        {key_name: {claim_data[key_name]: attempt_identity}}
+        for key_name in CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS
+    ]
+
+    prepared_commit = {
+        "claim_record": claim_record,
+        "sequence_zero_event": sequence_zero_event,
+        "snapshot": snapshot,
+        "claim_record_bytes": _canonical_contract_json_bytes(claim_record),
+        "sequence_zero_event_bytes": _canonical_contract_json_bytes(sequence_zero_event),
+        "snapshot_bytes": _canonical_contract_json_bytes(snapshot),
+        "uniqueness_entries": uniqueness_entries,
+    }
+
+    return {
+        "prepared_commit_passed": True,
+        "prepared_commit_blockers": [],
+        "prepared_commit": prepared_commit,
+    }
+
+
 def validate_codex_pilot_audit_event_record(event: object) -> dict[str, Any]:
     """Validate a candidate codex-pilot-audit-event.v1 record."""
     errors = codex_pilot_audit_event_structural_errors(event)
@@ -1400,12 +1504,32 @@ def _claim_result(
     }
 
 
+def _prepared_initial_claim_failure(blocker: str) -> dict[str, object]:
+    return {
+        "prepared_commit_passed": False,
+        "prepared_commit_blockers": [blocker],
+        "prepared_commit": None,
+    }
+
+
 def _contract_mapping(value: object) -> dict[str, Any]:
     if isinstance(value, SerializableContract):
         return value.to_dict()
     if isinstance(value, dict):
         return value
     raise ValueError("object is not a mapping")
+
+
+def _canonical_contract_json_bytes(record: object) -> bytes:
+    canonical_bytes = json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    if json.loads(canonical_bytes.decode("utf-8")) != _contract_mapping(record):
+        raise ValueError("canonical record bytes are invalid")
+    return canonical_bytes
 
 
 def _validate_codex_pilot_fingerprint_payload(payload: Any) -> None:

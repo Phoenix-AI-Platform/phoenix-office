@@ -16,6 +16,20 @@ validated initial bundle
 
 A future trusted Phoenix gate/storage component must expose a backend-neutral `create_initial_claim_bundle(bundle)` operation.
 
+Before any durable adapter exists, in-memory preparation is performed by:
+
+```python
+prepare_codex_pilot_initial_claim_commit(
+    bundle: object,
+    authorization_package: object,
+) -> dict[str, object]
+```
+
+This helper only accepts the exact successful shape produced by `compose_codex_pilot_initial_claim_bundle(...)`, revalidates authorization + claim + sequence-zero event + snapshot bindings, and returns either:
+
+- one deterministic prepared unit containing claim/event/snapshot records, canonical UTF-8 JSON bytes for each record, and exactly three ordered uniqueness mappings (`attempt_id`, `authorization_id`, `authorization_fingerprint`) to the same immutable `attempt_id`; or
+- a fail-closed result with fixed sanitized blockers and no partial prepared bytes/state.
+
 Inputs:
 
 - `bundle` must be the successful output of `compose_codex_pilot_initial_claim_bundle(...)`
