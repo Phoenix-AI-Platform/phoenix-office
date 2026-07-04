@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ from phoenix_office.core.contracts import (
     codex_pilot_audit_event_digest,
     codex_pilot_authorization_fingerprint,
     codex_pilot_objective_digest,
+    compose_codex_pilot_initial_claim_bundle,
     derive_codex_pilot_attempt_snapshot,
     validate_codex_pilot_attempt_snapshot,
     validate_codex_pilot_attempt_snapshot_binding,
@@ -624,9 +626,114 @@ def test_codex_pilot_claim_validation_rejects_unsorted_allowed_paths():
     assert "allowed_paths are invalid" in result["claim_structural_errors"]
 
 
+def test_compose_codex_pilot_initial_claim_bundle_is_deterministic_and_exact():
+    authorization = _valid_codex_authorization_dict()
+    original = copy.deepcopy(authorization)
+    attempt_id = "pilot-attempt-abc123def456"
+
+    first = compose_codex_pilot_initial_claim_bundle(authorization, attempt_id)
+    second = compose_codex_pilot_initial_claim_bundle(dict(authorization), attempt_id)
+    expected_claim = _valid_codex_claim_record(authorization)
+    expected_event = _valid_codex_audit_event(expected_claim)
+    expected_snapshot = derive_codex_pilot_attempt_snapshot(
+    expected_claim,
+    [expected_event],
+    )["snapshot"]
+
+    assert first == second
+    assert first["claim_bundle_passed"] is True
+    assert first["claim_bundle_blockers"] == []
+    assert first["claim_record"] == expected_claim
+    assert first["claim_record"]["authorization_fingerprint"] == (
+    "d4a8b6a9f0b5b289534c5026a2e640ab8e30fba0549a1d9cd37056b60535d1ab"
+    )
+    assert first["claim_record"]["objective_digest"] == (
+    "ecb05382c1182a9afab0b6f9d41b3f5aedbe69ef378e0694396abd2037586feb"
+    )
+    assert first["claim_record"]["allowed_paths"] == authorization["allowed_paths"]
+    assert first["claim_record"]["validation_commands"] == authorization[
+    "validation_commands"
+    ]
+    assert first["claim_record"]["allowed_paths"] is not authorization["allowed_paths"]
+    assert first["claim_record"]["validation_commands"] is not authorization[
+    "validation_commands"
+    ]
+    assert first["audit_events"] == [expected_event]
+    assert first["audit_events"][0]["event_digest"] == (
+    "6249aadd0ac77258b4f295910ce9e8b1f552742c4bb6e36ee0f3cce1193ba8e3"
+    )
+    assert first["snapshot"] == expected_snapshot
+    assert authorization == original
+
+
+def test_compose_codex_pilot_initial_claim_bundle_rejects_invalid_authorization():
+    authorization = _valid_codex_authorization_dict()
+    authorization["allowed_paths"] = [
+    "docs/process/zeta.md",
+    "docs/process/alpha.md",
+    ]
+    attempt_id = "pilot-attempt-abc123def456"
+
+    result = compose_codex_pilot_initial_claim_bundle(authorization, attempt_id)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result["claim_bundle_passed"] is False
+    assert result["claim_bundle_blockers"] == ["authorization package is invalid"]
+    assert result["claim_record"] is None
+    assert result["audit_events"] is None
+    assert result["snapshot"] is None
+    assert "zeta.md" not in output
+
+
+def test_compose_codex_pilot_initial_claim_bundle_rejects_invalid_attempt_id():
+    authorization = _valid_codex_authorization_dict()
+    attempt_id = "pilot-attempt-token-value"
+
+    result = compose_codex_pilot_initial_claim_bundle(authorization, attempt_id)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result["claim_bundle_passed"] is False
+    assert result["claim_bundle_blockers"] == ["attempt_id is invalid"]
+    assert result["claim_record"] is None
+    assert result["audit_events"] is None
+    assert result["snapshot"] is None
+    assert "token-value" not in output
+
+
+def test_compose_codex_pilot_initial_claim_bundle_does_not_touch_external_dependencies(
+    monkeypatch,
+):
+    authorization = _valid_codex_authorization_dict()
+    original = copy.deepcopy(authorization)
+
+    class _Sentinel:
+        def __getattr__(self, name):
+            raise AssertionError(name)
+
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(contracts, "datetime", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "Path", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "random", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "subprocess", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "socket", _Sentinel(), raising=False)
+
+    first = compose_codex_pilot_initial_claim_bundle(
+    authorization,
+    "pilot-attempt-abc123def456",
+    )
+    second = compose_codex_pilot_initial_claim_bundle(
+    authorization,
+    "pilot-attempt-abc123def456",
+    )
+
+    assert first == second
+    assert authorization == original
+
+
 def test_codex_pilot_objective_digest_known_vector():
     assert codex_pilot_objective_digest(
-        "Document the supervised Codex pilot authorization packet."
+    "Document the supervised Codex pilot authorization packet."
     ) == "ecb05382c1182a9afab0b6f9d41b3f5aedbe69ef378e0694396abd2037586feb"
 
 

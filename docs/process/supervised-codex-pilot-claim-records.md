@@ -6,7 +6,7 @@ This document defines the exact v1 record schemas for a future supervised Codex 
 
 The schemas preserve separate meanings for authorization identity, atomic claim creation, invocation lifecycle, post-run review, and merge authority. A valid record never means Codex may run, approve, merge, or reuse an authorization unless a later reviewed implementation explicitly adds that behavior behind the required gates.
 
-The repository includes pure in-memory validation helpers for candidate `codex-pilot-claim.v1` records and their binding to an already-inspected authorization packet. Those helpers do not read files, write files, create claims, append events, inspect storage, or consume authorization.
+The repository includes pure in-memory validation helpers for candidate `codex-pilot-claim.v1` records and their binding to an already-inspected authorization packet. It also includes a pure deterministic initial-claim bundle composer that creates the claim record, sequence-zero audit event, and derived snapshot in memory only. Those helpers do not read files, write files, create claims, append events, inspect storage, invoke Codex, or consume authorization.
 
 ## Schema Versions
 
@@ -135,7 +135,7 @@ Schema version: `codex-pilot-audit-event.v1`.
 
 An audit event is append-only or monotonic. It binds to the immutable claim and advances the lifecycle by exactly one permitted transition.
 
-The current implementation includes pure deterministic helpers for candidate audit-event validation, digesting, and claim/previous-event binding. These helpers inspect explicit in-memory records only. They do not append events, write files, persist state, consume authorization, recover storage, invoke Codex, access GitHub or the network, create branches or PRs, approve, merge, retry, schedule, or run background work.
+The current implementation includes pure deterministic helpers for candidate audit-event validation, digesting, claim/previous-event binding, and initial bundle composition. These helpers inspect explicit in-memory records only. They do not append events, write files, persist state, consume authorization, recover storage, invoke Codex, access GitHub or the network, create branches or PRs, approve, merge, retry, schedule, or run background work.
 
 Required fields:
 
