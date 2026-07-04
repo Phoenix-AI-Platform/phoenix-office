@@ -6,7 +6,7 @@ This document defines the exact v1 record schemas for a future supervised Codex 
 
 The schemas preserve separate meanings for authorization identity, atomic claim creation, invocation lifecycle, post-run review, and merge authority. A valid record never means Codex may run, approve, merge, or reuse an authorization unless a later reviewed implementation explicitly adds that behavior behind the required gates.
 
-The repository includes pure in-memory validation helpers for candidate `codex-pilot-claim.v1` records and their binding to an already-inspected authorization packet. It also includes a pure deterministic initial-claim bundle composer that creates the claim record, sequence-zero audit event, and derived snapshot in memory only. Those helpers do not read files, write files, create claims, append events, inspect storage, invoke Codex, or consume authorization.
+The repository includes pure in-memory validation helpers for candidate `codex-pilot-claim.v1` records and their binding to an already-inspected authorization packet. It also includes a pure deterministic initial-claim bundle composer that creates the claim record, sequence-zero audit event, and derived snapshot in memory only. Those helpers do not read files, write files, create claims, append events, inspect storage, invoke Codex, or consume authorization. The durable `create_initial_claim_bundle(bundle)` storage contract is defined separately in [Supervised Codex Pilot Initial Claim Storage Contract](supervised-codex-pilot-storage.md), and that contract requires the exact inspected authorization packet or an immutable trusted lookup of it before create or read, plus the exact `attempt_id` read selector and backend durability barriers.
 
 ## Schema Versions
 
@@ -116,6 +116,8 @@ codex-pilot-objective-digest.v1\n
 followed by the exact UTF-8 bytes of the validated one-line objective string. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex. No normalization, trimming, or rewriting occurs during digesting; the string must already have passed authorization validation.
 
 Later independent verification requires the original reviewed authorization packet or an equivalent immutable reviewed authorization record to remain available outside the claim store. The claim record intentionally does not copy prompts, raw evidence, secrets, runtime output, or machine data.
+
+Any storage-backed create or read operation must bind the claim record to that exact reviewed authorization context; it must not reconstruct authorization from the claim record alone, trust fingerprint equality alone, or re-read a mutable source after validation.
 
 ## Attempt ID
 
@@ -343,7 +345,7 @@ Diagnostics must not echo unsafe values, raw prompts, raw evidence, credentials,
 
 ## Storage Neutrality
 
-These schemas are storage-neutral. A later adapter may use a filesystem, database, service, or other durable store only if it proves:
+These schemas are storage-neutral. The durable `create_initial_claim_bundle(bundle)` contract and its backend-equivalent requirements are defined in [Supervised Codex Pilot Initial Claim Storage Contract](supervised-codex-pilot-storage.md). A later adapter may use a filesystem, database, service, or other durable store only if it proves:
 
 - exclusive create or compare-and-set semantics
 - durable write confirmation
