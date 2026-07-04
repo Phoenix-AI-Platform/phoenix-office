@@ -32,7 +32,9 @@ Integers must be JSON integers, not booleans. Booleans must be actual JSON boole
 
 Schema version: `codex-pilot-claim.v1`.
 
-The claim record is immutable. It binds an authorization fingerprint to exactly one attempt and starts in lifecycle state `claim_created`. It stores a safe authorization identity projection directly, so a reviewer can prove the claim belongs to the exact validated fingerprint without storing prompts, raw evidence, credentials, runtime output, or machine-specific data.
+The claim record is immutable. It binds an authorization fingerprint to exactly one attempt and starts in lifecycle state `claim_created`. Atomic claim creation must durably create both the immutable claim record and audit event sequence `0` for `claim_not_started -> claim_created` as one indivisible operation. No valid claimed attempt may exist without both records.
+
+The claim stores a safe authorization identity projection directly. That projection is not a second identity system. It is a review aid that must be proven against the existing `phoenix-codex-authorization-fingerprint.v1` identity before the claim is created.
 
 Required fields and JSON types:
 
@@ -76,6 +78,40 @@ Required fields and JSON types:
 
 The claim record must never contain later lifecycle state, CI state, review state, PR result state, timestamps that affect identity, hostnames, process IDs, runner paths, mutable status fields, raw prompts, rendered prompts, raw evidence, credentials, tokens, environment values, or private customer data.
 
+## Claim Fingerprint Proof
+
+Future claim construction must use this exact proof procedure:
+
+1. Consume the exact in-memory `CodexPilotAuthorizationPacket` object that passed authorization inspection.
+2. Recompute `phoenix-codex-authorization-fingerprint.v1` from that object using the existing fingerprint contract.
+3. Require exact equality between the recomputed fingerprint and the claim record `authorization_fingerprint`.
+4. Bind every duplicated claim projection field exactly to the same authorization object:
+   - `authorization_id`
+   - `handoff_id`
+   - `repository`
+   - `pilot_kind`
+   - `base_commit_sha`
+   - `branch_name`
+   - `expected_pr_title`
+   - `allowed_paths`
+   - `validation_commands`
+   - `budget_metric`
+   - `budget_ceiling`
+   - `timeout_seconds`
+   - every control-reference identifier
+   - every required safety boolean
+5. Compute `objective_digest` from the same validated safe authorization `objective` string.
+
+`objective_digest` uses schema `codex-pilot-objective-digest.v1`. The digest input is UTF-8 bytes of:
+
+```text
+codex-pilot-objective-digest.v1\n
+```
+
+followed by the exact UTF-8 bytes of the validated one-line objective string. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex. No normalization, trimming, or rewriting occurs during digesting; the string must already have passed authorization validation.
+
+Later independent verification requires the original reviewed authorization packet or an equivalent immutable reviewed authorization record to remain available outside the claim store. The claim record intentionally does not copy prompts, raw evidence, secrets, runtime output, or machine data.
+
 ## Attempt ID
 
 `attempt_id` is created only by the trusted Phoenix gate during atomic claim creation. Codex must not provide, choose, rewrite, delete, recover, or reuse it.
@@ -103,37 +139,53 @@ Required fields:
 - `event_sequence`: integer, zero-based, contiguous, no gaps, no duplicates
 - `previous_lifecycle_state`: lifecycle enum string
 - `next_lifecycle_state`: lifecycle enum string
-- `event_category`: bounded enum string from the transition table
-- `result_category`: bounded enum string
-- `actor_role`: sanitized actor role enum
-- `codex_approved`: boolean, exactly `false` when present
-- `codex_merged`: boolean, exactly `false` when present
+- `event_category`: exact enum string from the transition matrix
+- `result_category`: exact enum string from the transition matrix
+- `actor_role`: exact actor role enum string from the transition matrix
+- `codex_approved`: boolean, exactly `false`
+- `codex_merged`: boolean, exactly `false`
+- `previous_event_digest`: `null` for sequence `0`; lowercase 64-character hex string for every later event
+- `event_digest`: lowercase 64-character hex string over the event digest payload
 
 Optional fields are allowed only when the transition table permits them:
 
-- `branch_identity`: safe bounded branch identity
-- `pull_request_identity`: safe bounded PR identity
-- `usage_category`: bounded enum
-- `timeout_category`: bounded enum
-- `cancellation_category`: bounded enum
-- `final_ci_category`: bounded enum
-- `assistant_review_verdict`: bounded enum
-- `recovery_category`: bounded enum
-- `previous_event_digest`: lowercase 64-character hex string when event chaining is enabled
+- `branch_identity`: branch identity string matching `codex/[A-Za-z0-9._/-]{1,80}` with no spaces, `..`, `@{`, trailing slash, repeated slash, component beginning with `.`, component ending with `.lock` case-insensitively, secret markers, or machine markers
+- `pull_request_identity`: string matching `pr-[1-9][0-9]{0,9}`
+- `usage_category`: one of `within_budget`, `budget_exceeded`, `usage_unknown`
+- `timeout_category`: one of `timeout_not_reached`, `timeout_reached`, `timeout_unknown`
+- `cancellation_category`: one of `operator_cancelled`, `no_cancellation_requested`, `cancellation_unknown`
+- `final_ci_category`: one of `passed`, `failed`, `pending`, `unknown`
+- `assistant_review_verdict`: one of `approved`, `changes_requested`, `commented`, `pending`, `unknown`
+- `recovery_category`: one of `durable_claim_without_invocation`, `runner_crash`, `operator_recovery`, `storage_uncertain`
 
 Unknown fields, missing required fields, optional fields on inapplicable transitions, wrong JSON types, invalid enums, invalid previous-state binding, or unsafe values fail closed.
 
+Exact result categories are:
+
+- `claim_created`
+- `started`
+- `opened_pr`
+- `completed_pending_review`
+- `aborted`
+- `failed`
+- `cancelled`
+- `timed_out`
+
+Fields with value `null` are permitted only where the transition matrix explicitly requires `null`. Otherwise an inapplicable field must be absent. Validators reject silently ignored fields.
+
 ## Event Chaining
 
-If a storage adapter supports event chaining, the digest schema is `codex-pilot-audit-event-digest.v1`. The digest input is UTF-8 bytes of:
+Event chaining is mandatory for v1. The digest schema is `codex-pilot-audit-event-digest.v1`. Every event must include `previous_event_digest` and `event_digest`.
+
+The digest input is UTF-8 bytes of:
 
 ```text
 codex-pilot-audit-event-digest.v1\n
 ```
 
-followed by compact canonical JSON for the event object with sorted keys, separators equivalent to `json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`, and no `previous_event_digest` field included in the digest payload. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex.
+followed by compact canonical JSON for the event object with sorted keys, separators equivalent to `json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`. The canonical digest payload contains every event field, including `previous_event_digest`, except only the generated `event_digest` field. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex.
 
-For `event_sequence == 0`, `previous_event_digest` must be absent. For later events, it must equal the digest of the immediately preceding event. If a future implementation omits event chaining, it must still enforce exact sequence integers, previous-state binding, and append-only ordering.
+For `event_sequence == 0`, `previous_event_digest` must be JSON `null`. For every later event, `previous_event_digest` must equal the `event_digest` of the immediately preceding event. Missing, duplicate, altered, mismatched, or stale links fail closed.
 
 ## Lifecycle States And Transitions
 
@@ -150,31 +202,37 @@ Lifecycle states are fixed:
 - `timed_out`
 - `completed_pending_review`
 
-Transition table:
+Transition matrix:
 
-| Previous | Next | Event category | Required context | Forbidden context | Terminal | Recovery finalizing |
-| --- | --- | --- | --- | --- | --- | --- |
-| `claim_not_started` | `claim_created` | `claim_created` | immutable claim exists | branch, PR, CI, review | no | no |
-| `claim_created` | `invocation_starting` | `invocation_starting` | none | branch, PR, CI, review | no | no |
-| `claim_created` | `aborted` | `claim_aborted` | `recovery_category` or bounded result | branch, PR, CI, review | yes | yes |
-| `claim_created` | `failed` | `claim_failed` | bounded result | branch, PR, CI, review | yes | yes |
-| `claim_created` | `cancelled` | `claim_cancelled` | `cancellation_category` | branch, PR, CI, review | yes | yes |
-| `claim_created` | `timed_out` | `claim_timed_out` | `timeout_category` | branch, PR, CI, review | yes | yes |
-| `invocation_starting` | `invocation_started` | `invocation_started` | none | PR, CI, review | no | no |
-| `invocation_starting` | `aborted` | `invocation_start_aborted` | bounded result | PR, CI, review | yes | yes |
-| `invocation_starting` | `failed` | `invocation_start_failed` | bounded result | PR, CI, review | yes | yes |
-| `invocation_starting` | `cancelled` | `invocation_start_cancelled` | `cancellation_category` | PR, CI, review | yes | yes |
-| `invocation_starting` | `timed_out` | `invocation_start_timed_out` | `timeout_category` | PR, CI, review | yes | yes |
-| `invocation_started` | `pr_opened_and_stopped` | `pr_opened_and_stopped` | `branch_identity`, `pull_request_identity` | CI verdict, review verdict | no | no |
-| `invocation_started` | `aborted` | `invocation_aborted` | bounded result | final CI, review | yes | yes |
-| `invocation_started` | `failed` | `invocation_failed` | bounded result | final CI, review | yes | yes |
-| `invocation_started` | `cancelled` | `invocation_cancelled` | `cancellation_category` | final CI, review | yes | yes |
-| `invocation_started` | `timed_out` | `invocation_timed_out` | `timeout_category` | final CI, review | yes | yes |
-| `pr_opened_and_stopped` | `completed_pending_review` | `completed_pending_review` | `final_ci_category`, `assistant_review_verdict`, `codex_approved:false`, `codex_merged:false` | retry or reuse fields | yes | no |
+| Previous | Next | Event category | Result | Actor | Required optional fields | Required absent optional fields | Terminal | Recovery finalizing |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `claim_not_started` | `claim_created` | `claim_created` | `claim_created` | `phoenix_gate` | none | all optional fields | no | no |
+| `claim_created` | `invocation_starting` | `invocation_starting` | `started` | `phoenix_gate` | none | all optional fields | no | no |
+| `claim_created` | `aborted` | `claim_aborted` | `aborted` | `phoenix_audit` | `recovery_category` | branch, PR, usage, timeout, cancellation, CI, review | yes | yes |
+| `claim_created` | `failed` | `claim_failed` | `failed` | `phoenix_audit` | `recovery_category` | branch, PR, usage, timeout, cancellation, CI, review | yes | yes |
+| `claim_created` | `cancelled` | `claim_cancelled` | `cancelled` | `phoenix_audit` | `cancellation_category` | branch, PR, usage, timeout, recovery, CI, review | yes | yes |
+| `claim_created` | `timed_out` | `claim_timed_out` | `timed_out` | `phoenix_audit` | `timeout_category` | branch, PR, usage, cancellation, recovery, CI, review | yes | yes |
+| `invocation_starting` | `invocation_started` | `invocation_started` | `started` | `phoenix_gate` | none | branch, PR, usage, timeout, cancellation, recovery, CI, review | no | no |
+| `invocation_starting` | `aborted` | `invocation_start_aborted` | `aborted` | `phoenix_audit` | `recovery_category` | branch, PR, usage, timeout, cancellation, CI, review | yes | yes |
+| `invocation_starting` | `failed` | `invocation_start_failed` | `failed` | `phoenix_audit` | `recovery_category` | branch, PR, usage, timeout, cancellation, CI, review | yes | yes |
+| `invocation_starting` | `cancelled` | `invocation_start_cancelled` | `cancelled` | `phoenix_audit` | `cancellation_category` | branch, PR, usage, timeout, recovery, CI, review | yes | yes |
+| `invocation_starting` | `timed_out` | `invocation_start_timed_out` | `timed_out` | `phoenix_audit` | `timeout_category` | branch, PR, usage, cancellation, recovery, CI, review | yes | yes |
+| `invocation_started` | `pr_opened_and_stopped` | `pr_opened_and_stopped` | `opened_pr` | `phoenix_gate` | `branch_identity`, `pull_request_identity`, `usage_category` | timeout, cancellation, recovery, CI, review | no | no |
+| `invocation_started` | `aborted` | `invocation_aborted` | `aborted` | `phoenix_audit` | `usage_category`, `recovery_category` | branch, PR, timeout, cancellation, CI, review | yes | yes |
+| `invocation_started` | `failed` | `invocation_failed` | `failed` | `phoenix_audit` | `usage_category`, `recovery_category` | branch, PR, timeout, cancellation, CI, review | yes | yes |
+| `invocation_started` | `cancelled` | `invocation_cancelled` | `cancelled` | `phoenix_audit` | `usage_category`, `cancellation_category` | branch, PR, timeout, recovery, CI, review | yes | yes |
+| `invocation_started` | `timed_out` | `invocation_timed_out` | `timed_out` | `phoenix_audit` | `usage_category`, `timeout_category` | branch, PR, cancellation, recovery, CI, review | yes | yes |
+| `pr_opened_and_stopped` | `completed_pending_review` | `completed_pending_review` | `completed_pending_review` | `phoenix_audit` | `final_ci_category`, `assistant_review_verdict` | usage, timeout, cancellation, recovery | yes | no |
+
+`codex_approved:false` and `codex_merged:false` are required on every event, including sequence `0`. The final transition requires `final_ci_category` to be `passed`, `failed`, `pending`, or `unknown`, and `assistant_review_verdict` to be `approved`, `changes_requested`, `commented`, `pending`, or `unknown`. Earlier transitions must omit both fields.
+
+When an optional category is absent by the matrix, the field must be absent rather than present as `null` or a placeholder value.
+
+Matrix shorthand maps to exact field names: branch = `branch_identity`; PR = `pull_request_identity`; usage = `usage_category`; timeout = `timeout_category`; cancellation = `cancellation_category`; recovery = `recovery_category`; CI = `final_ci_category`; review = `assistant_review_verdict`.
 
 No transition may return to `claim_not_started`, delete a claim, reset an attempt, or make an authorization reusable. Terminal states remain consumed. Recovery may append only a permitted finalizing transition from the current non-terminal state and may never restart invocation.
 
-Duplicate events are rejected unless a future storage adapter defines an exact idempotency key consisting of the full canonical event digest, sequence number, attempt ID, and fingerprint. An idempotent duplicate may be recognized as already recorded, but it must not create a second event, skip a sequence number, or diverge history.
+Duplicate events are rejected in v1. A later idempotency design requires a new schema version. No validator may accept a duplicate append, skip a sequence number, or diverge history under `codex-pilot-audit-event.v1`.
 
 ## Attempt Snapshot
 
@@ -188,13 +246,13 @@ Required snapshot fields:
 - `attempt_id`: attempt identifier
 - `authorization_id`: authorization identifier
 - `authorization_fingerprint`: lowercase 64-character hex string
-- `latest_event_sequence`: integer
+- `latest_event_sequence`: integer, `0` for a newly claimed attempt with only the required claim-created event
 - `current_lifecycle_state`: lifecycle enum string
 - `terminal`: boolean
-- `branch_identity`: safe bounded branch identity or `null`
-- `pull_request_identity`: safe bounded PR identity or `null`
-- `final_ci_category`: bounded enum or `null`
-- `assistant_review_verdict`: bounded enum or `null`
+- `branch_identity`: branch identity using the audit-event branch format, or JSON `null` before a branch is known
+- `pull_request_identity`: PR identity using the audit-event PR format, or JSON `null` before a PR is known
+- `final_ci_category`: one of `passed`, `failed`, `pending`, `unknown`, or JSON `null` before final CI is known
+- `assistant_review_verdict`: one of `approved`, `changes_requested`, `commented`, `pending`, `unknown`, or JSON `null` before assistant review is known
 - `codex_approved`: boolean, exactly `false`
 - `codex_merged`: boolean, exactly `false`
 - `authorization_reusable`: boolean, exactly `false`
@@ -203,8 +261,9 @@ Derivation rules:
 
 - Validate the claim first.
 - Validate every event against the claim.
-- Sort by `event_sequence`.
-- Require no gaps, duplicates, or reordering.
+- Require the authoritative event stream to already be strictly increasing by `event_sequence`; validators must not sort a supplied stream to hide reordered input.
+- Require the first event to be sequence `0` with `claim_not_started -> claim_created`.
+- Require no gaps, duplicates, replacement, or reordering.
 - Require every `previous_lifecycle_state` to match the prior derived state.
 - Apply transitions exactly from the table.
 - Derive current state from the final event.
@@ -214,12 +273,14 @@ If a stored snapshot disagrees with the immutable claim or ordered events, the s
 
 ## Event Ordering And Integrity
 
-`event_sequence` is zero-based and monotonically increasing. Required behavior:
+`event_sequence` is zero-based and monotonically increasing. Sequence `0` is the mandatory `claim_not_started -> claim_created` event created atomically with the immutable claim. Required behavior:
 
 - no gaps
 - no duplicates
 - no reordering
 - no replacement
+- exact event-digest verification
+- exact previous-event-digest chaining
 - exact previous-state binding
 - exact attempt-ID binding
 - exact authorization-ID binding
