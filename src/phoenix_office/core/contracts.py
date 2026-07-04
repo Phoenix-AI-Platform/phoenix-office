@@ -951,7 +951,7 @@ def compose_codex_pilot_initial_claim_bundle(
     authorization_result = validate_codex_pilot_authorization_packet(authorization_package)
     if not authorization_result["authorization_structural_valid"]:
         blockers.append("authorization package is invalid")
-    if not _is_attempt_id(attempt_id):
+    if not _is_exact_codex_pilot_attempt_id(attempt_id):
         blockers.append("attempt_id is invalid")
     if blockers:
         return {
@@ -1608,9 +1608,7 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
         errors.append("snapshot contains unknown fields")
     if snapshot.get("schema_version") != CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION:
         errors.append("snapshot schema_version is invalid")
-    if not _is_safe_identifier(snapshot.get("attempt_id")) or not _is_attempt_id(
-        snapshot.get("attempt_id")
-    ):
+    if not _is_exact_codex_pilot_attempt_id(snapshot.get("attempt_id")):
         errors.append("snapshot attempt_id is invalid")
     if not _is_safe_identifier(snapshot.get("authorization_id")):
         errors.append("snapshot authorization_id is invalid")
@@ -1826,7 +1824,7 @@ def _validate_claim_types_and_shapes(
     for field_name in CODEX_PILOT_CLAIM_REFERENCE_FIELDS:
         if not _is_safe_identifier(record.get(field_name)):
             errors.append(f"{field_name} is invalid")
-    if not _is_attempt_id(record.get("attempt_id")):
+    if not _is_exact_codex_pilot_attempt_id(record.get("attempt_id")):
         errors.append("attempt_id is invalid")
     if not _is_lower_hex(record.get("authorization_fingerprint"), 64):
         errors.append("authorization_fingerprint is invalid")
@@ -1939,6 +1937,10 @@ def _is_attempt_id(value: object) -> bool:
         is not None
         and not _contains_unsafe_marker(value)
     )
+
+
+def _is_exact_codex_pilot_attempt_id(value: object) -> bool:
+    return _is_safe_identifier(value) and _is_attempt_id(value)
 
 
 def _is_lower_hex(value: object, length: int) -> bool:

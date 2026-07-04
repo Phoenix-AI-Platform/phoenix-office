@@ -663,6 +663,60 @@ def test_compose_codex_pilot_initial_claim_bundle_is_deterministic_and_exact():
     "6249aadd0ac77258b4f295910ce9e8b1f552742c4bb6e36ee0f3cce1193ba8e3"
     )
     assert first["snapshot"] == expected_snapshot
+    assert validate_codex_pilot_claim_record(first["claim_record"]) == {
+        "claim_binding_passed": False,
+        "claim_structural_errors": [],
+        "claim_structural_valid": True,
+    }
+    assert validate_codex_pilot_claim_binding(
+        first["claim_record"],
+        authorization,
+    ) == {
+        "claim_binding_blockers": [],
+        "claim_binding_passed": True,
+        "claim_structural_errors": [],
+        "claim_structural_valid": True,
+        "authorization_structural_errors": [],
+        "authorization_structural_valid": True,
+    }
+    assert validate_codex_pilot_audit_event_record(first["audit_events"][0]) == {
+        "event_binding_blockers": [],
+        "event_binding_passed": False,
+        "event_structural_errors": [],
+        "event_structural_valid": True,
+    }
+    assert validate_codex_pilot_audit_event_binding(
+        first["audit_events"][0],
+        first["claim_record"],
+        None,
+    ) == {
+        "claim_structural_valid": True,
+        "event_binding_blockers": [],
+        "event_binding_passed": True,
+        "event_structural_errors": [],
+        "event_structural_valid": True,
+        "previous_event_structural_valid": None,
+    }
+    assert validate_codex_pilot_attempt_snapshot(first["snapshot"]) == {
+        "snapshot_binding_blockers": [],
+        "snapshot_binding_passed": False,
+        "snapshot_structural_errors": [],
+        "snapshot_structural_valid": True,
+    }
+    assert validate_codex_pilot_attempt_snapshot_binding(
+        first["snapshot"],
+        first["claim_record"],
+        first["audit_events"],
+    ) == {
+        "claim_structural_valid": True,
+        "event_chain_valid": True,
+        "snapshot_binding_blockers": [],
+        "snapshot_binding_passed": True,
+        "snapshot_derivation_blockers": [],
+        "snapshot_derivation_passed": True,
+        "snapshot_structural_errors": [],
+        "snapshot_structural_valid": True,
+    }
     assert authorization == original
 
 
@@ -687,17 +741,26 @@ def test_compose_codex_pilot_initial_claim_bundle_rejects_invalid_authorization(
 
 def test_compose_codex_pilot_initial_claim_bundle_rejects_invalid_attempt_id():
     authorization = _valid_codex_authorization_dict()
-    attempt_id = "pilot-attempt-token-value"
+    unsafe_attempt_ids = [
+        "pilot-attempt-abc123defhome456",
+        "pilot-attempt-abc123defHome456",
+        "pilot-attempt-abc123deftoken456",
+        "pilot-attempt-abc123defsecret456",
+        "pilot-attempt-abc123defpassword456",
+        "pilot-attempt-abc123defusers456",
+        "pilot-attempt-abc123defappdata456",
+    ]
 
-    result = compose_codex_pilot_initial_claim_bundle(authorization, attempt_id)
-    output = json.dumps(result, sort_keys=True)
+    for attempt_id in unsafe_attempt_ids:
+        result = compose_codex_pilot_initial_claim_bundle(authorization, attempt_id)
+        output = json.dumps(result, sort_keys=True)
 
-    assert result["claim_bundle_passed"] is False
-    assert result["claim_bundle_blockers"] == ["attempt_id is invalid"]
-    assert result["claim_record"] is None
-    assert result["audit_events"] is None
-    assert result["snapshot"] is None
-    assert "token-value" not in output
+        assert result["claim_bundle_passed"] is False
+        assert result["claim_bundle_blockers"] == ["attempt_id is invalid"]
+        assert result["claim_record"] is None
+        assert result["audit_events"] is None
+        assert result["snapshot"] is None
+        assert attempt_id not in output
 
 
 def test_compose_codex_pilot_initial_claim_bundle_does_not_touch_external_dependencies(
@@ -1670,12 +1733,14 @@ def test_codex_pilot_attempt_snapshot_validation_matches_claim_attempt_id_safety
     claim, events = _valid_codex_audit_event_full_chain()
     snapshot = _derived_snapshot_for_events(claim, events[:1])
     unsafe_attempt_ids = [
-        "pilot-attempt-token-value",
-        "pilot-attempt-secret-value",
-        "pilot-attempt-password-value",
-        "pilot-attempt-users-value",
-        "pilot-attempt-AppData-value",
-        "pilot-attempt-C:/Users/private-name",
+        "pilot-attempt-abc123defhome456",
+        "pilot-attempt-abc123defHome456",
+        "pilot-attempt-abc123deftoken456",
+        "pilot-attempt-abc123defsecret456",
+        "pilot-attempt-abc123defpassword456",
+        "pilot-attempt-abc123defusers456",
+        "pilot-attempt-abc123defappdata456",
+        "pilot-attempt-abc123defAppData456",
     ]
 
     for attempt_id in unsafe_attempt_ids:
