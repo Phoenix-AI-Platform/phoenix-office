@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
@@ -1195,7 +1196,11 @@ def prepare_codex_pilot_initial_claim_commit(
     if not snapshot_binding["snapshot_binding_passed"]:
         return _prepared_initial_claim_failure("snapshot binding failed")
 
-    claim_data = _contract_mapping(claim_record)
+    prepared_claim_record = deepcopy(claim_record)
+    prepared_sequence_zero_event = deepcopy(sequence_zero_event)
+    prepared_snapshot = deepcopy(snapshot)
+
+    claim_data = _contract_mapping(prepared_claim_record)
     attempt_identity = claim_data["attempt_id"]
     uniqueness_entries = [
         {key_name: {claim_data[key_name]: attempt_identity}}
@@ -1203,12 +1208,14 @@ def prepare_codex_pilot_initial_claim_commit(
     ]
 
     prepared_commit = {
-        "claim_record": claim_record,
-        "sequence_zero_event": sequence_zero_event,
-        "snapshot": snapshot,
-        "claim_record_bytes": _canonical_contract_json_bytes(claim_record),
-        "sequence_zero_event_bytes": _canonical_contract_json_bytes(sequence_zero_event),
-        "snapshot_bytes": _canonical_contract_json_bytes(snapshot),
+        "claim_record": prepared_claim_record,
+        "sequence_zero_event": prepared_sequence_zero_event,
+        "snapshot": prepared_snapshot,
+        "claim_record_bytes": _canonical_contract_json_bytes(prepared_claim_record),
+        "sequence_zero_event_bytes": _canonical_contract_json_bytes(
+            prepared_sequence_zero_event
+        ),
+        "snapshot_bytes": _canonical_contract_json_bytes(prepared_snapshot),
         "uniqueness_entries": uniqueness_entries,
     }
 

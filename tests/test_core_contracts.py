@@ -818,6 +818,12 @@ def test_prepare_codex_pilot_initial_claim_commit_is_deterministic_and_exact():
     assert prepared["claim_record"] == bundle["claim_record"]
     assert prepared["sequence_zero_event"] == bundle["audit_events"][0]
     assert prepared["snapshot"] == bundle["snapshot"]
+    assert prepared["claim_record"] is not bundle["claim_record"]
+    assert prepared["sequence_zero_event"] is not bundle["audit_events"][0]
+    assert prepared["snapshot"] is not bundle["snapshot"]
+    assert prepared["claim_record"]["allowed_paths"] is not bundle["claim_record"][
+        "allowed_paths"
+    ]
 
     claim_bytes = prepared["claim_record_bytes"]
     event_bytes = prepared["sequence_zero_event_bytes"]
@@ -863,6 +869,32 @@ def test_prepare_codex_pilot_initial_claim_commit_is_deterministic_and_exact():
     ]
     assert bundle == bundle_original
     assert authorization == authorization_original
+
+    bundle["claim_record"]["allowed_paths"].append("docs/process/changed.md")
+    bundle["claim_record"]["authorization_id"] = "pilot-auth-issue-999"
+    bundle["claim_record"]["attempt_id"] = "pilot-attempt-fff111eee222"
+    bundle["audit_events"][0]["authorization_id"] = "pilot-auth-issue-999"
+    bundle["snapshot"]["authorization_id"] = "pilot-auth-issue-999"
+
+    assert prepared["claim_record"] == bundle_original["claim_record"]
+    assert prepared["sequence_zero_event"] == bundle_original["audit_events"][0]
+    assert prepared["snapshot"] == bundle_original["snapshot"]
+    assert json.loads(claim_bytes.decode("utf-8")) == prepared["claim_record"]
+    assert json.loads(event_bytes.decode("utf-8")) == prepared["sequence_zero_event"]
+    assert json.loads(snapshot_bytes.decode("utf-8")) == prepared["snapshot"]
+    assert prepared["uniqueness_entries"] == [
+        {"attempt_id": {attempt_id: attempt_id}},
+        {
+            "authorization_id": {
+                bundle_original["claim_record"]["authorization_id"]: attempt_id
+            }
+        },
+        {
+            "authorization_fingerprint": {
+                bundle_original["claim_record"]["authorization_fingerprint"]: attempt_id
+            }
+        },
+    ]
 
 
 def test_prepare_codex_pilot_initial_claim_commit_rejects_invalid_bundle_shape_without_partial():
