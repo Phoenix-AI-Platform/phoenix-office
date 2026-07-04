@@ -48,6 +48,7 @@ from phoenix_office.core.contracts import (
     WorkerType,
     codex_pilot_authorization_fingerprint,
     codex_pilot_objective_digest,
+    validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
 )
@@ -445,8 +446,8 @@ def _valid_codex_authorization_dict() -> dict[str, object]:
         "handoff_id": "codex-handoff-issue-259",
         "objective": "Document the supervised Codex pilot authorization packet.",
         "allowed_paths": [
-            "docs/process/zeta.md",
             "docs/process/alpha.md",
+            "docs/process/zeta.md",
         ],
         "expected_pr_title": "docs: update supervised Codex pilot authorization",
         "branch_name": "codex/supervised-pilot-authorization",
@@ -534,11 +535,11 @@ def test_codex_pilot_claim_record_validation_and_binding_are_deterministic():
     assert first["claim_binding_blockers"] == []
 
 
-def test_codex_pilot_claim_validation_preserves_non_lexicographic_path_order():
+def test_codex_pilot_claim_validation_accepts_sorted_authorized_paths():
     authorization = _valid_codex_authorization_dict()
     assert authorization["allowed_paths"] == [
-        "docs/process/zeta.md",
         "docs/process/alpha.md",
+        "docs/process/zeta.md",
     ]
     claim = _valid_codex_claim_record(authorization)
 
@@ -546,6 +547,20 @@ def test_codex_pilot_claim_validation_preserves_non_lexicographic_path_order():
 
     assert result["claim_structural_valid"] is True
     assert result["claim_binding_passed"] is True
+
+
+def test_codex_pilot_claim_validation_rejects_unsorted_allowed_paths():
+    authorization = _valid_codex_authorization_dict()
+    claim = _valid_codex_claim_record(authorization)
+    claim["allowed_paths"] = [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+
+    result = validate_codex_pilot_claim_record(claim)
+
+    assert result["claim_structural_valid"] is False
+    assert "allowed_paths are invalid" in result["claim_structural_errors"]
 
 
 def test_codex_pilot_objective_digest_known_vector():
@@ -646,12 +661,41 @@ def test_codex_pilot_claim_validation_rejects_duplicate_paths_and_command_reorde
     )
 
 
+def test_codex_pilot_claim_validation_rejects_forbidden_path_segment_families():
+    forbidden_paths = [
+        "docs/process/API/change.md",
+        "docs/process/customer/change.md",
+        "docs/process/DOCX/change.md",
+        "docs/process/example/change.md",
+        "docs/process/fixture/change.md",
+        "docs/process/MCP/change.md",
+        "docs/process/orchestration/change.md",
+        "docs/process/proposal/change.md",
+        "docs/process/server/change.md",
+        "docs/process/source/change.md",
+        "docs/process/template/change.md",
+        "docs/process/test/change.md",
+        "docs/process/workflow/change.md",
+        "docs/process/worker/change.md",
+    ]
+    for path in forbidden_paths:
+        claim = _valid_codex_claim_record()
+        claim["allowed_paths"] = [path]
+
+        result = validate_codex_pilot_claim_record(claim)
+
+        assert result["claim_structural_valid"] is False
+        assert "allowed_paths are invalid" in result["claim_structural_errors"]
+
+
 def test_codex_pilot_claim_binding_detects_every_projection_mismatch():
     authorization = _valid_codex_authorization_dict()
     for field_name in CODEX_CLAIM_PROJECTION_FIELDS_FOR_TEST:
         claim = _valid_codex_claim_record(authorization)
         if field_name == "base_commit_sha":
             claim[field_name] = "1" * 40
+        elif field_name == "allowed_paths":
+            claim[field_name] = ["docs/process/omega.md"]
         else:
             claim[field_name] = _mutated_projection_value(authorization[field_name])
 
@@ -660,6 +704,86 @@ def test_codex_pilot_claim_binding_detects_every_projection_mismatch():
         assert result["claim_structural_valid"] is True
         assert result["claim_binding_passed"] is False
         assert f"{field_name} mismatch" in result["claim_binding_blockers"]
+
+
+def test_codex_pilot_claim_binding_detects_constant_and_command_mismatches():
+    authorization = _valid_codex_authorization_dict()
+    for field_name, value in [
+        ("repository", "Phoenix-AI-Platform/other-repo"),
+        ("pilot_kind", "other-pilot"),
+        ("validation_commands", list(reversed(CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS))),
+        ("budget_metric", "minutes"),
+        ("final_ci_required", False),
+        ("assistant_review_required", False),
+        ("worker_may_approve", True),
+        ("worker_may_merge", True),
+        ("one_invocation_only", False),
+        ("retry_authorized", True),
+        ("background_execution_authorized", True),
+    ]:
+        invalid_authorization = dict(authorization)
+        invalid_authorization[field_name] = value
+        claim = _valid_codex_claim_record(authorization)
+
+        result = validate_codex_pilot_claim_binding(claim, invalid_authorization)
+
+        assert result["claim_structural_valid"] is True
+        assert result["authorization_structural_valid"] is False
+        assert result["claim_binding_passed"] is False
+        assert result["claim_binding_blockers"] == [
+            "authorization package structurally invalid"
+        ]
+
+
+def test_codex_pilot_claim_binding_requires_structurally_valid_authorization():
+    authorization = _valid_codex_authorization_dict()
+    claim = _valid_codex_claim_record(authorization)
+    invalid_authorization_cases = [
+        ("decision_state", "pending"),
+        ("authorizer_role", "assistant"),
+        ("handoff_path", "docs/process/handoff.md"),
+        ("evidence_path", "C:/Users/private-name/evidence.json"),
+        ("objective", "Ship production runtime behavior"),
+        ("expected_pr_title", "feat: add runtime behavior"),
+        ("branch_name", "main"),
+        ("budget_enforcement_ref", "token-value"),
+        ("cancellation_ref", "password=secret"),
+        ("authentication_runner_ref", "https://example.com/secret"),
+        ("branch_permission_ref", "/home/private-name"),
+        ("pr_permission_ref", "AppData"),
+        ("duplicate_pr_check_ref", "."),
+        ("branch_collision_check_ref", ".."),
+        ("codex_no_approve_merge_ref", "sk-proj-super-secret"),
+    ]
+    for field_name, value in invalid_authorization_cases:
+        invalid_authorization = dict(authorization)
+        invalid_authorization[field_name] = value
+
+        result = validate_codex_pilot_claim_binding(claim, invalid_authorization)
+        output = json.dumps(result, sort_keys=True)
+
+        assert result["claim_structural_valid"] is True
+        assert result["authorization_structural_valid"] is False
+        assert result["claim_binding_passed"] is False
+        assert result["claim_binding_blockers"] == [
+            "authorization package structurally invalid"
+        ]
+        assert str(value) not in output
+
+
+def test_codex_pilot_authorization_validation_is_shared_and_sanitized():
+    authorization = _valid_codex_authorization_dict()
+    authorization["allowed_paths"] = [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+
+    result = validate_codex_pilot_authorization_packet(authorization)
+
+    assert result["authorization_structural_valid"] is False
+    assert "authorization allowed paths are invalid" in (
+        result["authorization_structural_errors"]
+    )
 
 
 def test_codex_pilot_claim_binding_detects_fingerprint_and_objective_mismatches():

@@ -44,7 +44,9 @@ from phoenix_office.core.contracts import (
     WorkerEventType,
     WorkerType,
     codex_pilot_authorization_fingerprint,
+    codex_pilot_authorization_structural_errors,
     codex_pilot_objective_digest,
+    validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
 )
@@ -92,8 +94,10 @@ __all__ = [
     "WorkerEvent",
     "WorkerEventType",
     "WorkerType",
+    "codex_pilot_authorization_structural_errors",
     "codex_pilot_authorization_fingerprint",
     "codex_pilot_objective_digest",
+    "validate_codex_pilot_authorization_packet",
     "validate_codex_pilot_claim_binding",
     "validate_codex_pilot_claim_record",
 ]

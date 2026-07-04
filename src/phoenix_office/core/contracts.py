@@ -380,6 +380,8 @@ class CodexPilotAuthorizationPacket(SerializableContract):
 CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
 CODEX_PILOT_AUTHORIZATION_KIND = "docs-only-supervised"
+CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
+CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
 CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
     "phoenix-codex-authorization-fingerprint.v1"
 )
@@ -453,6 +455,29 @@ CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS = [
     "worker_may_approve",
     "worker_may_merge",
     "one_invocation_only",
+    "retry_authorized",
+    "background_execution_authorized",
+]
+CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS = [
+    "authorization_id",
+    "handoff_id",
+    "budget_enforcement_ref",
+    "cancellation_ref",
+    "authentication_runner_ref",
+    "branch_permission_ref",
+    "pr_permission_ref",
+    "duplicate_pr_check_ref",
+    "branch_collision_check_ref",
+    "codex_no_approve_merge_ref",
+]
+CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS = [
+    "final_ci_required",
+    "assistant_review_required",
+    "one_invocation_only",
+]
+CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS = [
+    "worker_may_approve",
+    "worker_may_merge",
     "retry_authorized",
     "background_execution_authorized",
 ]
@@ -579,6 +604,24 @@ def codex_pilot_objective_digest(objective: object) -> str:
     ).hexdigest()
 
 
+def codex_pilot_authorization_structural_errors(package: object) -> list[str]:
+    """Return sanitized structural errors for a Codex pilot authorization packet."""
+    try:
+        data = _contract_mapping(package)
+    except ValueError:
+        return ["authorization package root must be an object"]
+    return _authorization_structural_errors(data)
+
+
+def validate_codex_pilot_authorization_packet(package: object) -> dict[str, Any]:
+    """Validate a candidate codex-pilot-authorization.v1 packet."""
+    errors = codex_pilot_authorization_structural_errors(package)
+    return {
+        "authorization_structural_errors": errors,
+        "authorization_structural_valid": not errors,
+    }
+
+
 def validate_codex_pilot_claim_record(record: object) -> dict[str, Any]:
     """Validate a candidate codex-pilot-claim.v1 record without side effects."""
     errors: list[str] = []
@@ -617,7 +660,19 @@ def validate_codex_pilot_claim_binding(
     except ValueError:
         return {
             **structural,
+            "authorization_structural_errors": [
+                "authorization package root must be an object"
+            ],
             "claim_binding_blockers": ["authorization package is invalid"],
+            "claim_binding_passed": False,
+        }
+
+    authorization_structural = validate_codex_pilot_authorization_packet(authorization)
+    if not authorization_structural["authorization_structural_valid"]:
+        return {
+            **structural,
+            **authorization_structural,
+            "claim_binding_blockers": ["authorization package structurally invalid"],
             "claim_binding_passed": False,
         }
 
@@ -643,6 +698,7 @@ def validate_codex_pilot_claim_binding(
 
     return {
         **structural,
+        **authorization_structural,
         "claim_binding_blockers": sorted(blockers),
         "claim_binding_passed": not blockers,
     }
@@ -688,6 +744,70 @@ def _validate_codex_pilot_fingerprint_value(value: Any) -> None:
             _validate_codex_pilot_fingerprint_value(item)
     else:
         raise ValueError("authorization fingerprint payload is invalid")
+
+
+def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    package_fields = set(package)
+    if CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS - package_fields:
+        errors.append("authorization package is missing required fields")
+    if package_fields - CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
+        errors.append("authorization package contains unknown fields")
+
+    expected_values = {
+        "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
+        "repository": CODEX_PILOT_AUTHORIZATION_REPOSITORY,
+        "pilot_kind": CODEX_PILOT_AUTHORIZATION_KIND,
+        "decision_state": CODEX_PILOT_AUTHORIZATION_DECISION_STATE,
+        "authorizer_role": CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE,
+        "budget_metric": "tokens",
+    }
+    for field_name, expected_value in expected_values.items():
+        if package.get(field_name) != expected_value:
+            errors.append(f"authorization {field_name} is invalid")
+
+    for field_name in CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS:
+        if not _is_safe_identifier(package.get(field_name)):
+            errors.append(f"authorization {field_name} is invalid")
+
+    if not _is_lower_hex(package.get("base_commit_sha"), 40):
+        errors.append("authorization base_commit_sha is invalid")
+    for field_name in ["handoff_path", "evidence_path"]:
+        if not _is_safe_authorization_json_path(package.get(field_name)):
+            errors.append(f"authorization {field_name} is invalid")
+    if not _is_safe_authorization_objective(package.get("objective")):
+        errors.append("authorization objective is invalid")
+    if not _is_allowed_paths(package.get("allowed_paths")):
+        errors.append("authorization allowed paths are invalid")
+    if not _is_safe_pr_title(package.get("expected_pr_title")):
+        errors.append("authorization expected_pr_title is invalid")
+    if not _is_safe_branch(package.get("branch_name")):
+        errors.append("authorization branch_name is invalid")
+    if package.get("validation_commands") != CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS:
+        errors.append("authorization validation commands are invalid")
+
+    budget_ceiling = package.get("budget_ceiling")
+    if (
+        type(budget_ceiling) is not int
+        or budget_ceiling < 1
+        or budget_ceiling > 1_000_000
+    ):
+        errors.append("authorization budget is invalid")
+    timeout_seconds = package.get("timeout_seconds")
+    if (
+        type(timeout_seconds) is not int
+        or timeout_seconds < 60
+        or timeout_seconds > 7200
+    ):
+        errors.append("authorization timeout is invalid")
+
+    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS:
+        if type(package.get(field_name)) is not bool or package.get(field_name) is not True:
+            errors.append(f"authorization {field_name} must be JSON boolean true")
+    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS:
+        if type(package.get(field_name)) is not bool or package.get(field_name) is not False:
+            errors.append(f"authorization {field_name} must be JSON boolean false")
+    return sorted(set(errors))
 
 
 def _is_fingerprint_safe_text(value: str, max_length: int) -> bool:
@@ -874,10 +994,12 @@ def _is_safe_branch_component(value: str) -> bool:
 def _is_safe_pr_title(value: object) -> bool:
     return (
         isinstance(value, str)
-        and value.startswith("docs:")
+        and 6 <= len(value) <= 120
+        and value.startswith("docs: ")
         and _is_safe_text(value, 120)
         and "/" not in value
         and "\\" not in value
+        and "=" not in value
     )
 
 
@@ -887,6 +1009,8 @@ def _is_allowed_paths(value: object) -> bool:
     if not all(isinstance(path, str) for path in value):
         return False
     if len(set(value)) != len(value):
+        return False
+    if value != sorted(value):
         return False
     return all(_is_allowed_doc_path(path) for path in value)
 
@@ -905,6 +1029,79 @@ def _is_allowed_doc_path(value: str) -> bool:
     if not (
         value.startswith("docs/process/")
         or value.startswith("docs/development/")
+    ):
+        return False
+    segments = value.split("/")
+    lowered_segments = {segment.lower() for segment in segments}
+    forbidden_segments = {
+        "api",
+        "apis",
+        "customer",
+        "customers",
+        "docx",
+        "example",
+        "examples",
+        "fixture",
+        "fixtures",
+        "mcp",
+        "orchestration",
+        "proposal",
+        "proposals",
+        "server",
+        "servers",
+        "source",
+        "sources",
+        "src",
+        "template",
+        "templates",
+        "test",
+        "tests",
+        "workflow",
+        "workflows",
+        "worker",
+        "workers",
+    }
+    return lowered_segments.isdisjoint(forbidden_segments) and all(
+        _is_safe_path_segment(segment) for segment in segments
+    )
+
+
+def _is_safe_authorization_json_path(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
+    )
+
+
+def _is_safe_authorization_objective(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if (
+        not _is_safe_text(value, 200)
+        or "/" in value
+        or "\\" in value
+        or "=" in value
+    ):
+        return False
+    lowered = value.lower()
+    return "document" in lowered or "docs" in lowered or "documentation" in lowered
+
+
+def _is_safe_repo_relative_path(
+    value: str,
+    *,
+    suffix: str,
+    max_length: int,
+) -> bool:
+    if (
+        not _is_safe_text(value, max_length)
+        or " " in value
+        or "\\" in value
+        or ":" in value
+        or "//" in value
+        or value.startswith("/")
+        or value.startswith("~")
+        or not value.endswith(suffix)
     ):
         return False
     return all(_is_safe_path_segment(segment) for segment in value.split("/"))

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from phoenix_office.core import (
     CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION,
     codex_pilot_authorization_fingerprint,
+    codex_pilot_authorization_structural_errors,
 )
 from phoenix_office.dev_status import (
     DEFAULT_PROJECT_STATE_PATH,
@@ -2653,69 +2654,7 @@ def _load_codex_pilot_authorization_packet(
 def _validate_codex_pilot_authorization_packet(
     package: dict[str, Any],
 ) -> list[str]:
-    errors: list[str] = []
-    package_fields = set(package)
-    if CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS - package_fields:
-        errors.append("authorization package is missing required fields")
-    if package_fields - CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
-        errors.append("authorization package contains unknown fields")
-
-    expected_values = {
-        "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
-        "repository": CODEX_PILOT_EVIDENCE_REPOSITORY,
-        "pilot_kind": CODEX_PILOT_EVIDENCE_KIND,
-        "decision_state": CODEX_PILOT_AUTHORIZATION_DECISION_STATE,
-        "authorizer_role": CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE,
-        "budget_metric": "tokens",
-    }
-    for field_name, expected_value in expected_values.items():
-        if package.get(field_name) != expected_value:
-            errors.append(f"authorization {field_name} is invalid")
-
-    for field_name in CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS:
-        if not _is_safe_evidence_identifier(package.get(field_name)):
-            errors.append(f"authorization {field_name} is invalid")
-
-    if not _is_lower_hex_sha(package.get("base_commit_sha")):
-        errors.append("authorization base_commit_sha is invalid")
-    for field_name in ["handoff_path", "evidence_path"]:
-        if not _is_safe_authorization_json_path(package.get(field_name)):
-            errors.append(f"authorization {field_name} is invalid")
-    if not _is_safe_authorization_objective(package.get("objective")):
-        errors.append("authorization objective is invalid")
-    if not _validate_authorization_allowed_paths(package.get("allowed_paths")):
-        errors.append("authorization allowed paths are invalid")
-    if not _is_safe_authorization_pr_title(package.get("expected_pr_title")):
-        errors.append("authorization expected_pr_title is invalid")
-    if not _is_safe_authorization_branch_name(package.get("branch_name")):
-        errors.append("authorization branch_name is invalid")
-    if package.get("validation_commands") != (
-        CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS
-    ):
-        errors.append("authorization validation commands are invalid")
-
-    budget_ceiling = package.get("budget_ceiling")
-    if (
-        type(budget_ceiling) is not int
-        or budget_ceiling < 1
-        or budget_ceiling > 1_000_000
-    ):
-        errors.append("authorization budget is invalid")
-    timeout_seconds = package.get("timeout_seconds")
-    if (
-        type(timeout_seconds) is not int
-        or timeout_seconds < 60
-        or timeout_seconds > 7200
-    ):
-        errors.append("authorization timeout is invalid")
-
-    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS:
-        if type(package.get(field_name)) is not bool or package.get(field_name) is not True:
-            errors.append(f"authorization {field_name} must be JSON boolean true")
-    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS:
-        if type(package.get(field_name)) is not bool or package.get(field_name) is not False:
-            errors.append(f"authorization {field_name} must be JSON boolean false")
-    return sorted(errors)
+    return codex_pilot_authorization_structural_errors(package)
 
 
 def _codex_pilot_authorization_binding_blockers(

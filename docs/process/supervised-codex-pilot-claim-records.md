@@ -53,7 +53,7 @@ Required fields and JSON types:
 - `expected_pr_title`: safe one-line string beginning with `docs:`
 - `objective_digest_schema_version`: string, exactly `codex-pilot-objective-digest.v1`
 - `objective_digest`: lowercase 64-character SHA-256 hex string over the validated safe objective string using prefix `codex-pilot-objective-digest.v1\n`
-- `allowed_paths`: one to three unique repository-relative Markdown paths in the exact order from the inspected authorization packet
+- `allowed_paths`: one to three unique repository-relative Markdown paths, already validated in lexicographic order by the authorization packet contract
 - `validation_commands`: exact ordered list:
   - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp`
   - `python -m ruff check . --no-cache`
@@ -85,9 +85,10 @@ The claim record must never contain later lifecycle state, CI state, review stat
 Future claim construction must use this exact proof procedure:
 
 1. Consume the exact in-memory `CodexPilotAuthorizationPacket` object that passed authorization inspection.
-2. Recompute `phoenix-codex-authorization-fingerprint.v1` from that object using the existing fingerprint contract.
-3. Require exact equality between the recomputed fingerprint and the claim record `authorization_fingerprint`.
-4. Bind every duplicated claim projection field exactly to the same authorization object:
+2. Validate that object with the shared authorization packet structural validator.
+3. Recompute `phoenix-codex-authorization-fingerprint.v1` from that object using the existing fingerprint contract.
+4. Require exact equality between the recomputed fingerprint and the claim record `authorization_fingerprint`.
+5. Bind every duplicated claim projection field exactly to the same authorization object:
    - `authorization_id`
    - `handoff_id`
    - `repository`
@@ -102,9 +103,9 @@ Future claim construction must use this exact proof procedure:
    - `timeout_seconds`
    - every control-reference identifier
    - every required safety boolean
-5. Compute `objective_digest` from the same validated safe authorization `objective` string.
+6. Compute `objective_digest` from the same validated safe authorization `objective` string.
 
-The claim `allowed_paths` list must equal the authorization object's list value-for-value and position-for-position. Claim construction and claim validation must not sort, normalize, or rewrite that list. Any different ordering is a claim identity mismatch.
+The current v1 authorization packet contract requires `allowed_paths` to be lexicographically sorted before fingerprinting. The claim `allowed_paths` list must equal the structurally valid authorization object's list value-for-value and position-for-position. Claim construction and binding validation must not sort, normalize, or rewrite that list. A non-sorted claim list is structurally invalid, and any different sorted list is a claim identity mismatch.
 
 `objective_digest` uses schema `codex-pilot-objective-digest.v1`. The digest input is UTF-8 bytes of:
 
