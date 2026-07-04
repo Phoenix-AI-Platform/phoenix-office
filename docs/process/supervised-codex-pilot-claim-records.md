@@ -135,6 +135,8 @@ Schema version: `codex-pilot-audit-event.v1`.
 
 An audit event is append-only or monotonic. It binds to the immutable claim and advances the lifecycle by exactly one permitted transition.
 
+The current implementation includes pure deterministic helpers for candidate audit-event validation, digesting, and claim/previous-event binding. These helpers inspect explicit in-memory records only. They do not append events, write files, persist state, consume authorization, recover storage, invoke Codex, access GitHub or the network, create branches or PRs, approve, merge, retry, schedule, or run background work.
+
 Required fields:
 
 - `schema_version`: string, exactly `codex-pilot-audit-event.v1`
@@ -188,7 +190,7 @@ The digest input is UTF-8 bytes of:
 codex-pilot-audit-event-digest.v1\n
 ```
 
-followed by compact canonical JSON for the event object with sorted keys, separators equivalent to `json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`. The canonical digest payload contains every event field, including `previous_event_digest`, except only the generated `event_digest` field. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex.
+followed by compact canonical JSON for the complete event digest payload with sorted keys, separators equivalent to `json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`. The canonical digest payload contains every event field required for that candidate transition, including `previous_event_digest`, but excludes only the generated `event_digest` field. Unknown, missing, forbidden, unsafe, invalid-transition, or wrong-type payload values fail closed before hashing. The digest algorithm is SHA-256 and the representation is lowercase 64-character hex.
 
 For `event_sequence == 0`, `previous_event_digest` must be JSON `null`. For every later event, `previous_event_digest` must equal the `event_digest` of the immediately preceding event. Missing, duplicate, altered, mismatched, or stale links fail closed.
 
