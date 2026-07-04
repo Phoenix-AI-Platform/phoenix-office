@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -14,6 +13,11 @@ from typing import Any
 from docx import Document
 from pydantic import ValidationError
 
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION,
+    codex_pilot_authorization_fingerprint,
+    codex_pilot_authorization_structural_errors,
+)
 from phoenix_office.dev_status import (
     DEFAULT_PROJECT_STATE_PATH,
     format_development_status,
@@ -2273,12 +2277,6 @@ CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_COMMAND = "dev codex-pilot-authorization"
 CODEX_PILOT_FINGERPRINT_SCHEMA_VERSION = "codex-pilot-fingerprint.v1"
 CODEX_PILOT_FINGERPRINT_COMMAND = "dev codex-pilot-fingerprint"
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
-    "phoenix-codex-authorization-fingerprint.v1"
-)
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX = (
-    f"{CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION}\n"
-)
 CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
 CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
 CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS = {
@@ -2354,41 +2352,6 @@ CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS = [
     "budget_metric",
     "budget_ceiling",
     "timeout_seconds",
-]
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS = [
-    "schema_version",
-    "authorization_id",
-    "repository",
-    "pilot_kind",
-    "decision_state",
-    "authorizer_role",
-    "base_commit_sha",
-    "handoff_path",
-    "evidence_path",
-    "handoff_id",
-    "objective",
-    "allowed_paths",
-    "expected_pr_title",
-    "branch_name",
-    "validation_commands",
-    "budget_metric",
-    "budget_ceiling",
-    "budget_enforcement_ref",
-    "timeout_seconds",
-    "cancellation_ref",
-    "authentication_runner_ref",
-    "branch_permission_ref",
-    "pr_permission_ref",
-    "duplicate_pr_check_ref",
-    "branch_collision_check_ref",
-    "codex_no_approve_merge_ref",
-    "final_ci_required",
-    "assistant_review_required",
-    "worker_may_approve",
-    "worker_may_merge",
-    "one_invocation_only",
-    "retry_authorized",
-    "background_execution_authorized",
 ]
 
 
@@ -2691,69 +2654,7 @@ def _load_codex_pilot_authorization_packet(
 def _validate_codex_pilot_authorization_packet(
     package: dict[str, Any],
 ) -> list[str]:
-    errors: list[str] = []
-    package_fields = set(package)
-    if CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS - package_fields:
-        errors.append("authorization package is missing required fields")
-    if package_fields - CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
-        errors.append("authorization package contains unknown fields")
-
-    expected_values = {
-        "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
-        "repository": CODEX_PILOT_EVIDENCE_REPOSITORY,
-        "pilot_kind": CODEX_PILOT_EVIDENCE_KIND,
-        "decision_state": CODEX_PILOT_AUTHORIZATION_DECISION_STATE,
-        "authorizer_role": CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE,
-        "budget_metric": "tokens",
-    }
-    for field_name, expected_value in expected_values.items():
-        if package.get(field_name) != expected_value:
-            errors.append(f"authorization {field_name} is invalid")
-
-    for field_name in CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS:
-        if not _is_safe_evidence_identifier(package.get(field_name)):
-            errors.append(f"authorization {field_name} is invalid")
-
-    if not _is_lower_hex_sha(package.get("base_commit_sha")):
-        errors.append("authorization base_commit_sha is invalid")
-    for field_name in ["handoff_path", "evidence_path"]:
-        if not _is_safe_authorization_json_path(package.get(field_name)):
-            errors.append(f"authorization {field_name} is invalid")
-    if not _is_safe_authorization_objective(package.get("objective")):
-        errors.append("authorization objective is invalid")
-    if not _validate_authorization_allowed_paths(package.get("allowed_paths")):
-        errors.append("authorization allowed paths are invalid")
-    if not _is_safe_authorization_pr_title(package.get("expected_pr_title")):
-        errors.append("authorization expected_pr_title is invalid")
-    if not _is_safe_authorization_branch_name(package.get("branch_name")):
-        errors.append("authorization branch_name is invalid")
-    if package.get("validation_commands") != (
-        CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS
-    ):
-        errors.append("authorization validation commands are invalid")
-
-    budget_ceiling = package.get("budget_ceiling")
-    if (
-        type(budget_ceiling) is not int
-        or budget_ceiling < 1
-        or budget_ceiling > 1_000_000
-    ):
-        errors.append("authorization budget is invalid")
-    timeout_seconds = package.get("timeout_seconds")
-    if (
-        type(timeout_seconds) is not int
-        or timeout_seconds < 60
-        or timeout_seconds > 7200
-    ):
-        errors.append("authorization timeout is invalid")
-
-    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS:
-        if type(package.get(field_name)) is not bool or package.get(field_name) is not True:
-            errors.append(f"authorization {field_name} must be JSON boolean true")
-    for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS:
-        if type(package.get(field_name)) is not bool or package.get(field_name) is not False:
-            errors.append(f"authorization {field_name} must be JSON boolean false")
-    return sorted(errors)
+    return codex_pilot_authorization_structural_errors(package)
 
 
 def _codex_pilot_authorization_binding_blockers(
@@ -2902,48 +2803,7 @@ def _run_codex_pilot_fingerprint(
 
 
 def _codex_pilot_authorization_fingerprint(package: dict[str, Any]) -> str:
-    if set(package) != CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
-        raise ValueError("authorization fingerprint field set is invalid")
-    payload = {
-        field_name: package[field_name]
-        for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
-    }
-    if set(payload) != set(CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS):
-        raise ValueError("authorization fingerprint payload is invalid")
-    _validate_codex_pilot_fingerprint_payload(payload)
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    digest_input = (
-        CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
-        + canonical.encode("utf-8")
-    )
-    return hashlib.sha256(digest_input).hexdigest()
-
-
-def _validate_codex_pilot_fingerprint_payload(payload: Any) -> None:
-    if not isinstance(payload, dict):
-        raise ValueError("authorization fingerprint payload is invalid")
-    for value in payload.values():
-        _validate_codex_pilot_fingerprint_value(value)
-
-
-def _validate_codex_pilot_fingerprint_value(value: Any) -> None:
-    if isinstance(value, str):
-        if not _has_safe_authorization_text_shape(value, 500):
-            raise ValueError("authorization fingerprint payload is invalid")
-    elif isinstance(value, bool):
-        return
-    elif type(value) is int:
-        return
-    elif isinstance(value, list):
-        for item in value:
-            _validate_codex_pilot_fingerprint_value(item)
-    else:
-        raise ValueError("authorization fingerprint payload is invalid")
+    return codex_pilot_authorization_fingerprint(package)
 
 
 def _codex_pilot_fingerprint_authorization_blockers(
@@ -3071,15 +2931,6 @@ def _is_conservative_path_segment(segment: str) -> bool:
     )
 
 
-def _is_safe_git_branch_component(component: str) -> bool:
-    lowered = component.lower()
-    return (
-        _is_conservative_path_segment(component)
-        and not component.startswith(".")
-        and not lowered.endswith(".lock")
-    )
-
-
 def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> bool:
     if (
         not _has_safe_authorization_text_shape(value, max_length)
@@ -3096,75 +2947,6 @@ def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> 
         return False
     return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
 
-
-def _is_safe_authorization_json_path(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
-    )
-
-
-def _is_safe_authorization_objective(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    if (
-        not _has_safe_authorization_text_shape(value, 200)
-        or "/" in value
-        or "\\" in value
-        or "=" in value
-        or _contains_url_marker(value)
-        or _contains_drive_like_path(value)
-        or _contains_sensitive_authorization_marker(value)
-    ):
-        return False
-    lowered = value.lower()
-    return "document" in lowered or "docs" in lowered or "documentation" in lowered
-
-
-def _validate_authorization_allowed_paths(value: Any) -> bool:
-    if not isinstance(value, list) or not 1 <= len(value) <= 3:
-        return False
-    if not all(isinstance(path, str) for path in value):
-        return False
-    if len(set(value)) != len(value) or value != sorted(value):
-        return False
-    return all(_is_allowed_codex_pilot_authorization_doc_path(path) for path in value)
-
-
-def _is_safe_authorization_pr_title(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and 6 <= len(value) <= 120
-        and value.startswith("docs: ")
-        and _has_safe_authorization_text_shape(value, 120)
-        and "/" not in value
-        and "\\" not in value
-        and "=" not in value
-        and not _contains_url_marker(value)
-        and not _contains_drive_like_path(value)
-        and not _contains_sensitive_authorization_marker(value)
-    )
-
-
-def _is_safe_authorization_branch_name(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    if (
-        not _has_safe_authorization_text_shape(value, 100)
-        or not value.startswith("codex/")
-        or " " in value
-        or ".." in value
-        or "@{" in value
-        or value.endswith("/")
-        or value.startswith(".")
-        or value.endswith(".")
-        or "//" in value
-        or _contains_url_marker(value)
-        or _contains_drive_like_path(value)
-        or _contains_sensitive_authorization_marker(value)
-    ):
-        return False
-    return all(_is_safe_git_branch_component(segment) for segment in value.split("/"))
 
 def _print_codex_pilot_authorization_report(report: dict[str, Any]) -> None:
     print("Codex pilot authorization packet inspection")
