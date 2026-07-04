@@ -2931,15 +2931,6 @@ def _is_conservative_path_segment(segment: str) -> bool:
     )
 
 
-def _is_safe_git_branch_component(component: str) -> bool:
-    lowered = component.lower()
-    return (
-        _is_conservative_path_segment(component)
-        and not component.startswith(".")
-        and not lowered.endswith(".lock")
-    )
-
-
 def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> bool:
     if (
         not _has_safe_authorization_text_shape(value, max_length)
@@ -2956,75 +2947,6 @@ def _is_safe_repo_relative_path(value: str, *, suffix: str, max_length: int) -> 
         return False
     return all(_is_conservative_path_segment(segment) for segment in value.split("/"))
 
-
-def _is_safe_authorization_json_path(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
-    )
-
-
-def _is_safe_authorization_objective(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    if (
-        not _has_safe_authorization_text_shape(value, 200)
-        or "/" in value
-        or "\\" in value
-        or "=" in value
-        or _contains_url_marker(value)
-        or _contains_drive_like_path(value)
-        or _contains_sensitive_authorization_marker(value)
-    ):
-        return False
-    lowered = value.lower()
-    return "document" in lowered or "docs" in lowered or "documentation" in lowered
-
-
-def _validate_authorization_allowed_paths(value: Any) -> bool:
-    if not isinstance(value, list) or not 1 <= len(value) <= 3:
-        return False
-    if not all(isinstance(path, str) for path in value):
-        return False
-    if len(set(value)) != len(value) or value != sorted(value):
-        return False
-    return all(_is_allowed_codex_pilot_authorization_doc_path(path) for path in value)
-
-
-def _is_safe_authorization_pr_title(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and 6 <= len(value) <= 120
-        and value.startswith("docs: ")
-        and _has_safe_authorization_text_shape(value, 120)
-        and "/" not in value
-        and "\\" not in value
-        and "=" not in value
-        and not _contains_url_marker(value)
-        and not _contains_drive_like_path(value)
-        and not _contains_sensitive_authorization_marker(value)
-    )
-
-
-def _is_safe_authorization_branch_name(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    if (
-        not _has_safe_authorization_text_shape(value, 100)
-        or not value.startswith("codex/")
-        or " " in value
-        or ".." in value
-        or "@{" in value
-        or value.endswith("/")
-        or value.startswith(".")
-        or value.endswith(".")
-        or "//" in value
-        or _contains_url_marker(value)
-        or _contains_drive_like_path(value)
-        or _contains_sensitive_authorization_marker(value)
-    ):
-        return False
-    return all(_is_safe_git_branch_component(segment) for segment in value.split("/"))
 
 def _print_codex_pilot_authorization_report(report: dict[str, Any]) -> None:
     print("Codex pilot authorization packet inspection")

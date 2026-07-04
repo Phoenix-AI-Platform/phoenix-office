@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from phoenix_office.cli import _validate_codex_pilot_authorization_packet
 from phoenix_office.core.contracts import (
     CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS,
     CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
@@ -784,6 +785,68 @@ def test_codex_pilot_authorization_validation_is_shared_and_sanitized():
     assert "authorization allowed paths are invalid" in (
         result["authorization_structural_errors"]
     )
+
+
+def test_codex_pilot_authorization_identifier_rejects_evidence_marker_parity():
+    unsafe_values = [
+        "https://example.com",
+        "slash/value",
+        "slash\\value",
+        "drive:path",
+        "name=value",
+        "sk-proj-secret",
+        "token-value",
+        "secret-value",
+        "password-value",
+        "users-value",
+        "home-control-reviewed",
+        "myHomeControl",
+        "AppData-control",
+    ]
+    reference_fields = [
+        "authorization_id",
+        "handoff_id",
+        "budget_enforcement_ref",
+        "cancellation_ref",
+        "authentication_runner_ref",
+        "branch_permission_ref",
+        "pr_permission_ref",
+        "duplicate_pr_check_ref",
+        "branch_collision_check_ref",
+        "codex_no_approve_merge_ref",
+    ]
+    for field_name in reference_fields:
+        for value in unsafe_values:
+            authorization = _valid_codex_authorization_dict()
+            authorization[field_name] = value
+
+            result = validate_codex_pilot_authorization_packet(authorization)
+            output = json.dumps(result, sort_keys=True)
+
+            assert result["authorization_structural_valid"] is False
+            assert f"authorization {field_name} is invalid" in (
+                result["authorization_structural_errors"]
+            )
+            assert value not in output
+
+
+def test_cli_and_core_authorization_validators_return_identical_results():
+    authorization = _valid_codex_authorization_dict()
+    authorization["authorization_id"] = "myHomeControl"
+    authorization["allowed_paths"] = [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+
+    core_result = validate_codex_pilot_authorization_packet(authorization)
+    cli_errors = _validate_codex_pilot_authorization_packet(authorization)
+
+    assert cli_errors == core_result["authorization_structural_errors"]
+    assert core_result["authorization_structural_valid"] is False
+    assert cli_errors == [
+        "authorization allowed paths are invalid",
+        "authorization authorization_id is invalid",
+    ]
 
 
 def test_codex_pilot_claim_binding_detects_fingerprint_and_objective_mismatches():

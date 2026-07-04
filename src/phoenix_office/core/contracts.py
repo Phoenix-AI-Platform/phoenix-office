@@ -906,6 +906,7 @@ def _contains_unsafe_marker(value: str) -> bool:
         "sk-",
         "token",
         "users",
+        "home",
         "/home",
         "home/",
         "~",
