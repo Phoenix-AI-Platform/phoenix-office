@@ -1,6 +1,11 @@
 """Early Phoenix Core contract skeletons."""
 
 from phoenix_office.core.contracts import (
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS,
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX,
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION,
+    CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION,
+    CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
     ApprovalDecision,
     ApprovalPolicy,
     ApprovalPreview,
@@ -38,6 +43,10 @@ from phoenix_office.core.contracts import (
     WorkerEvent,
     WorkerEventType,
     WorkerType,
+    codex_pilot_authorization_fingerprint,
+    codex_pilot_objective_digest,
+    validate_codex_pilot_claim_binding,
+    validate_codex_pilot_claim_record,
 )
 
 __all__ = [
@@ -49,6 +58,11 @@ __all__ = [
     "ApprovalStatus",
     "ApprovedScope",
     "CodexHandoffPackage",
+    "CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS",
+    "CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX",
+    "CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION",
+    "CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION",
+    "CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS",
     "CodexPilotAuthorizationPacket",
     "CodexPilotEvidenceControl",
     "CodexPilotEvidencePackage",
@@ -78,4 +92,8 @@ __all__ = [
     "WorkerEvent",
     "WorkerEventType",
     "WorkerType",
+    "codex_pilot_authorization_fingerprint",
+    "codex_pilot_objective_digest",
+    "validate_codex_pilot_claim_binding",
+    "validate_codex_pilot_claim_record",
 ]

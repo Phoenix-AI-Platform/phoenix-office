@@ -6,6 +6,8 @@ This document defines the exact v1 record schemas for a future supervised Codex 
 
 The schemas preserve separate meanings for authorization identity, atomic claim creation, invocation lifecycle, post-run review, and merge authority. A valid record never means Codex may run, approve, merge, or reuse an authorization unless a later reviewed implementation explicitly adds that behavior behind the required gates.
 
+The repository includes pure in-memory validation helpers for candidate `codex-pilot-claim.v1` records and their binding to an already-inspected authorization packet. Those helpers do not read files, write files, create claims, append events, inspect storage, or consume authorization.
+
 ## Schema Versions
 
 The exact v1 schema versions are:

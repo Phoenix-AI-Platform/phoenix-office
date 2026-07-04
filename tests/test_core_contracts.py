@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from phoenix_office.core.contracts import (
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS,
+    CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
     ApprovalDecision,
     ApprovalPolicy,
     ApprovalPreview,
@@ -44,6 +46,10 @@ from phoenix_office.core.contracts import (
     WorkerEvent,
     WorkerEventType,
     WorkerType,
+    codex_pilot_authorization_fingerprint,
+    codex_pilot_objective_digest,
+    validate_codex_pilot_claim_binding,
+    validate_codex_pilot_claim_record,
 )
 
 FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
@@ -423,6 +429,265 @@ def test_codex_pilot_authorization_packet_creation_and_serialization():
     assert data["retry_authorized"] is False
     assert data["background_execution_authorized"] is False
     assert json.loads(package.to_json()) == data
+
+
+def _valid_codex_authorization_dict() -> dict[str, object]:
+    return {
+        "schema_version": "codex-pilot-authorization.v1",
+        "authorization_id": "pilot-auth-issue-292",
+        "repository": "Phoenix-AI-Platform/phoenix-office",
+        "pilot_kind": "docs-only-supervised",
+        "decision_state": "human_authorized_for_one_run",
+        "authorizer_role": "human_operator",
+        "base_commit_sha": "0" * 40,
+        "handoff_path": "handoff.json",
+        "evidence_path": "evidence.json",
+        "handoff_id": "codex-handoff-issue-259",
+        "objective": "Document the supervised Codex pilot authorization packet.",
+        "allowed_paths": [
+            "docs/process/zeta.md",
+            "docs/process/alpha.md",
+        ],
+        "expected_pr_title": "docs: update supervised Codex pilot authorization",
+        "branch_name": "codex/supervised-pilot-authorization",
+        "validation_commands": CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
+        "budget_metric": "tokens",
+        "budget_ceiling": 50000,
+        "budget_enforcement_ref": "budget-control-reviewed",
+        "timeout_seconds": 1800,
+        "cancellation_ref": "operator-cancel-reviewed",
+        "authentication_runner_ref": "runner-access-reviewed",
+        "branch_permission_ref": "branch-permission-reviewed",
+        "pr_permission_ref": "pr-permission-reviewed",
+        "duplicate_pr_check_ref": "duplicate-pr-check-reviewed",
+        "branch_collision_check_ref": "branch-collision-check-reviewed",
+        "codex_no_approve_merge_ref": "no-approve-merge-reviewed",
+        "final_ci_required": True,
+        "assistant_review_required": True,
+        "worker_may_approve": False,
+        "worker_may_merge": False,
+        "one_invocation_only": True,
+        "retry_authorized": False,
+        "background_execution_authorized": False,
+    }
+
+
+def _valid_codex_claim_record(
+    authorization: dict[str, object] | None = None,
+) -> dict[str, object]:
+    authorization = authorization or _valid_codex_authorization_dict()
+    return {
+        "schema_version": "codex-pilot-claim.v1",
+        "attempt_id": "pilot-attempt-abc123def456",
+        "authorization_id": authorization["authorization_id"],
+        "authorization_fingerprint_schema_version": (
+            "phoenix-codex-authorization-fingerprint.v1"
+        ),
+        "authorization_fingerprint": codex_pilot_authorization_fingerprint(
+            authorization
+        ),
+        "handoff_id": authorization["handoff_id"],
+        "repository": authorization["repository"],
+        "pilot_kind": authorization["pilot_kind"],
+        "base_commit_sha": authorization["base_commit_sha"],
+        "branch_name": authorization["branch_name"],
+        "expected_pr_title": authorization["expected_pr_title"],
+        "objective_digest_schema_version": "codex-pilot-objective-digest.v1",
+        "objective_digest": codex_pilot_objective_digest(
+            authorization["objective"]
+        ),
+        "allowed_paths": list(authorization["allowed_paths"]),
+        "validation_commands": list(authorization["validation_commands"]),
+        "budget_metric": authorization["budget_metric"],
+        "budget_ceiling": authorization["budget_ceiling"],
+        "timeout_seconds": authorization["timeout_seconds"],
+        "budget_enforcement_ref": authorization["budget_enforcement_ref"],
+        "cancellation_ref": authorization["cancellation_ref"],
+        "authentication_runner_ref": authorization["authentication_runner_ref"],
+        "branch_permission_ref": authorization["branch_permission_ref"],
+        "pr_permission_ref": authorization["pr_permission_ref"],
+        "duplicate_pr_check_ref": authorization["duplicate_pr_check_ref"],
+        "branch_collision_check_ref": authorization["branch_collision_check_ref"],
+        "codex_no_approve_merge_ref": authorization["codex_no_approve_merge_ref"],
+        "final_ci_required": True,
+        "assistant_review_required": True,
+        "worker_may_approve": False,
+        "worker_may_merge": False,
+        "one_invocation_only": True,
+        "retry_authorized": False,
+        "background_execution_authorized": False,
+        "initial_lifecycle_state": "claim_created",
+    }
+
+
+def test_codex_pilot_claim_record_validation_and_binding_are_deterministic():
+    authorization = _valid_codex_authorization_dict()
+    claim = _valid_codex_claim_record(authorization)
+
+    first = validate_codex_pilot_claim_binding(claim, authorization)
+    second = validate_codex_pilot_claim_binding(dict(claim), dict(authorization))
+
+    assert first == second
+    assert first["claim_structural_valid"] is True
+    assert first["claim_structural_errors"] == []
+    assert first["claim_binding_passed"] is True
+    assert first["claim_binding_blockers"] == []
+
+
+def test_codex_pilot_claim_validation_preserves_non_lexicographic_path_order():
+    authorization = _valid_codex_authorization_dict()
+    assert authorization["allowed_paths"] == [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+    claim = _valid_codex_claim_record(authorization)
+
+    result = validate_codex_pilot_claim_binding(claim, authorization)
+
+    assert result["claim_structural_valid"] is True
+    assert result["claim_binding_passed"] is True
+
+
+def test_codex_pilot_objective_digest_known_vector():
+    assert codex_pilot_objective_digest(
+        "Document the supervised Codex pilot authorization packet."
+    ) == "ecb05382c1182a9afab0b6f9d41b3f5aedbe69ef378e0694396abd2037586feb"
+
+
+def test_codex_pilot_authorization_fingerprint_uses_shared_field_order():
+    authorization = _valid_codex_authorization_dict()
+    fingerprint = codex_pilot_authorization_fingerprint(authorization)
+    assert len(fingerprint) == 64
+    assert CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS[0] == "schema_version"
+
+
+def test_codex_pilot_claim_validation_rejects_missing_unknown_and_wrong_type():
+    claim = _valid_codex_claim_record()
+    claim.pop("attempt_id")
+    claim["unknown"] = "safe"
+    claim["budget_ceiling"] = True
+
+    result = validate_codex_pilot_claim_record(claim)
+
+    assert result["claim_structural_valid"] is False
+    assert "claim record is missing required fields" in result["claim_structural_errors"]
+    assert "claim record contains unknown fields" in result["claim_structural_errors"]
+    assert "budget_ceiling is invalid" in result["claim_structural_errors"]
+
+
+def test_codex_pilot_claim_validation_rejects_unsafe_values_without_leaking_them():
+    claim = _valid_codex_claim_record()
+    claim["attempt_id"] = "pilot-attempt-token-value"
+    claim["branch_name"] = "codex/C:/Users/private-name"
+    claim["allowed_paths"] = ["docs/process/../secret.md"]
+
+    result = validate_codex_pilot_claim_record(claim)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result["claim_structural_valid"] is False
+    assert "attempt_id is invalid" in result["claim_structural_errors"]
+    assert "branch_name is invalid" in result["claim_structural_errors"]
+    assert "allowed_paths are invalid" in result["claim_structural_errors"]
+    assert "token-value" not in output
+    assert "C:/Users/private-name" not in output
+    assert "../secret" not in output
+
+
+CODEX_CLAIM_PROJECTION_FIELDS_FOR_TEST = [
+    "authorization_id",
+    "handoff_id",
+    "base_commit_sha",
+    "branch_name",
+    "expected_pr_title",
+    "allowed_paths",
+    "budget_ceiling",
+    "timeout_seconds",
+    "budget_enforcement_ref",
+    "cancellation_ref",
+    "authentication_runner_ref",
+    "branch_permission_ref",
+    "pr_permission_ref",
+    "duplicate_pr_check_ref",
+    "branch_collision_check_ref",
+    "codex_no_approve_merge_ref",
+]
+
+
+def _mutated_projection_value(value: object) -> object:
+    if isinstance(value, bool):
+        return not value
+    if type(value) is int:
+        return value + 1
+    if isinstance(value, list):
+        return list(reversed(value))
+    if isinstance(value, str):
+        return f"{value}-changed"
+    raise AssertionError(f"Unhandled value: {value!r}")
+
+
+def test_codex_pilot_claim_validation_rejects_duplicate_paths_and_command_reordering():
+    claim = _valid_codex_claim_record()
+    duplicate_paths = dict(claim)
+    duplicate_paths["allowed_paths"] = ["docs/process/a.md", "docs/process/a.md"]
+    reordered_commands = dict(claim)
+    reordered_commands["validation_commands"] = list(
+        reversed(CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS)
+    )
+
+    duplicate_result = validate_codex_pilot_claim_record(duplicate_paths)
+    reordered_result = validate_codex_pilot_claim_record(reordered_commands)
+
+    assert duplicate_result["claim_structural_valid"] is False
+    assert "allowed_paths are invalid" in duplicate_result["claim_structural_errors"]
+    assert reordered_result["claim_structural_valid"] is False
+    assert (
+        "validation_commands are invalid"
+        in reordered_result["claim_structural_errors"]
+    )
+
+
+def test_codex_pilot_claim_binding_detects_every_projection_mismatch():
+    authorization = _valid_codex_authorization_dict()
+    for field_name in CODEX_CLAIM_PROJECTION_FIELDS_FOR_TEST:
+        claim = _valid_codex_claim_record(authorization)
+        if field_name == "base_commit_sha":
+            claim[field_name] = "1" * 40
+        else:
+            claim[field_name] = _mutated_projection_value(authorization[field_name])
+
+        result = validate_codex_pilot_claim_binding(claim, authorization)
+
+        assert result["claim_structural_valid"] is True
+        assert result["claim_binding_passed"] is False
+        assert f"{field_name} mismatch" in result["claim_binding_blockers"]
+
+
+def test_codex_pilot_claim_binding_detects_fingerprint_and_objective_mismatches():
+    authorization = _valid_codex_authorization_dict()
+    claim = _valid_codex_claim_record(authorization)
+    claim["authorization_fingerprint"] = "1" * 64
+    claim["objective_digest"] = "2" * 64
+
+    result = validate_codex_pilot_claim_binding(claim, authorization)
+
+    assert result["claim_structural_valid"] is True
+    assert result["claim_binding_passed"] is False
+    assert result["claim_binding_blockers"] == [
+        "authorization fingerprint mismatch",
+        "objective digest mismatch",
+    ]
+
+
+def test_codex_pilot_claim_binding_is_false_for_structural_failure():
+    authorization = _valid_codex_authorization_dict()
+    claim = _valid_codex_claim_record(authorization)
+    claim["schema_version"] = "wrong"
+
+    result = validate_codex_pilot_claim_binding(claim, authorization)
+
+    assert result["claim_structural_valid"] is False
+    assert result["claim_binding_passed"] is False
+    assert result["claim_binding_blockers"] == []
 
 
 def _collect_strings(value: object) -> list[str]:

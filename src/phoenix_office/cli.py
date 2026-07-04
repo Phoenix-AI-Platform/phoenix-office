@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -14,6 +13,10 @@ from typing import Any
 from docx import Document
 from pydantic import ValidationError
 
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION,
+    codex_pilot_authorization_fingerprint,
+)
 from phoenix_office.dev_status import (
     DEFAULT_PROJECT_STATE_PATH,
     format_development_status,
@@ -2273,12 +2276,6 @@ CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_COMMAND = "dev codex-pilot-authorization"
 CODEX_PILOT_FINGERPRINT_SCHEMA_VERSION = "codex-pilot-fingerprint.v1"
 CODEX_PILOT_FINGERPRINT_COMMAND = "dev codex-pilot-fingerprint"
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
-    "phoenix-codex-authorization-fingerprint.v1"
-)
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX = (
-    f"{CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION}\n"
-)
 CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
 CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
 CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS = {
@@ -2354,41 +2351,6 @@ CODEX_PILOT_AUTHORIZATION_SAFE_OUTPUT_FIELDS = [
     "budget_metric",
     "budget_ceiling",
     "timeout_seconds",
-]
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS = [
-    "schema_version",
-    "authorization_id",
-    "repository",
-    "pilot_kind",
-    "decision_state",
-    "authorizer_role",
-    "base_commit_sha",
-    "handoff_path",
-    "evidence_path",
-    "handoff_id",
-    "objective",
-    "allowed_paths",
-    "expected_pr_title",
-    "branch_name",
-    "validation_commands",
-    "budget_metric",
-    "budget_ceiling",
-    "budget_enforcement_ref",
-    "timeout_seconds",
-    "cancellation_ref",
-    "authentication_runner_ref",
-    "branch_permission_ref",
-    "pr_permission_ref",
-    "duplicate_pr_check_ref",
-    "branch_collision_check_ref",
-    "codex_no_approve_merge_ref",
-    "final_ci_required",
-    "assistant_review_required",
-    "worker_may_approve",
-    "worker_may_merge",
-    "one_invocation_only",
-    "retry_authorized",
-    "background_execution_authorized",
 ]
 
 
@@ -2902,48 +2864,7 @@ def _run_codex_pilot_fingerprint(
 
 
 def _codex_pilot_authorization_fingerprint(package: dict[str, Any]) -> str:
-    if set(package) != CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
-        raise ValueError("authorization fingerprint field set is invalid")
-    payload = {
-        field_name: package[field_name]
-        for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
-    }
-    if set(payload) != set(CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS):
-        raise ValueError("authorization fingerprint payload is invalid")
-    _validate_codex_pilot_fingerprint_payload(payload)
-    canonical = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    digest_input = (
-        CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
-        + canonical.encode("utf-8")
-    )
-    return hashlib.sha256(digest_input).hexdigest()
-
-
-def _validate_codex_pilot_fingerprint_payload(payload: Any) -> None:
-    if not isinstance(payload, dict):
-        raise ValueError("authorization fingerprint payload is invalid")
-    for value in payload.values():
-        _validate_codex_pilot_fingerprint_value(value)
-
-
-def _validate_codex_pilot_fingerprint_value(value: Any) -> None:
-    if isinstance(value, str):
-        if not _has_safe_authorization_text_shape(value, 500):
-            raise ValueError("authorization fingerprint payload is invalid")
-    elif isinstance(value, bool):
-        return
-    elif type(value) is int:
-        return
-    elif isinstance(value, list):
-        for item in value:
-            _validate_codex_pilot_fingerprint_value(item)
-    else:
-        raise ValueError("authorization fingerprint payload is invalid")
+    return codex_pilot_authorization_fingerprint(package)
 
 
 def _codex_pilot_fingerprint_authorization_blockers(

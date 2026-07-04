@@ -12,6 +12,10 @@ import pytest
 
 import phoenix_office.cli as cli
 from phoenix_office.cli import main
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS,
+    CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX,
+)
 
 ROOT = Path(__file__).parents[1]
 HANDOFF_EXAMPLE = ROOT / "examples" / "tasks" / "codex_handoff_package.json"
@@ -255,7 +259,7 @@ def _run_text(
 def _expected_fingerprint(package: dict[str, Any]) -> str:
     payload = {
         field_name: package[field_name]
-        for field_name in cli.CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
+        for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
     }
     canonical = json.dumps(
         payload,
@@ -264,7 +268,7 @@ def _expected_fingerprint(package: dict[str, Any]) -> str:
         ensure_ascii=False,
     )
     digest_input = (
-        cli.CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
+        CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
         + canonical.encode("utf-8")
     )
     return hashlib.sha256(digest_input).hexdigest()
@@ -384,7 +388,7 @@ def test_codex_pilot_fingerprint_changes_for_each_canonical_field() -> None:
     package = _valid_authorization_packet()
     baseline = cli._codex_pilot_authorization_fingerprint(package)
 
-    for field_name in cli.CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS:
+    for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS:
         mutated = dict(package)
         value = mutated[field_name]
         if isinstance(value, bool):
@@ -403,7 +407,7 @@ def test_codex_pilot_fingerprint_ignores_object_insertion_order() -> None:
     package = _valid_authorization_packet()
     reordered = {
         field_name: package[field_name]
-        for field_name in reversed(cli.CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS)
+        for field_name in reversed(CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS)
     }
 
     assert cli._codex_pilot_authorization_fingerprint(package) == (
