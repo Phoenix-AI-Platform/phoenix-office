@@ -830,6 +830,24 @@ def test_codex_pilot_authorization_identifier_rejects_evidence_marker_parity():
             assert value not in output
 
 
+def test_codex_pilot_authorization_allows_home_text_in_non_identifier_fields():
+    authorization = _valid_codex_authorization_dict()
+    authorization["objective"] = "Document the home office review process."
+    authorization["expected_pr_title"] = "docs: document home office review"
+    authorization["allowed_paths"] = ["docs/process/home-office-review.md"]
+    authorization["branch_name"] = "codex/home-office-review"
+    claim = _valid_codex_claim_record(authorization)
+
+    authorization_result = validate_codex_pilot_authorization_packet(authorization)
+    binding_result = validate_codex_pilot_claim_binding(claim, authorization)
+
+    assert authorization_result["authorization_structural_valid"] is True
+    assert authorization_result["authorization_structural_errors"] == []
+    assert binding_result["claim_structural_valid"] is True
+    assert binding_result["authorization_structural_valid"] is True
+    assert binding_result["claim_binding_passed"] is True
+
+
 def test_cli_and_core_authorization_validators_return_identical_results():
     authorization = _valid_codex_authorization_dict()
     authorization["authorization_id"] = "myHomeControl"

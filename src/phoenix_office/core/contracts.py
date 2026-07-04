@@ -906,8 +906,7 @@ def _contains_unsafe_marker(value: str) -> bool:
         "sk-",
         "token",
         "users",
-        "home",
-        "/home",
+        "/home/",
         "home/",
         "~",
         "=",
@@ -928,9 +927,28 @@ def _contains_sensitive_marker(value: str) -> bool:
         "sk-",
         "token",
         "users",
-        "/home",
+        "/home/",
         "home/",
         "~",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def _contains_unsafe_identifier_marker(value: str) -> bool:
+    lowered = value.lower()
+    markers = [
+        "://",
+        "\\",
+        "/",
+        ":",
+        "=",
+        "sk-",
+        "token",
+        "secret",
+        "password",
+        "users",
+        "home",
+        "appdata",
     ]
     return any(marker in lowered for marker in markers)
 
@@ -941,7 +959,7 @@ def _is_safe_identifier(value: object) -> bool:
         and 1 <= len(value) <= 80
         and value not in {".", ".."}
         and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is not None
-        and not _contains_unsafe_marker(value)
+        and not _contains_unsafe_identifier_marker(value)
     )
 
 
