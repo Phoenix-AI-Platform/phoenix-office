@@ -747,6 +747,29 @@ CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES = {
         "storage_uncertain",
     },
 }
+CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION = "codex-pilot-attempt-snapshot.v1"
+CODEX_PILOT_ATTEMPT_SNAPSHOT_FIELDS = {
+    "schema_version",
+    "attempt_id",
+    "authorization_id",
+    "authorization_fingerprint",
+    "latest_event_sequence",
+    "latest_event_digest",
+    "current_lifecycle_state",
+    "terminal",
+    "branch_identity",
+    "pull_request_identity",
+    "final_ci_category",
+    "assistant_review_verdict",
+    "codex_approved",
+    "codex_merged",
+    "authorization_reusable",
+}
+CODEX_PILOT_AUDIT_LIFECYCLE_STATES = {
+    state
+    for transition in CODEX_PILOT_AUDIT_EVENT_TRANSITIONS
+    for state in transition
+}
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -1006,6 +1029,154 @@ def validate_codex_pilot_audit_event_binding(
     }
 
 
+def validate_codex_pilot_attempt_snapshot(snapshot: object) -> dict[str, Any]:
+    """Validate a candidate codex-pilot-attempt-snapshot.v1 record."""
+    errors = codex_pilot_attempt_snapshot_structural_errors(snapshot)
+    return {
+        "snapshot_binding_blockers": [],
+        "snapshot_binding_passed": False,
+        "snapshot_structural_errors": errors,
+        "snapshot_structural_valid": not errors,
+    }
+
+
+def derive_codex_pilot_attempt_snapshot(
+    claim_record: object,
+    audit_events: object,
+) -> dict[str, Any]:
+    """Derive a deterministic attempt snapshot from a claim and ordered events."""
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    blockers: list[str] = []
+    if not claim_result["claim_structural_valid"]:
+        blockers.append("claim_record_invalid")
+        return _snapshot_derivation_result(
+            claim_structural_valid=False,
+            event_chain_valid=False,
+            blockers=blockers,
+            snapshot=None,
+        )
+    if not isinstance(audit_events, list):
+        blockers.append("event_sequence_invalid")
+        return _snapshot_derivation_result(
+            claim_structural_valid=True,
+            event_chain_valid=False,
+            blockers=blockers,
+            snapshot=None,
+        )
+    if not audit_events:
+        blockers.append("event_sequence_invalid")
+        return _snapshot_derivation_result(
+            claim_structural_valid=True,
+            event_chain_valid=False,
+            blockers=blockers,
+            snapshot=None,
+        )
+
+    claim = _contract_mapping(claim_record)
+    previous_event: object | None = None
+    branch_identity: str | None = None
+    pull_request_identity: str | None = None
+    final_ci_category: str | None = None
+    assistant_review_verdict: str | None = None
+    latest_event: dict[str, Any] | None = None
+
+    for index, event in enumerate(audit_events):
+        binding = validate_codex_pilot_audit_event_binding(
+            event,
+            claim_record,
+            previous_event,
+        )
+        if not binding["event_structural_valid"]:
+            blockers.append("audit_event_corrupt")
+        if not binding["event_binding_passed"]:
+            blockers.append("event_binding_mismatch")
+        if binding["event_structural_valid"]:
+            event_data = _contract_mapping(event)
+            if event_data.get("event_sequence") != index:
+                blockers.append("event_sequence_invalid")
+            if event_data.get("next_lifecycle_state") == "pr_opened_and_stopped":
+                branch_identity = event_data.get("branch_identity")
+                pull_request_identity = event_data.get("pull_request_identity")
+            if event_data.get("next_lifecycle_state") == "completed_pending_review":
+                if event_data.get("branch_identity") != branch_identity:
+                    blockers.append("snapshot_context_mismatch")
+                if event_data.get("pull_request_identity") != pull_request_identity:
+                    blockers.append("snapshot_context_mismatch")
+                final_ci_category = event_data.get("final_ci_category")
+                assistant_review_verdict = event_data.get("assistant_review_verdict")
+            latest_event = event_data
+        previous_event = event
+
+    if blockers or latest_event is None:
+        return _snapshot_derivation_result(
+            claim_structural_valid=True,
+            event_chain_valid=False,
+            blockers=blockers,
+            snapshot=None,
+        )
+
+    snapshot = {
+        "schema_version": CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION,
+        "attempt_id": claim["attempt_id"],
+        "authorization_id": claim["authorization_id"],
+        "authorization_fingerprint": claim["authorization_fingerprint"],
+        "latest_event_sequence": latest_event["event_sequence"],
+        "latest_event_digest": latest_event["event_digest"],
+        "current_lifecycle_state": latest_event["next_lifecycle_state"],
+        "terminal": (
+            latest_event["next_lifecycle_state"] in CODEX_PILOT_AUDIT_TERMINAL_STATES
+        ),
+        "branch_identity": branch_identity,
+        "pull_request_identity": pull_request_identity,
+        "final_ci_category": final_ci_category,
+        "assistant_review_verdict": assistant_review_verdict,
+        "codex_approved": False,
+        "codex_merged": False,
+        "authorization_reusable": False,
+    }
+    return _snapshot_derivation_result(
+        claim_structural_valid=True,
+        event_chain_valid=True,
+        blockers=[],
+        snapshot=snapshot,
+    )
+
+
+def validate_codex_pilot_attempt_snapshot_binding(
+    snapshot: object,
+    claim_record: object,
+    audit_events: object,
+) -> dict[str, Any]:
+    """Validate a candidate snapshot against the deterministic derivation."""
+    snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
+    derivation_result = derive_codex_pilot_attempt_snapshot(claim_record, audit_events)
+    blockers: list[str] = []
+    if not snapshot_result["snapshot_structural_valid"]:
+        blockers.append("snapshot_record_invalid")
+    if not derivation_result["snapshot_derivation_passed"]:
+        blockers.append("snapshot_derivation_failed")
+    if (
+        snapshot_result["snapshot_structural_valid"]
+        and derivation_result["snapshot_derivation_passed"]
+    ):
+        snapshot_data = _contract_mapping(snapshot)
+        if snapshot_data != derivation_result["snapshot"]:
+            blockers.append("snapshot_mismatch")
+    return {
+        **snapshot_result,
+        "claim_structural_valid": derivation_result["claim_structural_valid"],
+        "event_chain_valid": derivation_result["event_chain_valid"],
+        "snapshot_binding_blockers": sorted(set(blockers)),
+        "snapshot_binding_passed": not blockers,
+        "snapshot_derivation_blockers": derivation_result[
+            "snapshot_derivation_blockers"
+        ],
+        "snapshot_derivation_passed": derivation_result[
+            "snapshot_derivation_passed"
+        ],
+    }
+
+
 def codex_pilot_audit_event_structural_errors(event: object) -> list[str]:
     """Return sanitized structural errors for a Codex pilot audit event."""
     try:
@@ -1013,6 +1184,15 @@ def codex_pilot_audit_event_structural_errors(event: object) -> list[str]:
     except ValueError:
         return ["audit event root must be an object"]
     return _audit_event_structural_errors(data)
+
+
+def codex_pilot_attempt_snapshot_structural_errors(snapshot: object) -> list[str]:
+    """Return sanitized structural errors for a Codex pilot attempt snapshot."""
+    try:
+        data = _contract_mapping(snapshot)
+    except ValueError:
+        return ["snapshot root must be an object"]
+    return _attempt_snapshot_structural_errors(data)
 
 
 def _claim_result(
@@ -1224,6 +1404,69 @@ def _validate_audit_event_optional_values(
     for field_name, allowed in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES.items():
         if field_name in event and event.get(field_name) not in allowed:
             errors.append(f"{field_name} is invalid")
+
+
+def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    field_set = set(snapshot)
+    if CODEX_PILOT_ATTEMPT_SNAPSHOT_FIELDS - field_set:
+        errors.append("snapshot is missing required fields")
+    if field_set - CODEX_PILOT_ATTEMPT_SNAPSHOT_FIELDS:
+        errors.append("snapshot contains unknown fields")
+    if snapshot.get("schema_version") != CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION:
+        errors.append("snapshot schema_version is invalid")
+    for field_name in ["attempt_id", "authorization_id"]:
+        if not _is_safe_identifier(snapshot.get(field_name)):
+            errors.append(f"snapshot {field_name} is invalid")
+    if not _is_lower_hex(snapshot.get("authorization_fingerprint"), 64):
+        errors.append("snapshot authorization_fingerprint is invalid")
+    if (
+        type(snapshot.get("latest_event_sequence")) is not int
+        or snapshot.get("latest_event_sequence") < 0
+    ):
+        errors.append("snapshot latest_event_sequence is invalid")
+    if not _is_lower_hex(snapshot.get("latest_event_digest"), 64):
+        errors.append("snapshot latest_event_digest is invalid")
+    if snapshot.get("current_lifecycle_state") not in CODEX_PILOT_AUDIT_LIFECYCLE_STATES:
+        errors.append("snapshot current_lifecycle_state is invalid")
+    if type(snapshot.get("terminal")) is not bool:
+        errors.append("snapshot terminal must be a JSON boolean")
+    if snapshot.get("branch_identity") is not None and not _is_safe_branch(
+        snapshot.get("branch_identity")
+    ):
+        errors.append("snapshot branch_identity is invalid")
+    if snapshot.get("pull_request_identity") is not None and not (
+        _is_safe_pull_request_identity(snapshot.get("pull_request_identity"))
+    ):
+        errors.append("snapshot pull_request_identity is invalid")
+    if snapshot.get("final_ci_category") is not None and snapshot.get(
+        "final_ci_category"
+    ) not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["final_ci_category"]:
+        errors.append("snapshot final_ci_category is invalid")
+    if snapshot.get("assistant_review_verdict") is not None and snapshot.get(
+        "assistant_review_verdict"
+    ) not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["assistant_review_verdict"]:
+        errors.append("snapshot assistant_review_verdict is invalid")
+    for field_name in ["codex_approved", "codex_merged", "authorization_reusable"]:
+        if type(snapshot.get(field_name)) is not bool or snapshot.get(field_name) is not False:
+            errors.append(f"snapshot {field_name} must be JSON boolean false")
+    return sorted(set(errors))
+
+
+def _snapshot_derivation_result(
+    *,
+    claim_structural_valid: bool,
+    event_chain_valid: bool,
+    blockers: list[str],
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "claim_structural_valid": claim_structural_valid,
+        "event_chain_valid": event_chain_valid,
+        "snapshot": snapshot,
+        "snapshot_derivation_blockers": sorted(set(blockers)),
+        "snapshot_derivation_passed": not blockers and snapshot is not None,
+    }
 
 
 def _can_digest_audit_event_record(event: dict[str, Any]) -> bool:

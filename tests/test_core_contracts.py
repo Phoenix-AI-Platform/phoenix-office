@@ -51,6 +51,9 @@ from phoenix_office.core.contracts import (
     codex_pilot_audit_event_digest,
     codex_pilot_authorization_fingerprint,
     codex_pilot_objective_digest,
+    derive_codex_pilot_attempt_snapshot,
+    validate_codex_pilot_attempt_snapshot,
+    validate_codex_pilot_attempt_snapshot_binding,
     validate_codex_pilot_audit_event_binding,
     validate_codex_pilot_audit_event_record,
     validate_codex_pilot_authorization_packet,
@@ -1299,6 +1302,273 @@ def test_codex_pilot_audit_event_binding_rejects_invalid_claim_and_event():
 
     assert result["event_structural_valid"] is False
     assert result["event_binding_passed"] is False
+
+
+def _valid_codex_audit_event_full_chain() -> tuple[
+    dict[str, object],
+    list[dict[str, object]],
+]:
+    claim, event_zero, event_one = _valid_codex_audit_event_chain()
+    event_two = _valid_codex_audit_event(
+        claim,
+        previous_lifecycle_state="invocation_starting",
+        next_lifecycle_state="invocation_started",
+        event_sequence=2,
+        previous_event_digest=event_one["event_digest"],
+    )
+    event_three = _valid_codex_audit_event(
+        claim,
+        previous_lifecycle_state="invocation_started",
+        next_lifecycle_state="pr_opened_and_stopped",
+        event_sequence=3,
+        previous_event_digest=event_two["event_digest"],
+        branch_identity="codex/supervised-pilot-audit-event",
+        pull_request_identity="pr-302",
+        usage_category="within_budget",
+    )
+    event_four = _valid_codex_audit_event(
+        claim,
+        previous_lifecycle_state="pr_opened_and_stopped",
+        next_lifecycle_state="completed_pending_review",
+        event_sequence=4,
+        previous_event_digest=event_three["event_digest"],
+        branch_identity="codex/supervised-pilot-audit-event",
+        pull_request_identity="pr-302",
+        final_ci_category="passed",
+        assistant_review_verdict="approved",
+    )
+    return claim, [event_zero, event_one, event_two, event_three, event_four]
+
+
+def test_codex_pilot_attempt_snapshot_derives_newly_claimed_state():
+    claim, event_zero, _event_one = _valid_codex_audit_event_chain()
+
+    result = derive_codex_pilot_attempt_snapshot(claim, [event_zero])
+
+    assert result["snapshot_derivation_passed"] is True
+    assert result["event_chain_valid"] is True
+    assert result["snapshot"] == {
+        "schema_version": "codex-pilot-attempt-snapshot.v1",
+        "attempt_id": claim["attempt_id"],
+        "authorization_id": claim["authorization_id"],
+        "authorization_fingerprint": claim["authorization_fingerprint"],
+        "latest_event_sequence": 0,
+        "latest_event_digest": event_zero["event_digest"],
+        "current_lifecycle_state": "claim_created",
+        "terminal": False,
+        "branch_identity": None,
+        "pull_request_identity": None,
+        "final_ci_category": None,
+        "assistant_review_verdict": None,
+        "codex_approved": False,
+        "codex_merged": False,
+        "authorization_reusable": False,
+    }
+
+
+def test_codex_pilot_attempt_snapshot_derives_branch_review_and_terminal_state():
+    claim, events = _valid_codex_audit_event_full_chain()
+
+    result = derive_codex_pilot_attempt_snapshot(claim, events)
+
+    assert result["snapshot_derivation_passed"] is True
+    assert result["snapshot"]["latest_event_sequence"] == 4
+    assert result["snapshot"]["latest_event_digest"] == events[-1]["event_digest"]
+    assert result["snapshot"]["current_lifecycle_state"] == "completed_pending_review"
+    assert result["snapshot"]["terminal"] is True
+    assert result["snapshot"]["branch_identity"] == "codex/supervised-pilot-audit-event"
+    assert result["snapshot"]["pull_request_identity"] == "pr-302"
+    assert result["snapshot"]["final_ci_category"] == "passed"
+    assert result["snapshot"]["assistant_review_verdict"] == "approved"
+    assert result["snapshot"]["codex_approved"] is False
+    assert result["snapshot"]["codex_merged"] is False
+    assert result["snapshot"]["authorization_reusable"] is False
+
+
+def test_codex_pilot_attempt_snapshot_validation_rejects_shape_and_types_safely():
+    claim, events = _valid_codex_audit_event_full_chain()
+    snapshot = derive_codex_pilot_attempt_snapshot(claim, events)["snapshot"]
+    invalid = dict(snapshot)
+    invalid.pop("attempt_id")
+    invalid["unknown"] = "C:/Users/private-name"
+    invalid["schema_version"] = "wrong"
+    invalid["latest_event_sequence"] = True
+    invalid["terminal"] = 0
+    invalid["branch_identity"] = "codex/.hidden"
+    invalid["pull_request_identity"] = "pr-0"
+    invalid["final_ci_category"] = "token-value"
+    invalid["assistant_review_verdict"] = "password=secret"
+    invalid["codex_approved"] = True
+    invalid["codex_merged"] = 0
+    invalid["authorization_reusable"] = None
+
+    result = validate_codex_pilot_attempt_snapshot(invalid)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result["snapshot_structural_valid"] is False
+    assert "snapshot is missing required fields" in result["snapshot_structural_errors"]
+    assert "snapshot contains unknown fields" in result["snapshot_structural_errors"]
+    assert "snapshot schema_version is invalid" in result["snapshot_structural_errors"]
+    assert "snapshot latest_event_sequence is invalid" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot terminal must be a JSON boolean" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot branch_identity is invalid" in result["snapshot_structural_errors"]
+    assert "snapshot pull_request_identity is invalid" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot final_ci_category is invalid" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot assistant_review_verdict is invalid" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot codex_approved must be JSON boolean false" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot codex_merged must be JSON boolean false" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "snapshot authorization_reusable must be JSON boolean false" in (
+        result["snapshot_structural_errors"]
+    )
+    assert "C:/Users/private-name" not in output
+    assert "token-value" not in output
+    assert "password=secret" not in output
+
+
+def test_codex_pilot_attempt_snapshot_binding_accepts_exact_derivation():
+    claim, events = _valid_codex_audit_event_full_chain()
+    snapshot = derive_codex_pilot_attempt_snapshot(claim, events)["snapshot"]
+
+    result = validate_codex_pilot_attempt_snapshot_binding(snapshot, claim, events)
+
+    assert result["snapshot_structural_valid"] is True
+    assert result["claim_structural_valid"] is True
+    assert result["event_chain_valid"] is True
+    assert result["snapshot_derivation_passed"] is True
+    assert result["snapshot_binding_passed"] is True
+    assert result["snapshot_binding_blockers"] == []
+
+
+def test_codex_pilot_attempt_snapshot_binding_rejects_candidate_mismatch():
+    claim, events = _valid_codex_audit_event_full_chain()
+    snapshot = derive_codex_pilot_attempt_snapshot(claim, events)["snapshot"]
+    snapshot["latest_event_digest"] = "1" * 64
+
+    result = validate_codex_pilot_attempt_snapshot_binding(snapshot, claim, events)
+
+    assert result["snapshot_structural_valid"] is True
+    assert result["snapshot_derivation_passed"] is True
+    assert result["snapshot_binding_passed"] is False
+    assert result["snapshot_binding_blockers"] == ["snapshot_mismatch"]
+
+
+def test_codex_pilot_attempt_snapshot_derivation_rejects_non_list_or_empty_events():
+    claim = _valid_codex_claim_record()
+
+    non_list = derive_codex_pilot_attempt_snapshot(claim, {"event": "not-list"})
+    empty = derive_codex_pilot_attempt_snapshot(claim, [])
+
+    assert non_list["snapshot_derivation_passed"] is False
+    assert non_list["snapshot_derivation_blockers"] == ["event_sequence_invalid"]
+    assert empty["snapshot_derivation_passed"] is False
+    assert empty["snapshot_derivation_blockers"] == ["event_sequence_invalid"]
+
+
+def test_codex_pilot_attempt_snapshot_derivation_rejects_reordered_and_skipped_events():
+    claim, events = _valid_codex_audit_event_full_chain()
+    reordered = [events[1], events[0]]
+    skipped = [events[0], events[2]]
+
+    reordered_result = derive_codex_pilot_attempt_snapshot(claim, reordered)
+    skipped_result = derive_codex_pilot_attempt_snapshot(claim, skipped)
+
+    assert reordered_result["snapshot_derivation_passed"] is False
+    assert "event_binding_mismatch" in reordered_result["snapshot_derivation_blockers"]
+    assert "event_sequence_invalid" in reordered_result["snapshot_derivation_blockers"]
+    assert skipped_result["snapshot_derivation_passed"] is False
+    assert "event_binding_mismatch" in skipped_result["snapshot_derivation_blockers"]
+    assert "event_sequence_invalid" in skipped_result["snapshot_derivation_blockers"]
+
+
+def test_codex_pilot_attempt_snapshot_derivation_rejects_duplicate_or_altered_events():
+    claim, events = _valid_codex_audit_event_full_chain()
+    duplicate = [events[0], events[1], events[1]]
+    altered = list(events)
+    altered[2] = dict(altered[2])
+    altered[2]["authorization_id"] = "other-auth-reviewed"
+
+    duplicate_result = derive_codex_pilot_attempt_snapshot(claim, duplicate)
+    altered_result = derive_codex_pilot_attempt_snapshot(claim, altered)
+
+    assert duplicate_result["snapshot_derivation_passed"] is False
+    assert "event_binding_mismatch" in duplicate_result["snapshot_derivation_blockers"]
+    assert "event_sequence_invalid" in duplicate_result["snapshot_derivation_blockers"]
+    assert altered_result["snapshot_derivation_passed"] is False
+    assert "audit_event_corrupt" in altered_result["snapshot_derivation_blockers"]
+    assert "event_binding_mismatch" in altered_result["snapshot_derivation_blockers"]
+
+
+def test_codex_pilot_attempt_snapshot_derivation_rejects_cross_claim_event():
+    claim, events = _valid_codex_audit_event_full_chain()
+    other_claim = _valid_codex_claim_record()
+    other_claim["attempt_id"] = "pilot-attempt-other1234"
+    cross_claim_event = _valid_codex_audit_event(
+        other_claim,
+        previous_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+        event_sequence=1,
+        previous_event_digest=events[0]["event_digest"],
+    )
+    mixed = [events[0], cross_claim_event]
+
+    result = derive_codex_pilot_attempt_snapshot(claim, mixed)
+
+    assert result["snapshot_derivation_passed"] is False
+    assert "event_binding_mismatch" in result["snapshot_derivation_blockers"]
+
+
+def test_codex_pilot_attempt_snapshot_derivation_rejects_terminal_continuation():
+    claim, event_zero, _event_one = _valid_codex_audit_event_chain()
+    terminal = _valid_codex_audit_event(
+        claim,
+        previous_lifecycle_state="claim_created",
+        next_lifecycle_state="aborted",
+        event_sequence=1,
+        previous_event_digest=event_zero["event_digest"],
+        recovery_category="operator_recovery",
+    )
+    continued = dict(terminal)
+    continued["event_sequence"] = 2
+    continued["previous_lifecycle_state"] = "aborted"
+    continued["next_lifecycle_state"] = "failed"
+    continued["previous_event_digest"] = terminal["event_digest"]
+    continued["event_digest"] = "0" * 64
+
+    result = derive_codex_pilot_attempt_snapshot(claim, [event_zero, terminal, continued])
+
+    assert result["snapshot_derivation_passed"] is False
+    assert "audit_event_corrupt" in result["snapshot_derivation_blockers"]
+    assert "event_binding_mismatch" in result["snapshot_derivation_blockers"]
+
+
+def test_codex_pilot_attempt_snapshot_binding_propagates_invalid_claim_and_event():
+    claim, event_zero, _event_one = _valid_codex_audit_event_chain()
+    snapshot = derive_codex_pilot_attempt_snapshot(claim, [event_zero])["snapshot"]
+    claim["schema_version"] = "wrong"
+    event_zero["event_digest"] = "1" * 64
+
+    result = validate_codex_pilot_attempt_snapshot_binding(snapshot, claim, [event_zero])
+
+    assert result["snapshot_structural_valid"] is True
+    assert result["claim_structural_valid"] is False
+    assert result["event_chain_valid"] is False
+    assert result["snapshot_binding_passed"] is False
+    assert "snapshot_derivation_failed" in result["snapshot_binding_blockers"]
+    assert "claim_record_invalid" in result["snapshot_derivation_blockers"]
 
 
 def _collect_strings(value: object) -> list[str]:

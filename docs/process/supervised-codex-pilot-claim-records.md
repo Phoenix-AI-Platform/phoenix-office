@@ -249,6 +249,8 @@ Schema version: `codex-pilot-attempt-snapshot.v1`.
 
 The preferred v1 snapshot is derived entirely from the immutable claim plus ordered audit events. A stored snapshot is allowed only as a compare-and-set projection with a verified event sequence. It is never authoritative enough to erase, replace, delete, reset, or make reusable an immutable claim.
 
+The current implementation includes pure deterministic helpers for candidate snapshot validation, ordered event-chain derivation, and candidate-to-derived binding. These helpers inspect explicit in-memory records only. They do not persist snapshots, append events, mutate lifecycle state, consume authorization, invoke Codex, access GitHub or the network, create branches or PRs, approve, merge, retry, schedule, or run background work.
+
 Required snapshot fields:
 
 - `schema_version`: string, exactly `codex-pilot-attempt-snapshot.v1`
