@@ -68,6 +68,8 @@ A human-authorized pilot is limited to one invocation attempt. Authorization exp
 
 This inspector cannot detect prior use. A future invocation implementation must add a separately reviewed consumption and audit contract before it can treat a valid packet as operational authorization. That later contract must fail closed when a packet has already been used, when any reviewed input changes, or when evidence becomes stale.
 
+The required consumption and audit boundary is defined in `docs/process/supervised-codex-pilot-consumption-audit.md`. That contract requires an atomic, durable, exclusive, irreversible one-attempt claim before any future prompt submission or Codex process launch.
+
 The pilot boundary is:
 
 - human-triggered only
