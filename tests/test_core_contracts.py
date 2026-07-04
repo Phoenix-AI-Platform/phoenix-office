@@ -556,7 +556,9 @@ def _valid_codex_audit_event(
         "event_digest": "0" * 64,
     }
     event.update(optional_fields)
-    event["event_digest"] = codex_pilot_audit_event_digest(event)
+    event["event_digest"] = codex_pilot_audit_event_digest(
+        {key: value for key, value in event.items() if key != "event_digest"}
+    )
     return event
 
 
@@ -990,14 +992,42 @@ def test_codex_pilot_audit_event_digest_known_vectors():
     claim, event_zero, event_one = _valid_codex_audit_event_chain()
 
     assert claim["attempt_id"] == "pilot-attempt-abc123def456"
-    assert codex_pilot_audit_event_digest(event_zero) == event_zero["event_digest"]
-    assert codex_pilot_audit_event_digest(event_one) == event_one["event_digest"]
+    assert codex_pilot_audit_event_digest(
+        {key: value for key, value in event_zero.items() if key != "event_digest"}
+    ) == event_zero["event_digest"]
+    assert codex_pilot_audit_event_digest(
+        {key: value for key, value in event_one.items() if key != "event_digest"}
+    ) == event_one["event_digest"]
     assert event_zero["event_digest"] == (
         "6249aadd0ac77258b4f295910ce9e8b1f552742c4bb6e36ee0f3cce1193ba8e3"
     )
     assert event_one["event_digest"] == (
         "aa77baa8de60e25eaadc240d6a5985aee72212790f11d8512e1eb40ade187db3"
     )
+
+
+def test_codex_pilot_audit_event_digest_rejects_non_candidate_payloads():
+    _claim, event_zero, _event_one = _valid_codex_audit_event_chain()
+    base_payload = {
+        key: value for key, value in event_zero.items() if key != "event_digest"
+    }
+    cases = [
+        {"event_digest": "0" * 64},
+        {key: value for key, value in base_payload.items() if key != "attempt_id"},
+        {**base_payload, "unknown": "safe"},
+        {**base_payload, "next_lifecycle_state": "invocation_starting"},
+        {**base_payload, "branch_identity": "codex/supervised-pilot"},
+        {**base_payload, "attempt_id": "pilot-attempt-tokenvalue"},
+        {**base_payload, "event_digest": "0" * 64},
+    ]
+
+    for payload in cases:
+        try:
+            codex_pilot_audit_event_digest(payload)
+        except ValueError as exc:
+            assert str(exc) == "audit event digest payload is invalid"
+        else:
+            raise AssertionError("invalid digest payload was accepted")
 
 
 def test_codex_pilot_audit_event_validation_rejects_shape_and_digest_errors():
@@ -1039,11 +1069,10 @@ def test_codex_pilot_audit_event_validation_rejects_optional_field_matrix():
         usage_category="within_budget",
     )
     missing_required.pop("usage_category")
-    missing_required["event_digest"] = codex_pilot_audit_event_digest(missing_required)
-    forbidden_present = _valid_codex_audit_event(
-        claim,
-        branch_identity="codex/supervised-pilot-audit-event",
-    )
+    missing_required["event_digest"] = "0" * 64
+    forbidden_present = _valid_codex_audit_event(claim)
+    forbidden_present["branch_identity"] = "codex/supervised-pilot-audit-event"
+    forbidden_present["event_digest"] = "0" * 64
 
     missing_result = validate_codex_pilot_audit_event_record(missing_required)
     forbidden_result = validate_codex_pilot_audit_event_record(forbidden_present)
@@ -1058,6 +1087,38 @@ def test_codex_pilot_audit_event_validation_rejects_optional_field_matrix():
     )
 
 
+def test_codex_pilot_audit_event_validation_anchors_sequence_zero():
+    claim = _valid_codex_claim_record()
+    wrong_zero = _valid_codex_audit_event(claim)
+    wrong_zero["previous_lifecycle_state"] = "claim_created"
+    wrong_zero["next_lifecycle_state"] = "invocation_starting"
+    wrong_zero["event_category"] = "invocation_starting"
+    wrong_zero["result_category"] = "started"
+    wrong_zero["actor_role"] = "codex_worker"
+    wrong_zero["event_digest"] = "0" * 64
+    wrong_root_sequence = _valid_codex_audit_event(claim)
+    wrong_root_sequence["event_sequence"] = 1
+    wrong_root_sequence["previous_event_digest"] = "1" * 64
+    wrong_root_sequence["event_digest"] = "0" * 64
+
+    wrong_zero_result = validate_codex_pilot_audit_event_record(wrong_zero)
+    wrong_root_sequence_result = validate_codex_pilot_audit_event_record(
+        wrong_root_sequence
+    )
+
+    assert wrong_zero_result["event_structural_valid"] is False
+    assert "sequence zero transition is invalid" in (
+        wrong_zero_result["event_structural_errors"]
+    )
+    assert wrong_root_sequence_result["event_structural_valid"] is False
+    assert "claim-created transition sequence is invalid" in (
+        wrong_root_sequence_result["event_structural_errors"]
+    )
+    assert "nonzero transition previous state is invalid" in (
+        wrong_root_sequence_result["event_structural_errors"]
+    )
+
+
 def test_codex_pilot_audit_event_validation_rejects_invalid_optional_values():
     claim = _valid_codex_claim_record()
     event = _valid_codex_audit_event(
@@ -1066,10 +1127,14 @@ def test_codex_pilot_audit_event_validation_rejects_invalid_optional_values():
         next_lifecycle_state="pr_opened_and_stopped",
         event_sequence=1,
         previous_event_digest="1" * 64,
-        branch_identity="codex/.hidden",
-        pull_request_identity="pr-0",
-        usage_category="token-value",
+        branch_identity="codex/supervised-pilot-audit-event",
+        pull_request_identity="pr-302",
+        usage_category="within_budget",
     )
+    event["branch_identity"] = "codex/.hidden"
+    event["pull_request_identity"] = "pr-0"
+    event["usage_category"] = "token-value"
+    event["event_digest"] = "0" * 64
 
     result = validate_codex_pilot_audit_event_record(event)
     output = json.dumps(result, sort_keys=True)
@@ -1101,7 +1166,9 @@ def test_codex_pilot_audit_event_binding_rejects_identity_and_sequence_errors():
     event_one["attempt_id"] = "pilot-attempt-other1234"
     event_one["event_sequence"] = 3
     event_one["previous_event_digest"] = "2" * 64
-    event_one["event_digest"] = codex_pilot_audit_event_digest(event_one)
+    event_one["event_digest"] = codex_pilot_audit_event_digest(
+        {key: value for key, value in event_one.items() if key != "event_digest"}
+    )
 
     result = validate_codex_pilot_audit_event_binding(event_one, claim, event_zero)
 
@@ -1110,6 +1177,52 @@ def test_codex_pilot_audit_event_binding_rejects_identity_and_sequence_errors():
     assert "attempt_id mismatch" in result["event_binding_blockers"]
     assert "event sequence is not contiguous" in result["event_binding_blockers"]
     assert "previous_event_digest mismatch" in result["event_binding_blockers"]
+
+
+def test_codex_pilot_audit_event_binding_rejects_cross_claim_previous_event():
+    claim, event_zero, event_one = _valid_codex_audit_event_chain()
+    other_claim = _valid_codex_claim_record()
+    other_claim["attempt_id"] = "pilot-attempt-other1234"
+    other_attempt_previous = _valid_codex_audit_event(other_claim)
+    other_authorization_previous = dict(event_zero)
+    other_authorization_previous["authorization_id"] = "other-auth-reviewed"
+    other_authorization_previous["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in other_authorization_previous.items()
+            if key != "event_digest"
+        }
+    )
+    other_fingerprint_previous = dict(event_zero)
+    other_fingerprint_previous["authorization_fingerprint"] = "1" * 64
+    other_fingerprint_previous["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in other_fingerprint_previous.items()
+            if key != "event_digest"
+        }
+    )
+
+    for previous_event, expected_blocker in [
+        (other_attempt_previous, "previous attempt_id mismatch"),
+        (other_authorization_previous, "previous authorization_id mismatch"),
+        (
+            other_fingerprint_previous,
+            "previous authorization_fingerprint mismatch",
+        ),
+    ]:
+        current = dict(event_one)
+        current["previous_event_digest"] = previous_event["event_digest"]
+        current["event_digest"] = codex_pilot_audit_event_digest(
+            {key: value for key, value in current.items() if key != "event_digest"}
+        )
+
+        result = validate_codex_pilot_audit_event_binding(current, claim, previous_event)
+
+        assert result["event_structural_valid"] is True
+        assert result["previous_event_structural_valid"] is True
+        assert result["event_binding_passed"] is False
+        assert expected_blocker in result["event_binding_blockers"]
 
 
 def test_codex_pilot_audit_event_binding_rejects_previous_and_terminal_errors():
@@ -1127,7 +1240,7 @@ def test_codex_pilot_audit_event_binding_rejects_previous_and_terminal_errors():
     later["previous_lifecycle_state"] = "aborted"
     later["next_lifecycle_state"] = "failed"
     later["previous_event_digest"] = terminal["event_digest"]
-    later["event_digest"] = codex_pilot_audit_event_digest(later)
+    later["event_digest"] = "0" * 64
 
     missing_previous_result = validate_codex_pilot_audit_event_binding(
         event_one,

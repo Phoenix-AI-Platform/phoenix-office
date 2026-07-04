@@ -377,34 +377,6 @@ class CodexPilotAuthorizationPacket(SerializableContract):
     background_execution_authorized: bool
 
 
-@dataclass(slots=True)
-class CodexPilotAuditEvent(SerializableContract):
-    """Pure audit event record for a supervised Codex pilot claim lifecycle."""
-
-    schema_version: str
-    attempt_id: str
-    authorization_id: str
-    authorization_fingerprint: str
-    event_sequence: int
-    previous_lifecycle_state: str
-    next_lifecycle_state: str
-    event_category: str
-    result_category: str
-    actor_role: str
-    codex_approved: bool
-    codex_merged: bool
-    previous_event_digest: str | None
-    event_digest: str
-    branch_identity: str | None = None
-    pull_request_identity: str | None = None
-    usage_category: str | None = None
-    timeout_category: str | None = None
-    cancellation_category: str | None = None
-    final_ci_category: str | None = None
-    assistant_review_verdict: str | None = None
-    recovery_category: str | None = None
-
-
 CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
 CODEX_PILOT_AUTHORIZATION_KIND = "docs-only-supervised"
@@ -811,14 +783,11 @@ def codex_pilot_objective_digest(objective: object) -> str:
 
 
 def codex_pilot_audit_event_digest(event: object) -> str:
-    """Return the deterministic v1 audit-event digest."""
+    """Return the deterministic v1 audit-event digest for a complete payload."""
     data = _contract_mapping(event)
-    if "event_digest" not in data:
-        raise ValueError("audit event digest payload is invalid")
-    payload = {key: value for key, value in data.items() if key != "event_digest"}
-    _validate_codex_pilot_audit_digest_payload(payload)
+    _validate_codex_pilot_audit_digest_payload(data)
     canonical = json.dumps(
-        payload,
+        data,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -949,14 +918,6 @@ def validate_codex_pilot_audit_event_binding(
     """Validate audit-event identity and chain binding without side effects."""
     event_result = validate_codex_pilot_audit_event_record(event)
     blockers: list[str] = []
-    if not event_result["event_structural_valid"]:
-        return {
-            **event_result,
-            "claim_structural_valid": False,
-            "previous_event_structural_valid": None,
-        }
-    event_data = _contract_mapping(event)
-
     claim_result = validate_codex_pilot_claim_record(claim_record)
     if not claim_result["claim_structural_valid"]:
         return {
@@ -966,6 +927,13 @@ def validate_codex_pilot_audit_event_binding(
             "event_binding_passed": False,
             "previous_event_structural_valid": None,
         }
+    if not event_result["event_structural_valid"]:
+        return {
+            **event_result,
+            "claim_structural_valid": True,
+            "previous_event_structural_valid": None,
+        }
+    event_data = _contract_mapping(event)
     claim = _contract_mapping(claim_record)
     for field_name in [
         "attempt_id",
@@ -997,7 +965,18 @@ def validate_codex_pilot_audit_event_binding(
                 blockers.append("previous event is structurally invalid")
             else:
                 previous = _contract_mapping(previous_event)
-                previous_digest = codex_pilot_audit_event_digest(previous)
+                previous_digest = codex_pilot_audit_event_digest(
+                    _audit_event_digest_payload_from_record(previous)
+                )
+                for field_name in [
+                    "attempt_id",
+                    "authorization_id",
+                    "authorization_fingerprint",
+                ]:
+                    if previous.get(field_name) != claim.get(field_name):
+                        blockers.append(f"previous {field_name} mismatch")
+                    if previous.get(field_name) != event_data.get(field_name):
+                        blockers.append(f"previous {field_name} mismatch")
                 if previous.get("event_digest") != previous_digest:
                     blockers.append("previous event digest mismatch")
                 if previous.get("event_sequence") + 1 != sequence:
@@ -1149,7 +1128,25 @@ def _audit_event_structural_errors(event: dict[str, Any]) -> list[str]:
         errors.append("audit event is missing required fields")
     if field_set - CODEX_PILOT_AUDIT_EVENT_FIELDS:
         errors.append("audit event contains unknown fields")
+    _validate_audit_event_core_shape(event, errors)
+    if _can_digest_audit_event_record(event):
+        try:
+            digest = codex_pilot_audit_event_digest(
+                _audit_event_digest_payload_from_record(event)
+            )
+        except ValueError:
+            errors.append("event_digest_mismatch")
+        else:
+            if event.get("event_digest") != digest:
+                errors.append("event_digest_mismatch")
+    return sorted(set(errors))
 
+
+def _validate_audit_event_core_shape(
+    event: dict[str, Any],
+    errors: list[str],
+) -> None:
+    field_set = set(event)
     if event.get("schema_version") != CODEX_PILOT_AUDIT_EVENT_SCHEMA_VERSION:
         errors.append("schema_version is invalid")
     for field_name in ["attempt_id", "authorization_id"]:
@@ -1184,25 +1181,26 @@ def _audit_event_structural_errors(event: dict[str, Any]) -> list[str]:
 
     sequence = event.get("event_sequence")
     previous_digest = event.get("previous_event_digest")
+    transition_key = (
+        event.get("previous_lifecycle_state"),
+        event.get("next_lifecycle_state"),
+    )
     if sequence == 0:
         if previous_digest is not None:
             errors.append("previous_event_digest must be null for sequence zero")
+        if transition_key != ("claim_not_started", "claim_created"):
+            errors.append("sequence zero transition is invalid")
     elif type(sequence) is int and sequence > 0:
         if not _is_lower_hex(previous_digest, 64):
             errors.append("previous_event_digest is invalid")
+        if transition_key == ("claim_not_started", "claim_created"):
+            errors.append("claim-created transition sequence is invalid")
+        if event.get("previous_lifecycle_state") == "claim_not_started":
+            errors.append("nonzero transition previous state is invalid")
     elif "event_sequence is invalid" not in errors:
         errors.append("event_sequence is invalid")
 
     _validate_audit_event_optional_values(event, errors)
-    if _can_digest_audit_event(event):
-        try:
-            digest = codex_pilot_audit_event_digest(event)
-        except ValueError:
-            errors.append("event_digest_mismatch")
-        else:
-            if event.get("event_digest") != digest:
-                errors.append("event_digest_mismatch")
-    return sorted(set(errors))
 
 
 def _audit_event_transition(event: dict[str, Any]) -> dict[str, object] | None:
@@ -1228,37 +1226,59 @@ def _validate_audit_event_optional_values(
             errors.append(f"{field_name} is invalid")
 
 
-def _can_digest_audit_event(event: dict[str, Any]) -> bool:
-    required_values = [
-        event.get("schema_version"),
-        event.get("attempt_id"),
-        event.get("authorization_id"),
-        event.get("authorization_fingerprint"),
-        event.get("event_sequence"),
-        event.get("previous_lifecycle_state"),
-        event.get("next_lifecycle_state"),
-        event.get("event_category"),
-        event.get("result_category"),
-        event.get("actor_role"),
-        event.get("codex_approved"),
-        event.get("codex_merged"),
-        event.get("previous_event_digest"),
-        event.get("event_digest"),
-    ]
-    return set(event).issubset(CODEX_PILOT_AUDIT_EVENT_FIELDS) and all(
-        value is not None or index == 12 for index, value in enumerate(required_values)
+def _can_digest_audit_event_record(event: dict[str, Any]) -> bool:
+    return (
+        "event_digest" in event
+        and _is_lower_hex(event.get("event_digest"), 64)
+        and not _audit_event_candidate_errors(
+            _audit_event_digest_payload_from_record(event)
+        )
     )
 
 
+def _audit_event_digest_payload_from_record(event: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in event.items() if key != "event_digest"}
+
+
 def _validate_codex_pilot_audit_digest_payload(payload: Any) -> None:
+    if _audit_event_digest_payload_errors(payload):
+        raise ValueError("audit event digest payload is invalid")
+
+
+def _audit_event_digest_payload_errors(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
-        raise ValueError("audit event digest payload is invalid")
+        return ["audit event digest payload is invalid"]
     if "event_digest" in payload:
-        raise ValueError("audit event digest payload is invalid")
-    if not set(payload).issubset(CODEX_PILOT_AUDIT_EVENT_FIELDS - {"event_digest"}):
-        raise ValueError("audit event digest payload is invalid")
+        return ["audit event digest payload is invalid"]
+    payload_fields = set(payload)
+    required_payload_fields = CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS - {
+        "event_digest"
+    }
+    if required_payload_fields - payload_fields:
+        return ["audit event digest payload is invalid"]
+    if payload_fields - (CODEX_PILOT_AUDIT_EVENT_FIELDS - {"event_digest"}):
+        return ["audit event digest payload is invalid"]
+    if _audit_event_candidate_errors(payload):
+        return ["audit event digest payload is invalid"]
     for value in payload.values():
-        _validate_audit_digest_value(value)
+        try:
+            _validate_audit_digest_value(value)
+        except ValueError:
+            return ["audit event digest payload is invalid"]
+    return []
+
+
+def _audit_event_candidate_errors(payload: dict[str, Any]) -> list[str]:
+    pseudo_event = dict(payload)
+    pseudo_event["event_digest"] = "0" * 64
+    errors: list[str] = []
+    field_set = set(pseudo_event)
+    if CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS - field_set:
+        errors.append("audit event is missing required fields")
+    if field_set - CODEX_PILOT_AUDIT_EVENT_FIELDS:
+        errors.append("audit event contains unknown fields")
+    _validate_audit_event_core_shape(pseudo_event, errors)
+    return sorted(set(errors))
 
 
 def _validate_audit_digest_value(value: Any) -> None:
