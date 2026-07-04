@@ -135,6 +135,8 @@ Schema version: `codex-pilot-audit-event.v1`.
 
 An audit event is append-only or monotonic. It binds to the immutable claim and advances the lifecycle by exactly one permitted transition.
 
+The current implementation includes pure deterministic helpers for candidate audit-event validation, digesting, and claim/previous-event binding. These helpers inspect explicit in-memory records only. They do not append events, write files, persist state, consume authorization, recover storage, invoke Codex, access GitHub or the network, create branches or PRs, approve, merge, retry, schedule, or run background work.
+
 Required fields:
 
 - `schema_version`: string, exactly `codex-pilot-audit-event.v1`

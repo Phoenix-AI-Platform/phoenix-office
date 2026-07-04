@@ -377,6 +377,34 @@ class CodexPilotAuthorizationPacket(SerializableContract):
     background_execution_authorized: bool
 
 
+@dataclass(slots=True)
+class CodexPilotAuditEvent(SerializableContract):
+    """Pure audit event record for a supervised Codex pilot claim lifecycle."""
+
+    schema_version: str
+    attempt_id: str
+    authorization_id: str
+    authorization_fingerprint: str
+    event_sequence: int
+    previous_lifecycle_state: str
+    next_lifecycle_state: str
+    event_category: str
+    result_category: str
+    actor_role: str
+    codex_approved: bool
+    codex_merged: bool
+    previous_event_digest: str | None
+    event_digest: str
+    branch_identity: str | None = None
+    pull_request_identity: str | None = None
+    usage_category: str | None = None
+    timeout_category: str | None = None
+    cancellation_category: str | None = None
+    final_ci_category: str | None = None
+    assistant_review_verdict: str | None = None
+    recovery_category: str | None = None
+
+
 CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
 CODEX_PILOT_AUTHORIZATION_KIND = "docs-only-supervised"
@@ -569,6 +597,184 @@ CODEX_PILOT_CLAIM_PROJECTION_FIELDS = [
     "retry_authorized",
     "background_execution_authorized",
 ]
+CODEX_PILOT_AUDIT_EVENT_SCHEMA_VERSION = "codex-pilot-audit-event.v1"
+CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION = (
+    "codex-pilot-audit-event-digest.v1"
+)
+CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX = (
+    f"{CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION}\n"
+)
+CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS = {
+    "schema_version",
+    "attempt_id",
+    "authorization_id",
+    "authorization_fingerprint",
+    "event_sequence",
+    "previous_lifecycle_state",
+    "next_lifecycle_state",
+    "event_category",
+    "result_category",
+    "actor_role",
+    "codex_approved",
+    "codex_merged",
+    "previous_event_digest",
+    "event_digest",
+}
+CODEX_PILOT_AUDIT_EVENT_OPTIONAL_FIELDS = {
+    "branch_identity",
+    "pull_request_identity",
+    "usage_category",
+    "timeout_category",
+    "cancellation_category",
+    "final_ci_category",
+    "assistant_review_verdict",
+    "recovery_category",
+}
+CODEX_PILOT_AUDIT_EVENT_FIELDS = (
+    CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS | CODEX_PILOT_AUDIT_EVENT_OPTIONAL_FIELDS
+)
+CODEX_PILOT_AUDIT_TERMINAL_STATES = {
+    "aborted",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "completed_pending_review",
+}
+CODEX_PILOT_AUDIT_EVENT_TRANSITIONS: dict[
+    tuple[str, str],
+    dict[str, object],
+] = {
+    ("claim_not_started", "claim_created"): {
+        "event_category": "claim_created",
+        "result_category": "claim_created",
+        "actor_role": "phoenix_gate",
+        "required": set(),
+    },
+    ("claim_created", "invocation_starting"): {
+        "event_category": "invocation_starting",
+        "result_category": "started",
+        "actor_role": "phoenix_gate",
+        "required": set(),
+    },
+    ("claim_created", "aborted"): {
+        "event_category": "claim_aborted",
+        "result_category": "aborted",
+        "actor_role": "phoenix_audit",
+        "required": {"recovery_category"},
+    },
+    ("claim_created", "failed"): {
+        "event_category": "claim_failed",
+        "result_category": "failed",
+        "actor_role": "phoenix_audit",
+        "required": {"recovery_category"},
+    },
+    ("claim_created", "cancelled"): {
+        "event_category": "claim_cancelled",
+        "result_category": "cancelled",
+        "actor_role": "phoenix_audit",
+        "required": {"cancellation_category"},
+    },
+    ("claim_created", "timed_out"): {
+        "event_category": "claim_timed_out",
+        "result_category": "timed_out",
+        "actor_role": "phoenix_audit",
+        "required": {"timeout_category"},
+    },
+    ("invocation_starting", "invocation_started"): {
+        "event_category": "invocation_started",
+        "result_category": "started",
+        "actor_role": "phoenix_gate",
+        "required": set(),
+    },
+    ("invocation_starting", "aborted"): {
+        "event_category": "invocation_start_aborted",
+        "result_category": "aborted",
+        "actor_role": "phoenix_audit",
+        "required": {"recovery_category"},
+    },
+    ("invocation_starting", "failed"): {
+        "event_category": "invocation_start_failed",
+        "result_category": "failed",
+        "actor_role": "phoenix_audit",
+        "required": {"recovery_category"},
+    },
+    ("invocation_starting", "cancelled"): {
+        "event_category": "invocation_start_cancelled",
+        "result_category": "cancelled",
+        "actor_role": "phoenix_audit",
+        "required": {"cancellation_category"},
+    },
+    ("invocation_starting", "timed_out"): {
+        "event_category": "invocation_start_timed_out",
+        "result_category": "timed_out",
+        "actor_role": "phoenix_audit",
+        "required": {"timeout_category"},
+    },
+    ("invocation_started", "pr_opened_and_stopped"): {
+        "event_category": "pr_opened_and_stopped",
+        "result_category": "opened_pr",
+        "actor_role": "phoenix_gate",
+        "required": {"branch_identity", "pull_request_identity", "usage_category"},
+    },
+    ("invocation_started", "aborted"): {
+        "event_category": "invocation_aborted",
+        "result_category": "aborted",
+        "actor_role": "phoenix_audit",
+        "required": {"usage_category", "recovery_category"},
+    },
+    ("invocation_started", "failed"): {
+        "event_category": "invocation_failed",
+        "result_category": "failed",
+        "actor_role": "phoenix_audit",
+        "required": {"usage_category", "recovery_category"},
+    },
+    ("invocation_started", "cancelled"): {
+        "event_category": "invocation_cancelled",
+        "result_category": "cancelled",
+        "actor_role": "phoenix_audit",
+        "required": {"usage_category", "cancellation_category"},
+    },
+    ("invocation_started", "timed_out"): {
+        "event_category": "invocation_timed_out",
+        "result_category": "timed_out",
+        "actor_role": "phoenix_audit",
+        "required": {"usage_category", "timeout_category"},
+    },
+    ("pr_opened_and_stopped", "completed_pending_review"): {
+        "event_category": "completed_pending_review",
+        "result_category": "completed_pending_review",
+        "actor_role": "phoenix_audit",
+        "required": {
+            "branch_identity",
+            "pull_request_identity",
+            "final_ci_category",
+            "assistant_review_verdict",
+        },
+    },
+}
+CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES = {
+    "usage_category": {"within_budget", "budget_exceeded", "usage_unknown"},
+    "timeout_category": {"timeout_not_reached", "timeout_reached", "timeout_unknown"},
+    "cancellation_category": {
+        "operator_cancelled",
+        "no_cancellation_requested",
+        "cancellation_unknown",
+    },
+    "final_ci_category": {"passed", "failed", "pending", "unknown"},
+    "assistant_review_verdict": {
+        "approved",
+        "changes_requested",
+        "commented",
+        "pending",
+        "unknown",
+    },
+    "recovery_category": {
+        "durable_claim_without_invocation",
+        "runner_crash",
+        "operator_recovery",
+        "storage_uncertain",
+    },
+}
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -602,6 +808,26 @@ def codex_pilot_objective_digest(objective: object) -> str:
         CODEX_PILOT_OBJECTIVE_DIGEST_PREFIX.encode("utf-8")
         + objective.encode("utf-8")
     ).hexdigest()
+
+
+def codex_pilot_audit_event_digest(event: object) -> str:
+    """Return the deterministic v1 audit-event digest."""
+    data = _contract_mapping(event)
+    if "event_digest" not in data:
+        raise ValueError("audit event digest payload is invalid")
+    payload = {key: value for key, value in data.items() if key != "event_digest"}
+    _validate_codex_pilot_audit_digest_payload(payload)
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    digest_input = (
+        CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX.encode("utf-8")
+        + canonical.encode("utf-8")
+    )
+    return hashlib.sha256(digest_input).hexdigest()
 
 
 def codex_pilot_authorization_structural_errors(package: object) -> list[str]:
@@ -702,6 +928,112 @@ def validate_codex_pilot_claim_binding(
         "claim_binding_blockers": sorted(blockers),
         "claim_binding_passed": not blockers,
     }
+
+
+def validate_codex_pilot_audit_event_record(event: object) -> dict[str, Any]:
+    """Validate a candidate codex-pilot-audit-event.v1 record."""
+    errors = codex_pilot_audit_event_structural_errors(event)
+    return {
+        "event_binding_blockers": [],
+        "event_binding_passed": False,
+        "event_structural_errors": errors,
+        "event_structural_valid": not errors,
+    }
+
+
+def validate_codex_pilot_audit_event_binding(
+    event: object,
+    claim_record: object,
+    previous_event: object | None,
+) -> dict[str, Any]:
+    """Validate audit-event identity and chain binding without side effects."""
+    event_result = validate_codex_pilot_audit_event_record(event)
+    blockers: list[str] = []
+    if not event_result["event_structural_valid"]:
+        return {
+            **event_result,
+            "claim_structural_valid": False,
+            "previous_event_structural_valid": None,
+        }
+    event_data = _contract_mapping(event)
+
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    if not claim_result["claim_structural_valid"]:
+        return {
+            **event_result,
+            "claim_structural_valid": False,
+            "event_binding_blockers": ["claim record invalid"],
+            "event_binding_passed": False,
+            "previous_event_structural_valid": None,
+        }
+    claim = _contract_mapping(claim_record)
+    for field_name in [
+        "attempt_id",
+        "authorization_id",
+        "authorization_fingerprint",
+    ]:
+        if event_data.get(field_name) != claim.get(field_name):
+            blockers.append(f"{field_name} mismatch")
+
+    sequence = event_data["event_sequence"]
+    previous_structural_valid: bool | None = None
+    if sequence == 0:
+        if previous_event is not None:
+            blockers.append("previous event must be absent for sequence zero")
+        if event_data.get("previous_event_digest") is not None:
+            blockers.append("previous_event_digest must be null for sequence zero")
+        if (
+            event_data.get("previous_lifecycle_state"),
+            event_data.get("next_lifecycle_state"),
+        ) != ("claim_not_started", "claim_created"):
+            blockers.append("sequence zero transition is invalid")
+    else:
+        if previous_event is None:
+            blockers.append("previous event is required")
+        else:
+            previous_record_result = validate_codex_pilot_audit_event_record(previous_event)
+            previous_structural_valid = previous_record_result["event_structural_valid"]
+            if not previous_structural_valid:
+                blockers.append("previous event is structurally invalid")
+            else:
+                previous = _contract_mapping(previous_event)
+                previous_digest = codex_pilot_audit_event_digest(previous)
+                if previous.get("event_digest") != previous_digest:
+                    blockers.append("previous event digest mismatch")
+                if previous.get("event_sequence") + 1 != sequence:
+                    blockers.append("event sequence is not contiguous")
+                if event_data.get("previous_event_digest") != previous_digest:
+                    blockers.append("previous_event_digest mismatch")
+                if previous.get("next_lifecycle_state") in CODEX_PILOT_AUDIT_TERMINAL_STATES:
+                    blockers.append("previous event is terminal")
+                if event_data.get("previous_lifecycle_state") != previous.get(
+                    "next_lifecycle_state"
+                ):
+                    blockers.append("previous lifecycle state mismatch")
+                if (
+                    previous.get("next_lifecycle_state") == "pr_opened_and_stopped"
+                    and event_data.get("next_lifecycle_state") == "completed_pending_review"
+                ):
+                    for field_name in ["branch_identity", "pull_request_identity"]:
+                        if event_data.get(field_name) != previous.get(field_name):
+                            blockers.append(f"{field_name} mismatch")
+
+    return {
+        **event_result,
+        "claim_structural_valid": True,
+        "event_binding_blockers": sorted(set(blockers)),
+        "event_binding_passed": not blockers,
+        "previous_event_structural_valid": previous_structural_valid,
+    }
+
+
+def codex_pilot_audit_event_structural_errors(event: object) -> list[str]:
+    """Return sanitized structural errors for a Codex pilot audit event."""
+    try:
+        data = _contract_mapping(event)
+    except ValueError:
+        return ["audit event root must be an object"]
+    return _audit_event_structural_errors(data)
 
 
 def _claim_result(
@@ -808,6 +1140,146 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
         if type(package.get(field_name)) is not bool or package.get(field_name) is not False:
             errors.append(f"authorization {field_name} must be JSON boolean false")
     return sorted(set(errors))
+
+
+def _audit_event_structural_errors(event: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    field_set = set(event)
+    if CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS - field_set:
+        errors.append("audit event is missing required fields")
+    if field_set - CODEX_PILOT_AUDIT_EVENT_FIELDS:
+        errors.append("audit event contains unknown fields")
+
+    if event.get("schema_version") != CODEX_PILOT_AUDIT_EVENT_SCHEMA_VERSION:
+        errors.append("schema_version is invalid")
+    for field_name in ["attempt_id", "authorization_id"]:
+        if not _is_safe_identifier(event.get(field_name)):
+            errors.append(f"{field_name} is invalid")
+    if not _is_lower_hex(event.get("authorization_fingerprint"), 64):
+        errors.append("authorization_fingerprint is invalid")
+    if type(event.get("event_sequence")) is not int or event.get("event_sequence") < 0:
+        errors.append("event_sequence is invalid")
+    if not _is_lower_hex(event.get("event_digest"), 64):
+        errors.append("event_digest is invalid")
+    if type(event.get("codex_approved")) is not bool or event.get("codex_approved") is not False:
+        errors.append("codex_approved must be JSON boolean false")
+    if type(event.get("codex_merged")) is not bool or event.get("codex_merged") is not False:
+        errors.append("codex_merged must be JSON boolean false")
+
+    transition = _audit_event_transition(event)
+    if transition is None:
+        errors.append("invalid_lifecycle_transition")
+    else:
+        for field_name in ["event_category", "result_category", "actor_role"]:
+            if event.get(field_name) != transition[field_name]:
+                errors.append(f"{field_name} is invalid")
+        required = set(transition["required"])
+        present_optional = CODEX_PILOT_AUDIT_EVENT_OPTIONAL_FIELDS & field_set
+        missing_required = required - field_set
+        forbidden_present = present_optional - required
+        if missing_required:
+            errors.append("audit event is missing required optional fields")
+        if forbidden_present:
+            errors.append("audit event contains forbidden optional fields")
+
+    sequence = event.get("event_sequence")
+    previous_digest = event.get("previous_event_digest")
+    if sequence == 0:
+        if previous_digest is not None:
+            errors.append("previous_event_digest must be null for sequence zero")
+    elif type(sequence) is int and sequence > 0:
+        if not _is_lower_hex(previous_digest, 64):
+            errors.append("previous_event_digest is invalid")
+    elif "event_sequence is invalid" not in errors:
+        errors.append("event_sequence is invalid")
+
+    _validate_audit_event_optional_values(event, errors)
+    if _can_digest_audit_event(event):
+        try:
+            digest = codex_pilot_audit_event_digest(event)
+        except ValueError:
+            errors.append("event_digest_mismatch")
+        else:
+            if event.get("event_digest") != digest:
+                errors.append("event_digest_mismatch")
+    return sorted(set(errors))
+
+
+def _audit_event_transition(event: dict[str, Any]) -> dict[str, object] | None:
+    previous_state = event.get("previous_lifecycle_state")
+    next_state = event.get("next_lifecycle_state")
+    if not isinstance(previous_state, str) or not isinstance(next_state, str):
+        return None
+    return CODEX_PILOT_AUDIT_EVENT_TRANSITIONS.get((previous_state, next_state))
+
+
+def _validate_audit_event_optional_values(
+    event: dict[str, Any],
+    errors: list[str],
+) -> None:
+    if "branch_identity" in event and not _is_safe_branch(event.get("branch_identity")):
+        errors.append("branch_identity is invalid")
+    if "pull_request_identity" in event and not _is_safe_pull_request_identity(
+        event.get("pull_request_identity")
+    ):
+        errors.append("pull_request_identity is invalid")
+    for field_name, allowed in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES.items():
+        if field_name in event and event.get(field_name) not in allowed:
+            errors.append(f"{field_name} is invalid")
+
+
+def _can_digest_audit_event(event: dict[str, Any]) -> bool:
+    required_values = [
+        event.get("schema_version"),
+        event.get("attempt_id"),
+        event.get("authorization_id"),
+        event.get("authorization_fingerprint"),
+        event.get("event_sequence"),
+        event.get("previous_lifecycle_state"),
+        event.get("next_lifecycle_state"),
+        event.get("event_category"),
+        event.get("result_category"),
+        event.get("actor_role"),
+        event.get("codex_approved"),
+        event.get("codex_merged"),
+        event.get("previous_event_digest"),
+        event.get("event_digest"),
+    ]
+    return set(event).issubset(CODEX_PILOT_AUDIT_EVENT_FIELDS) and all(
+        value is not None or index == 12 for index, value in enumerate(required_values)
+    )
+
+
+def _validate_codex_pilot_audit_digest_payload(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("audit event digest payload is invalid")
+    if "event_digest" in payload:
+        raise ValueError("audit event digest payload is invalid")
+    if not set(payload).issubset(CODEX_PILOT_AUDIT_EVENT_FIELDS - {"event_digest"}):
+        raise ValueError("audit event digest payload is invalid")
+    for value in payload.values():
+        _validate_audit_digest_value(value)
+
+
+def _validate_audit_digest_value(value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        if not _is_fingerprint_safe_text(value, 500):
+            raise ValueError("audit event digest payload is invalid")
+    elif isinstance(value, bool):
+        return
+    elif type(value) is int:
+        return
+    else:
+        raise ValueError("audit event digest payload is invalid")
+
+
+def _is_safe_pull_request_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"pr-[1-9][0-9]{0,9}", value) is not None
+    )
 
 
 def _is_fingerprint_safe_text(value: str, max_length: int) -> bool:
