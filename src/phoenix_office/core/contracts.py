@@ -942,6 +942,179 @@ def validate_codex_pilot_claim_binding(
     }
 
 
+def compose_codex_pilot_initial_claim_bundle(
+    authorization_package: object,
+    attempt_id: object,
+) -> dict[str, Any]:
+    """Compose the deterministic initial claim bundle for one supervised attempt."""
+    blockers: list[str] = []
+    authorization_result = validate_codex_pilot_authorization_packet(authorization_package)
+    if not authorization_result["authorization_structural_valid"]:
+        blockers.append("authorization package is invalid")
+    if not _is_exact_codex_pilot_attempt_id(attempt_id):
+        blockers.append("attempt_id is invalid")
+    if blockers:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": blockers,
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    authorization = _contract_mapping(authorization_package)
+    claim_record = {
+        "schema_version": CODEX_PILOT_CLAIM_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "authorization_id": authorization["authorization_id"],
+        "authorization_fingerprint_schema_version": (
+            CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION
+        ),
+        "authorization_fingerprint": codex_pilot_authorization_fingerprint(authorization),
+        "handoff_id": authorization["handoff_id"],
+        "repository": authorization["repository"],
+        "pilot_kind": authorization["pilot_kind"],
+        "base_commit_sha": authorization["base_commit_sha"],
+        "branch_name": authorization["branch_name"],
+        "expected_pr_title": authorization["expected_pr_title"],
+        "objective_digest_schema_version": CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION,
+        "objective_digest": codex_pilot_objective_digest(authorization["objective"]),
+        "allowed_paths": list(authorization["allowed_paths"]),
+        "validation_commands": list(authorization["validation_commands"]),
+        "budget_metric": authorization["budget_metric"],
+        "budget_ceiling": authorization["budget_ceiling"],
+        "timeout_seconds": authorization["timeout_seconds"],
+        "budget_enforcement_ref": authorization["budget_enforcement_ref"],
+        "cancellation_ref": authorization["cancellation_ref"],
+        "authentication_runner_ref": authorization["authentication_runner_ref"],
+        "branch_permission_ref": authorization["branch_permission_ref"],
+        "pr_permission_ref": authorization["pr_permission_ref"],
+        "duplicate_pr_check_ref": authorization["duplicate_pr_check_ref"],
+        "branch_collision_check_ref": authorization["branch_collision_check_ref"],
+        "codex_no_approve_merge_ref": authorization["codex_no_approve_merge_ref"],
+        "final_ci_required": authorization["final_ci_required"],
+        "assistant_review_required": authorization["assistant_review_required"],
+        "worker_may_approve": authorization["worker_may_approve"],
+        "worker_may_merge": authorization["worker_may_merge"],
+        "one_invocation_only": authorization["one_invocation_only"],
+        "retry_authorized": authorization["retry_authorized"],
+        "background_execution_authorized": authorization["background_execution_authorized"],
+        "initial_lifecycle_state": "claim_created",
+    }
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    if not claim_result["claim_structural_valid"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["claim record is invalid"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    claim_binding = validate_codex_pilot_claim_binding(claim_record, authorization)
+    if not claim_binding["claim_binding_passed"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["claim binding failed"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    audit_event = {
+        "schema_version": CODEX_PILOT_AUDIT_EVENT_SCHEMA_VERSION,
+        "attempt_id": claim_record["attempt_id"],
+        "authorization_id": claim_record["authorization_id"],
+        "authorization_fingerprint": claim_record["authorization_fingerprint"],
+        "event_sequence": 0,
+        "previous_lifecycle_state": "claim_not_started",
+        "next_lifecycle_state": "claim_created",
+        "event_category": "claim_created",
+        "result_category": "claim_created",
+        "actor_role": "phoenix_gate",
+        "codex_approved": False,
+        "codex_merged": False,
+        "previous_event_digest": None,
+    }
+    try:
+        audit_event["event_digest"] = codex_pilot_audit_event_digest(audit_event)
+    except ValueError:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["sequence zero audit event is invalid"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    audit_event_result = validate_codex_pilot_audit_event_record(audit_event)
+    if not audit_event_result["event_structural_valid"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["sequence zero audit event is invalid"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    audit_event_binding = validate_codex_pilot_audit_event_binding(
+        audit_event,
+        claim_record,
+        None,
+    )
+    if not audit_event_binding["event_binding_passed"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["sequence zero audit event binding failed"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    snapshot_result = derive_codex_pilot_attempt_snapshot(claim_record, [audit_event])
+    if not snapshot_result["snapshot_derivation_passed"] or snapshot_result["snapshot"] is None:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["snapshot derivation failed"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    snapshot = snapshot_result["snapshot"]
+    snapshot_validation = validate_codex_pilot_attempt_snapshot(snapshot)
+    if not snapshot_validation["snapshot_structural_valid"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["snapshot is invalid"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
+        snapshot,
+        claim_record,
+        [audit_event],
+    )
+    if not snapshot_binding["snapshot_binding_passed"]:
+        return {
+            "claim_bundle_passed": False,
+            "claim_bundle_blockers": ["snapshot binding failed"],
+            "claim_record": None,
+            "audit_events": None,
+            "snapshot": None,
+        }
+
+    return {
+        "claim_bundle_passed": True,
+        "claim_bundle_blockers": [],
+        "claim_record": claim_record,
+        "audit_events": [audit_event],
+        "snapshot": snapshot,
+    }
+
+
 def validate_codex_pilot_audit_event_record(event: object) -> dict[str, Any]:
     """Validate a candidate codex-pilot-audit-event.v1 record."""
     errors = codex_pilot_audit_event_structural_errors(event)
@@ -1435,9 +1608,7 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
         errors.append("snapshot contains unknown fields")
     if snapshot.get("schema_version") != CODEX_PILOT_ATTEMPT_SNAPSHOT_SCHEMA_VERSION:
         errors.append("snapshot schema_version is invalid")
-    if not _is_safe_identifier(snapshot.get("attempt_id")) or not _is_attempt_id(
-        snapshot.get("attempt_id")
-    ):
+    if not _is_exact_codex_pilot_attempt_id(snapshot.get("attempt_id")):
         errors.append("snapshot attempt_id is invalid")
     if not _is_safe_identifier(snapshot.get("authorization_id")):
         errors.append("snapshot authorization_id is invalid")
@@ -1653,7 +1824,7 @@ def _validate_claim_types_and_shapes(
     for field_name in CODEX_PILOT_CLAIM_REFERENCE_FIELDS:
         if not _is_safe_identifier(record.get(field_name)):
             errors.append(f"{field_name} is invalid")
-    if not _is_attempt_id(record.get("attempt_id")):
+    if not _is_exact_codex_pilot_attempt_id(record.get("attempt_id")):
         errors.append("attempt_id is invalid")
     if not _is_lower_hex(record.get("authorization_fingerprint"), 64):
         errors.append("authorization_fingerprint is invalid")
@@ -1766,6 +1937,10 @@ def _is_attempt_id(value: object) -> bool:
         is not None
         and not _contains_unsafe_marker(value)
     )
+
+
+def _is_exact_codex_pilot_attempt_id(value: object) -> bool:
+    return _is_safe_identifier(value) and _is_attempt_id(value)
 
 
 def _is_lower_hex(value: object, length: int) -> bool:
