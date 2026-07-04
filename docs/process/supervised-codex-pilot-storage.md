@@ -112,10 +112,15 @@ A transactional database implementation must:
 
 An atomic-filesystem implementation must:
 
-- write the full unit using atomic publish semantics
+- stage the full unit privately before publication
+- durably flush every staged record byte and manifest byte before publication
+- publish exactly one authoritative committed manifest/catalog atomically
+- durably synchronize the containing directory or namespace after publication before returning `created`
+- durably synchronize any required parent namespace for newly created directories before returning `created`
 - ensure readers never observe a mix of old and new unit members
 - ensure uniqueness entries and records are not published separately
-- reject any partial file, directory, or rename sequence that could expose a partial unit
+- reject any partial file, directory, flush, or rename sequence that could expose a partial unit
+- treat any publication that omits the required file-content or directory-synchronization barriers as `claim_durability_uncertain`
 - preserve deterministic conflict precedence
 - fail closed if atomic durability cannot be proven
 - avoid any cleanup path that can make a failed create appear successful
@@ -126,8 +131,15 @@ If the backend cannot provide a single authoritative publication point plus a co
 
 A future trusted Phoenix gate/storage component must also expose a read operation that loads the complete committed unit and revalidates all stored data.
 
+The v1 read selector is `read_initial_claim_bundle(attempt_id, trusted_authorization_context)`. A backend may express the same rule as an internal precondition, but the authoritative committed unit must still be selected by exact `attempt_id` lookup.
+
 The read operation must:
 
+- validate the `attempt_id` using the exact attempt-ID rule from the claim schema
+- resolve the unit only through the authoritative `attempt_id` uniqueness entry or committed manifest/catalog
+- require the `authorization_id` and `authorization_fingerprint` uniqueness entries to resolve to that same committed unit
+- reject alternate selectors, aliases, or fallback lookups unless a later reviewed contract adds them explicitly
+- return `missing_commit` when the authoritative `attempt_id` entry does not exist
 - load the claim record, sequence-zero event, snapshot, and uniqueness entries together
 - verify the exact committed sequence-zero history
 - verify all record bindings, digests, identities, and uniqueness entries
