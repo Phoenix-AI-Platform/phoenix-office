@@ -422,6 +422,79 @@ def test_codex_pilot_fingerprint_preserves_list_order() -> None:
     )
 
 
+def test_codex_pilot_fingerprint_preserves_validation_commands_order() -> None:
+    package = _valid_authorization_packet()
+    reordered = dict(package)
+    reordered["validation_commands"] = list(reversed(REQUIRED_COMMANDS))
+
+    assert cli._codex_pilot_authorization_fingerprint(package) != (
+        cli._codex_pilot_authorization_fingerprint(reordered)
+    )
+
+
+def test_codex_pilot_fingerprint_command_rejects_reordered_validation_commands(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    authorization = _valid_authorization_packet()
+    authorization["validation_commands"] = list(reversed(REQUIRED_COMMANDS))
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=authorization
+    )
+
+    exit_code, report, json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 1
+    assert report["authorization_inspection_passed"] is False
+    assert report["authorization_fingerprint_valid"] is False
+    assert report["authorization_fingerprint"] is None
+    assert "authorization structural blocked" in (
+        report["blockers_by_source"]["authorization"]
+    )
+    assert "canonical" not in json_output.lower()
+
+
+def test_codex_pilot_fingerprint_uses_the_authorization_object_that_was_inspected(
+    tmp_path, capsys, monkeypatch
+):
+    _install_runtime_mocks(monkeypatch)
+    inspected_authorization = _valid_authorization_packet()
+    replacement_authorization = _valid_authorization_packet()
+    replacement_authorization["authorization_id"] = "pilot-auth-replacement"
+    handoff_path, evidence_path, authorization_path = _write_all(
+        tmp_path, authorization=inspected_authorization
+    )
+    original_read_json_object_file = cli._read_json_object_file
+    authorization_reads = 0
+
+    def fake_read_json_object_file(path: Path):
+        nonlocal authorization_reads
+        if path == authorization_path:
+            authorization_reads += 1
+            if authorization_reads == 1:
+                return inspected_authorization
+            return replacement_authorization
+        return original_read_json_object_file(path)
+
+    monkeypatch.setattr(cli, "_read_json_object_file", fake_read_json_object_file)
+
+    exit_code, report, _json_output = _run_json(
+        handoff_path, evidence_path, authorization_path, capsys
+    )
+
+    assert exit_code == 0
+    assert authorization_reads == 1
+    assert report["authorization_id"] == "pilot-auth-issue-292"
+    assert report["authorization_fingerprint"] == _expected_fingerprint(
+        inspected_authorization
+    )
+    assert report["authorization_fingerprint"] != _expected_fingerprint(
+        replacement_authorization
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

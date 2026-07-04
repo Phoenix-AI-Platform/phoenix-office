@@ -2575,6 +2575,20 @@ def _run_codex_pilot_authorization(
     evidence_path: Path,
     authorization_path: Path,
 ) -> dict[str, Any]:
+    _package, report = _run_codex_pilot_authorization_inspection(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        authorization_path=authorization_path,
+    )
+    return report
+
+
+def _run_codex_pilot_authorization_inspection(
+    *,
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     preflight_report = _run_codex_pilot_preflight(
         handoff_path=handoff_path,
         evidence_path=evidence_path,
@@ -2619,7 +2633,7 @@ def _run_codex_pilot_authorization(
         package=package,
         structural_valid=structural_valid,
     )
-    return {
+    report = {
         **safe_fields,
         "authorization_binding_blockers": sorted(binding_blockers),
         "authorization_binding_passed": authorization_binding_passed,
@@ -2648,6 +2662,7 @@ def _run_codex_pilot_authorization(
         "pull_request_created": False,
         "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
     }
+    return package if authorization_packet_valid_for_one_attempt else None, report
 
 
 def _load_codex_pilot_authorization_packet(
@@ -2817,10 +2832,12 @@ def _run_codex_pilot_fingerprint(
     evidence_path: Path,
     authorization_path: Path,
 ) -> dict[str, Any]:
-    authorization_report = _run_codex_pilot_authorization(
-        handoff_path=handoff_path,
-        evidence_path=evidence_path,
-        authorization_path=authorization_path,
+    authorization_package, authorization_report = (
+        _run_codex_pilot_authorization_inspection(
+            handoff_path=handoff_path,
+            evidence_path=evidence_path,
+            authorization_path=authorization_path,
+        )
     )
     authorization_inspection_passed = bool(
         authorization_report.get("authorization_packet_valid_for_one_attempt")
@@ -2829,8 +2846,11 @@ def _run_codex_pilot_fingerprint(
     fingerprint: str | None = None
     if authorization_inspection_passed:
         try:
-            package = _read_json_object_file(authorization_path)
-            fingerprint = _codex_pilot_authorization_fingerprint(package)
+            if authorization_package is None:
+                raise ValueError("authorization package is unavailable")
+            fingerprint = _codex_pilot_authorization_fingerprint(
+                authorization_package
+            )
         except (TypeError, ValueError):
             fingerprint_blockers.append(
                 "authorization fingerprint payload is invalid"
