@@ -1438,10 +1438,6 @@ def test_classify_codex_pilot_initial_claim_conflicts_rejects_invalid_inputs():
         "conflict_classification_blockers": ["authorization_package_invalid"],
     }
 
-    class _Truthy:
-        def __bool__(self) -> bool:
-            return True
-
     invalid_observations = [
         object(),
         {},
@@ -1477,14 +1473,10 @@ def test_classify_codex_pilot_initial_claim_conflicts_rejects_invalid_inputs():
             authorization_id_conflict=False,
             authorization_fingerprint_conflict=None,
         ),
-        _valid_conflict_observation(
-            attempt_id_conflict=_Truthy(),
-            authorization_id_conflict=False,
-            authorization_fingerprint_conflict=False,
-        ),
     ]
 
     for observation in invalid_observations:
+        observation_before = copy.deepcopy(observation)
         result = classify_codex_pilot_initial_claim_conflicts(
             prepared,
             authorization,
@@ -1496,6 +1488,96 @@ def test_classify_codex_pilot_initial_claim_conflicts_rejects_invalid_inputs():
             "conflict_category": None,
             "conflict_classification_blockers": ["conflict_observation_invalid"],
         }
+        if isinstance(observation, dict):
+            assert observation == observation_before
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_does_not_mutate_observation():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    valid_observation = _valid_conflict_observation(
+        attempt_id_conflict=True,
+        authorization_id_conflict=True,
+        authorization_fingerprint_conflict=True,
+    )
+    valid_observation_before = copy.deepcopy(valid_observation)
+    classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        valid_observation,
+    )
+    assert valid_observation == valid_observation_before
+
+    invalid_observations = [
+        {
+            "attempt_id_conflict": True,
+            "authorization_id_conflict": False,
+            "authorization_fingerprint_conflict": False,
+            "extra": "not allowed",
+        },
+        {
+            "attempt_id_conflict": True,
+            "authorization_id_conflict": False,
+            "authorization_fingerprint_conflict": {"nested": True},
+        },
+    ]
+    for observation in invalid_observations:
+        observation_before = copy.deepcopy(observation)
+        classify_codex_pilot_initial_claim_conflicts(
+            prepared,
+            authorization,
+            observation,
+        )
+        assert observation == observation_before
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_sorts_and_deduplicates_blockers():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    malformed_prepared = copy.deepcopy(prepared)
+    malformed_commit = malformed_prepared["prepared_commit"]
+    malformed_commit["prepared_commit_passed"] = False
+    malformed_commit["prepared_commit_blockers"] = ["already blocked"]
+    malformed_commit["claim_record"] = {"schema_version": "codex-pilot-claim.v1"}
+    malformed_commit["sequence_zero_event"] = {
+        "schema_version": "codex-pilot-audit-event.v1"
+    }
+    malformed_commit["snapshot"] = {"schema_version": "codex-pilot-attempt-snapshot.v1"}
+    malformed_commit["claim_record_bytes"] = "not-bytes"
+    malformed_commit["sequence_zero_event_bytes"] = "not-bytes"
+    malformed_commit["snapshot_bytes"] = "not-bytes"
+    malformed_commit["uniqueness_entries"] = []
+
+    result = classify_codex_pilot_initial_claim_conflicts(
+        malformed_prepared,
+        authorization,
+        _valid_conflict_observation(),
+    )
+
+    assert result["conflict_classification_passed"] is False
+    assert result["conflict_detected"] is None
+    assert result["conflict_category"] is None
+    assert result["conflict_classification_blockers"] == sorted(
+        set(result["conflict_classification_blockers"])
+    )
+    assert "prepared_commit_result_invalid" in result["conflict_classification_blockers"]
+    assert "claim_record_invalid" in result["conflict_classification_blockers"]
+    assert "sequence_zero_event_invalid" in result["conflict_classification_blockers"]
+    assert "snapshot_invalid" in result["conflict_classification_blockers"]
+    assert "claim_record_bytes_invalid" in result["conflict_classification_blockers"]
+    assert "sequence_zero_event_bytes_invalid" in result["conflict_classification_blockers"]
+    assert "snapshot_bytes_invalid" in result["conflict_classification_blockers"]
+    assert "prepared_commit_uniqueness_invalid" in result["conflict_classification_blockers"]
 
 
 def test_classify_codex_pilot_initial_claim_conflicts_does_not_touch_external_dependencies(
