@@ -115,6 +115,7 @@ def test_validate_codex_pilot_initial_claim_store_create_result_accepts_every_ca
         [],
         {},
         {"claim_store_create_category": "created", "extra": "metadata"},
+        _DictSubclass(claim_store_create_category="created"),
         {_StrSubclass("claim_store_create_category"): "created"},
         {_FieldEnum.CLAIM_STORE_CREATE_CATEGORY: "created"},
         {_FieldStrEnum.CLAIM_STORE_CREATE_CATEGORY: "created"},
@@ -145,10 +146,15 @@ def test_validate_codex_pilot_initial_claim_store_create_result_rejects_invalid_
         True,
         0,
         1,
+        "not-a-category",
+        " created",
+        "CREATED",
+        {"nested": True},
         _FieldEnum.CLAIM_STORE_CREATE_CATEGORY,
         _FieldStrEnum.CLAIM_STORE_CREATE_CATEGORY,
         Exception("created"),
         _TruthyCategory(),
+        _StrSubclass("created"),
     ],
 )
 def test_validate_codex_pilot_initial_claim_store_create_result_rejects_invalid_category_types(
