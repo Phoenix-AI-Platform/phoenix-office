@@ -1832,7 +1832,6 @@ def validate_codex_pilot_initial_claim_store_create_result(
     result: object,
 ) -> dict[str, object]:
     """Validate the bounded initial-claim store create result shape."""
-    blockers: set[str] = set()
     if type(result) is not dict:
         return _initial_claim_store_create_result(
             result_valid=False,
@@ -1842,10 +1841,25 @@ def validate_codex_pilot_initial_claim_store_create_result(
         )
 
     data = result
-    if set(data) != CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_RESULT_FIELDS:
-        blockers.add("claim_store_create_result_invalid")
+    if len(data) != 1:
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=["claim_store_create_result_invalid"],
+        )
 
-    category = data.get("claim_store_create_category")
+    key = next(iter(data))
+    if type(key) is not str or key != "claim_store_create_category":
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=["claim_store_create_result_invalid"],
+        )
+
+    category = data["claim_store_create_category"]
+    blockers: set[str] = set()
     if type(category) is not str or category not in (
         CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_CATEGORIES
     ):

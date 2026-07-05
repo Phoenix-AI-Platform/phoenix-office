@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from enum import Enum, StrEnum
 from typing import get_type_hints
 
 import pytest
@@ -38,6 +39,27 @@ class _StrSubclass(str):
     pass
 
 
+class _FieldEnum(Enum):
+    CLAIM_STORE_CREATE_CATEGORY = "claim_store_create_category"
+
+
+class _FieldStrEnum(StrEnum):
+    CLAIM_STORE_CREATE_CATEGORY = "claim_store_create_category"
+
+
+class _TruthyCategory:
+    def __bool__(self) -> bool:
+        return True
+
+
+class _HostileKey:
+    def __hash__(self) -> int:
+        return 0
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
+
+
 class _Bomb:
     def __getattr__(self, name: str) -> object:
         raise AssertionError(name)
@@ -48,6 +70,8 @@ class _Bomb:
 
 def test_codex_pilot_initial_claim_store_protocol_is_exact_and_not_runtime_checkable():
     assert getattr(CodexPilotInitialClaimStore, "_is_runtime_protocol", False) is False
+    with pytest.raises(TypeError):
+        isinstance(object(), CodexPilotInitialClaimStore)
 
     signature = inspect.signature(CodexPilotInitialClaimStore.create_initial_claim_commit)
     assert list(signature.parameters) == [
@@ -85,58 +109,63 @@ def test_validate_codex_pilot_initial_claim_store_create_result_accepts_every_ca
 
 
 @pytest.mark.parametrize(
-    "result, blockers",
+    "result",
     [
-        (None, ["claim_store_create_result_invalid"]),
-        ([], ["claim_store_create_result_invalid"]),
-        ({}, ["claim_store_create_result_invalid", "claim_store_create_category_invalid"]),
-        (
-            {"claim_store_create_category": "created", "extra": "metadata"},
-            ["claim_store_create_result_invalid"],
-        ),
-        (
-            {"claim_store_create_category": " created"},
-            ["claim_store_create_category_invalid"],
-        ),
-        (
-            {"claim_store_create_category": "created "},
-            ["claim_store_create_category_invalid"],
-        ),
-        (
-            {"claim_store_create_category": "CREATED"},
-            ["claim_store_create_category_invalid"],
-        ),
-        (
-            {"claim_store_create_category": "not-a-category"},
-            ["claim_store_create_category_invalid"],
-        ),
-        (
-            {"claim_store_create_category": _StrSubclass("created")},
-            ["claim_store_create_category_invalid"],
-        ),
-        (
-            _DictSubclass(claim_store_create_category="created"),
-            ["claim_store_create_result_invalid"],
-        ),
-        (
-            {"claim_store_create_category": {"nested": True}},
-            ["claim_store_create_category_invalid"],
-        ),
+        None,
+        [],
+        {},
+        {"claim_store_create_category": "created", "extra": "metadata"},
+        {_StrSubclass("claim_store_create_category"): "created"},
+        {_FieldEnum.CLAIM_STORE_CREATE_CATEGORY: "created"},
+        {_FieldStrEnum.CLAIM_STORE_CREATE_CATEGORY: "created"},
+        {_HostileKey(): "created"},
     ],
 )
-def test_validate_codex_pilot_initial_claim_store_create_result_rejects_invalid_shapes(
+def test_validate_codex_pilot_initial_claim_store_create_result_rejects_invalid_field_shapes(
     result: object,
-    blockers: list[str],
 ):
-    original = json.loads(json.dumps(result)) if isinstance(result, dict) else result
+    original = dict(result) if isinstance(result, dict) else result
     validated = validate_codex_pilot_initial_claim_store_create_result(result)
 
-    assert validated["claim_store_create_result_valid"] is False
-    assert validated["claim_created"] is None
-    assert validated["claim_store_create_category"] is None
-    assert validated["claim_store_create_result_blockers"] == sorted(set(blockers))
+    assert validated == {
+        "claim_store_create_result_valid": False,
+        "claim_created": None,
+        "claim_store_create_category": None,
+        "claim_store_create_result_blockers": ["claim_store_create_result_invalid"],
+    }
     if isinstance(result, dict):
         assert result == original
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        None,
+        False,
+        True,
+        0,
+        1,
+        _FieldEnum.CLAIM_STORE_CREATE_CATEGORY,
+        _FieldStrEnum.CLAIM_STORE_CREATE_CATEGORY,
+        Exception("created"),
+        _TruthyCategory(),
+    ],
+)
+def test_validate_codex_pilot_initial_claim_store_create_result_rejects_invalid_category_types(
+    category: object,
+):
+    result = {"claim_store_create_category": category}
+    original = dict(result)
+
+    validated = validate_codex_pilot_initial_claim_store_create_result(result)
+
+    assert validated == {
+        "claim_store_create_result_valid": False,
+        "claim_created": None,
+        "claim_store_create_category": None,
+        "claim_store_create_result_blockers": ["claim_store_create_category_invalid"],
+    }
+    assert result == original
 
 
 def test_validate_codex_pilot_initial_claim_store_create_result_is_deterministic_and_sanitized():
