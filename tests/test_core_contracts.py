@@ -49,6 +49,7 @@ from phoenix_office.core.contracts import (
     WorkerEvent,
     WorkerEventType,
     WorkerType,
+    _canonical_contract_json_bytes,
     codex_pilot_audit_event_digest,
     codex_pilot_authorization_fingerprint,
     codex_pilot_objective_digest,
@@ -62,6 +63,7 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
+    validate_codex_pilot_prepared_initial_claim_commit,
 )
 
 FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
@@ -1079,6 +1081,430 @@ def test_prepare_codex_pilot_initial_claim_commit_preserves_utf8_non_ascii_bytes
     assert prepared["snapshot_bytes"].decode("utf-8").endswith('"title":"東京"}')
     assert b"caf\xc3\xa9" in prepared["claim_record_bytes"]
     assert b"R\xc3\xa9sum\xc3\xa9" in prepared["sequence_zero_event_bytes"]
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_is_deterministic_and_exact():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    prepared_original = copy.deepcopy(prepared)
+    authorization_original = copy.deepcopy(authorization)
+
+    first = validate_codex_pilot_prepared_initial_claim_commit(prepared, authorization)
+    second = validate_codex_pilot_prepared_initial_claim_commit(
+        copy.deepcopy(prepared),
+        copy.deepcopy(authorization),
+    )
+
+    assert first == second
+    assert first == {
+        "prepared_commit_structural_valid": True,
+        "prepared_commit_binding_passed": True,
+        "prepared_commit_blockers": [],
+    }
+    assert prepared == prepared_original
+    assert authorization == authorization_original
+
+
+def test_validate_prepared_commit_wrapper_and_payload_shapes():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    invalid_cases = []
+
+    missing_top_level_field = dict(prepared)
+    missing_top_level_field.pop("prepared_commit")
+    invalid_cases.append(missing_top_level_field)
+
+    extra_top_level_field = dict(prepared)
+    extra_top_level_field["metadata"] = "wrapper"
+    invalid_cases.append(extra_top_level_field)
+
+    false_success_flag = dict(prepared)
+    false_success_flag["prepared_commit_passed"] = False
+    invalid_cases.append(false_success_flag)
+
+    non_empty_blockers = dict(prepared)
+    non_empty_blockers["prepared_commit_blockers"] = ["claim binding failed"]
+    invalid_cases.append(non_empty_blockers)
+
+    alias_wrapper = dict(prepared)
+    alias_wrapper["prepared_commit"] = [prepared["prepared_commit"]]
+    invalid_cases.append(alias_wrapper)
+
+    partial_payload = dict(prepared)
+    partial_commit = dict(prepared["prepared_commit"])
+    partial_commit.pop("snapshot")
+    partial_payload["prepared_commit"] = partial_commit
+    invalid_cases.append(partial_payload)
+
+    for candidate in invalid_cases:
+        result = validate_codex_pilot_prepared_initial_claim_commit(
+            candidate,
+            authorization,
+        )
+        assert result["prepared_commit_structural_valid"] is False
+        assert result["prepared_commit_binding_passed"] is False
+        assert "prepared_commit_result_invalid" in result["prepared_commit_blockers"]
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_revalidates_bindings_and_structure():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    invalid_authorization = copy.deepcopy(authorization)
+    invalid_authorization["allowed_paths"] = [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+    authorization_result = validate_codex_pilot_prepared_initial_claim_commit(
+        prepared,
+        invalid_authorization,
+    )
+    assert authorization_result["prepared_commit_structural_valid"] is False
+    assert authorization_result["prepared_commit_binding_passed"] is False
+    assert "authorization_package_invalid" in authorization_result["prepared_commit_blockers"]
+
+    invalid_claim = copy.deepcopy(prepared)
+    invalid_claim["prepared_commit"]["claim_record"]["attempt_id"] = (
+        "pilot-attempt-token-value"
+    )
+    invalid_claim["prepared_commit"]["claim_record_bytes"] = _canonical_contract_json_bytes(
+        invalid_claim["prepared_commit"]["claim_record"]
+    )
+    claim_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_claim,
+        authorization,
+    )
+    assert claim_result["prepared_commit_structural_valid"] is False
+    assert claim_result["prepared_commit_binding_passed"] is False
+    assert "claim_record_invalid" in claim_result["prepared_commit_blockers"]
+
+    invalid_claim_binding = copy.deepcopy(prepared)
+    invalid_claim_binding["prepared_commit"]["claim_record"]["authorization_id"] = (
+        "pilot-auth-issue-999"
+    )
+    invalid_claim_binding["prepared_commit"]["claim_record_bytes"] = (
+        _canonical_contract_json_bytes(invalid_claim_binding["prepared_commit"]["claim_record"])
+    )
+    claim_binding_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_claim_binding,
+        authorization,
+    )
+    assert claim_binding_result["prepared_commit_structural_valid"] is True
+    assert claim_binding_result["prepared_commit_binding_passed"] is False
+    assert "claim_binding_failed" in claim_binding_result["prepared_commit_blockers"]
+
+    invalid_event = copy.deepcopy(prepared)
+    invalid_event["prepared_commit"]["sequence_zero_event"]["event_sequence"] = 1
+    invalid_event["prepared_commit"]["sequence_zero_event_bytes"] = _canonical_contract_json_bytes(
+        invalid_event["prepared_commit"]["sequence_zero_event"]
+    )
+    event_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_event,
+        authorization,
+    )
+    assert event_result["prepared_commit_structural_valid"] is False
+    assert event_result["prepared_commit_binding_passed"] is False
+    assert "sequence_zero_event_invalid" in event_result["prepared_commit_blockers"]
+
+    invalid_event_binding = copy.deepcopy(prepared)
+    invalid_event_binding["prepared_commit"]["sequence_zero_event"]["authorization_id"] = (
+        "pilot-auth-issue-999"
+    )
+    invalid_event_binding["prepared_commit"]["sequence_zero_event"]["event_digest"] = (
+        codex_pilot_audit_event_digest(
+            {
+                key: value
+                for key, value in invalid_event_binding["prepared_commit"][
+                    "sequence_zero_event"
+                ].items()
+                if key != "event_digest"
+            }
+        )
+    )
+    invalid_event_binding["prepared_commit"]["sequence_zero_event_bytes"] = (
+        _canonical_contract_json_bytes(invalid_event_binding["prepared_commit"]["sequence_zero_event"])
+    )
+    event_binding_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_event_binding,
+        authorization,
+    )
+    assert event_binding_result["prepared_commit_structural_valid"] is True
+    assert event_binding_result["prepared_commit_binding_passed"] is False
+    assert "sequence_zero_event_binding_failed" in event_binding_result[
+        "prepared_commit_blockers"
+    ]
+
+    invalid_snapshot = copy.deepcopy(prepared)
+    invalid_snapshot["prepared_commit"]["snapshot"]["current_lifecycle_state"] = "bogus"
+    invalid_snapshot["prepared_commit"]["snapshot_bytes"] = _canonical_contract_json_bytes(
+        invalid_snapshot["prepared_commit"]["snapshot"]
+    )
+    snapshot_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_snapshot,
+        authorization,
+    )
+    assert snapshot_result["prepared_commit_structural_valid"] is False
+    assert snapshot_result["prepared_commit_binding_passed"] is False
+    assert "snapshot_invalid" in snapshot_result["prepared_commit_blockers"]
+
+    invalid_snapshot_binding = copy.deepcopy(prepared)
+    invalid_snapshot_binding["prepared_commit"]["snapshot"]["authorization_id"] = (
+        "pilot-auth-issue-999"
+    )
+    invalid_snapshot_binding["prepared_commit"]["snapshot_bytes"] = _canonical_contract_json_bytes(
+        invalid_snapshot_binding["prepared_commit"]["snapshot"]
+    )
+    snapshot_binding_result = validate_codex_pilot_prepared_initial_claim_commit(
+        invalid_snapshot_binding,
+        authorization,
+    )
+    assert snapshot_binding_result["prepared_commit_structural_valid"] is True
+    assert snapshot_binding_result["prepared_commit_binding_passed"] is False
+    assert "snapshot_binding_failed" in snapshot_binding_result["prepared_commit_blockers"]
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_stale_and_malformed_bytes():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    prepared_commit = prepared["prepared_commit"]
+    claim_bytes = prepared_commit["claim_record_bytes"]
+    event_bytes = prepared_commit["sequence_zero_event_bytes"]
+    field_records = {
+        "claim_record_bytes": (
+            prepared_commit["claim_record"],
+            event_bytes,
+        ),
+        "sequence_zero_event_bytes": (
+            prepared_commit["sequence_zero_event"],
+            claim_bytes,
+        ),
+        "snapshot_bytes": (
+            prepared_commit["snapshot"],
+            claim_bytes,
+        ),
+    }
+
+    for field_name, (record, stale_bytes) in field_records.items():
+        byte_variants = {
+            "stale": stale_bytes,
+            "malformed": b"{",
+            "non_bytes": bytearray(claim_bytes),
+            "bom_prefixed": b"\xef\xbb\xbf" + claim_bytes,
+            "newline_suffixed": claim_bytes + b"\n",
+            "alternate_spacing": json.dumps(
+                record,
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8"),
+        }
+        for variant_bytes in byte_variants.values():
+            candidate = copy.deepcopy(prepared)
+            candidate["prepared_commit"][field_name] = variant_bytes
+            result = validate_codex_pilot_prepared_initial_claim_commit(
+                candidate,
+                authorization,
+            )
+
+            assert result["prepared_commit_structural_valid"] is True
+            assert result["prepared_commit_binding_passed"] is False
+            assert f"{field_name}_invalid" in result["prepared_commit_blockers"]
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_uniqueness_shape_and_targets():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    attempt_id = prepared["prepared_commit"]["claim_record"]["attempt_id"]
+    authorization_fingerprint = prepared["prepared_commit"]["claim_record"][
+        "authorization_fingerprint"
+    ]
+
+    invalid_cases = []
+
+    reordered_entries = copy.deepcopy(prepared)
+    reordered_entries["prepared_commit"]["uniqueness_entries"] = [
+        reordered_entries["prepared_commit"]["uniqueness_entries"][1],
+        reordered_entries["prepared_commit"]["uniqueness_entries"][0],
+        reordered_entries["prepared_commit"]["uniqueness_entries"][2],
+    ]
+    invalid_cases.append(reordered_entries)
+
+    missing_entry = copy.deepcopy(prepared)
+    missing_entry["prepared_commit"]["uniqueness_entries"] = missing_entry["prepared_commit"][
+        "uniqueness_entries"
+    ][:2]
+    invalid_cases.append(missing_entry)
+
+    extra_entry = copy.deepcopy(prepared)
+    extra_entry["prepared_commit"]["uniqueness_entries"].append(
+        {"extra": {attempt_id: attempt_id}}
+    )
+    invalid_cases.append(extra_entry)
+
+    aliased_entry = copy.deepcopy(prepared)
+    aliased_entry["prepared_commit"]["uniqueness_entries"][0] = {"attempt_id": {attempt_id: None}}
+    invalid_cases.append(aliased_entry)
+
+    stale_key_entry = copy.deepcopy(prepared)
+    stale_key_entry["prepared_commit"]["uniqueness_entries"][1] = {
+        "authorization_id": {"pilot-auth-issue-stale": attempt_id}
+    }
+    invalid_cases.append(stale_key_entry)
+
+    stale_target_entry = copy.deepcopy(prepared)
+    stale_target_entry["prepared_commit"]["uniqueness_entries"][2] = {
+        "authorization_fingerprint": {authorization_fingerprint: "pilot-attempt-zzz999"}
+    }
+    invalid_cases.append(stale_target_entry)
+
+    for candidate in invalid_cases:
+        result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
+        assert result["prepared_commit_binding_passed"] is False
+        assert any(
+            blocker.endswith("_uniqueness_invalid")
+            or blocker == "prepared_commit_uniqueness_invalid"
+            for blocker in result["prepared_commit_blockers"]
+        )
+
+
+def test_validate_prepared_commit_detects_record_mutation_after_preparation():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    mutated = copy.deepcopy(prepared)
+    mutated["prepared_commit"]["claim_record"]["authorization_id"] = "pilot-auth-issue-999"
+
+    result = validate_codex_pilot_prepared_initial_claim_commit(mutated, authorization)
+
+    assert result["prepared_commit_structural_valid"] is True
+    assert result["prepared_commit_binding_passed"] is False
+    assert "claim_record_bytes_invalid" in result["prepared_commit_blockers"]
+    assert "claim_binding_failed" in result["prepared_commit_blockers"]
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_preserves_utf8_non_ascii_bytes(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_authorization_packet",
+        lambda _authorization: {"authorization_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_claim_record",
+        lambda _claim: {"claim_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_claim_binding",
+        lambda _claim, _authorization: {"claim_binding_passed": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_record",
+        lambda _event: {"event_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_binding",
+        lambda _event, _claim, _previous: {"event_binding_passed": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot",
+        lambda _snapshot: {"snapshot_structural_valid": True},
+    )
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot_binding",
+        lambda _snapshot, _claim, _events: {"snapshot_binding_passed": True},
+    )
+
+    prepared = {
+        "prepared_commit_passed": True,
+        "prepared_commit_blockers": [],
+        "prepared_commit": {
+            "claim_record": {
+                "attempt_id": "pilot-attempt-abc123def456",
+                "authorization_id": "pilot-auth-issue-292",
+                "authorization_fingerprint": "a" * 64,
+                "label": "café",
+            },
+            "sequence_zero_event": {
+                "event_sequence": 0,
+                "title": "Résumé",
+            },
+            "snapshot": {
+                "title": "東京",
+            },
+            "claim_record_bytes": _canonical_contract_json_bytes(
+                {
+                    "attempt_id": "pilot-attempt-abc123def456",
+                    "authorization_id": "pilot-auth-issue-292",
+                    "authorization_fingerprint": "a" * 64,
+                    "label": "café",
+                }
+            ),
+            "sequence_zero_event_bytes": _canonical_contract_json_bytes(
+                {"event_sequence": 0, "title": "Résumé"}
+            ),
+            "snapshot_bytes": _canonical_contract_json_bytes({"title": "東京"}),
+            "uniqueness_entries": [
+                {
+                    "attempt_id": {
+                        "pilot-attempt-abc123def456": "pilot-attempt-abc123def456"
+                    }
+                },
+                {
+                    "authorization_id": {
+                        "pilot-auth-issue-292": "pilot-attempt-abc123def456"
+                    }
+                },
+                {
+                    "authorization_fingerprint": {
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": (
+                            "pilot-attempt-abc123def456"
+                        )
+                    }
+                },
+            ],
+        },
+    }
+
+    result = validate_codex_pilot_prepared_initial_claim_commit(prepared, {"authorization": "ok"})
+
+    assert result == {
+        "prepared_commit_structural_valid": True,
+        "prepared_commit_binding_passed": True,
+        "prepared_commit_blockers": [],
+    }
 
 
 def test_codex_pilot_objective_digest_known_vector():

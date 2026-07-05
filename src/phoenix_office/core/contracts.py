@@ -803,6 +803,15 @@ CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS = [
     "authorization_id",
     "authorization_fingerprint",
 ]
+CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS = {
+    "claim_record",
+    "sequence_zero_event",
+    "snapshot",
+    "claim_record_bytes",
+    "sequence_zero_event_bytes",
+    "snapshot_bytes",
+    "uniqueness_entries",
+}
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -1226,6 +1235,155 @@ def prepare_codex_pilot_initial_claim_commit(
     }
 
 
+def validate_codex_pilot_prepared_initial_claim_commit(
+    preparation_result: object,
+    authorization_package: object,
+) -> dict[str, object]:
+    """Validate the exact deterministic prepared initial-claim commit shape."""
+    blockers: set[str] = set()
+    structural_blockers: set[str] = set()
+
+    if type(preparation_result) is not dict:
+        return _prepared_commit_validation_result(
+            structural_valid=False,
+            binding_passed=False,
+            blockers=["prepared_commit_result_invalid"],
+        )
+
+    preparation = preparation_result
+    if set(preparation) != {
+        "prepared_commit_passed",
+        "prepared_commit_blockers",
+        "prepared_commit",
+    }:
+        blockers.add("prepared_commit_result_invalid")
+        structural_blockers.add("prepared_commit_result_invalid")
+    if preparation.get("prepared_commit_passed") is not True:
+        blockers.add("prepared_commit_result_invalid")
+        structural_blockers.add("prepared_commit_result_invalid")
+    if preparation.get("prepared_commit_blockers") != []:
+        blockers.add("prepared_commit_result_invalid")
+        structural_blockers.add("prepared_commit_result_invalid")
+
+    prepared_commit = preparation.get("prepared_commit")
+    if type(prepared_commit) is not dict:
+        blockers.add("prepared_commit_result_invalid")
+        structural_blockers.add("prepared_commit_result_invalid")
+        return _prepared_commit_validation_result(
+            structural_valid=not structural_blockers,
+            binding_passed=False,
+            blockers=blockers,
+        )
+
+    if set(prepared_commit) != CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS:
+        blockers.add("prepared_commit_result_invalid")
+        structural_blockers.add("prepared_commit_result_invalid")
+
+    authorization_result = validate_codex_pilot_authorization_packet(authorization_package)
+    if not authorization_result["authorization_structural_valid"]:
+        blockers.add("authorization_package_invalid")
+        structural_blockers.add("authorization_package_invalid")
+
+    claim_record = prepared_commit.get("claim_record")
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    if not claim_result["claim_structural_valid"]:
+        blockers.add("claim_record_invalid")
+        structural_blockers.add("claim_record_invalid")
+
+    sequence_zero_event = prepared_commit.get("sequence_zero_event")
+    event_result = validate_codex_pilot_audit_event_record(sequence_zero_event)
+    if not event_result["event_structural_valid"]:
+        blockers.add("sequence_zero_event_invalid")
+        structural_blockers.add("sequence_zero_event_invalid")
+    else:
+        event_data = _contract_mapping(sequence_zero_event)
+        if event_data.get("event_sequence") != 0:
+            blockers.add("sequence_zero_event_invalid")
+            structural_blockers.add("sequence_zero_event_invalid")
+
+    snapshot = prepared_commit.get("snapshot")
+    snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
+    if not snapshot_result["snapshot_structural_valid"]:
+        blockers.add("snapshot_invalid")
+        structural_blockers.add("snapshot_invalid")
+
+    if (
+        claim_result["claim_structural_valid"]
+        and authorization_result["authorization_structural_valid"]
+    ):
+        claim_binding = validate_codex_pilot_claim_binding(claim_record, authorization_package)
+        if not claim_binding["claim_binding_passed"]:
+            blockers.add("claim_binding_failed")
+
+    if claim_result["claim_structural_valid"] and event_result["event_structural_valid"]:
+        event_binding = validate_codex_pilot_audit_event_binding(
+            sequence_zero_event,
+            claim_record,
+            None,
+        )
+        if not event_binding["event_binding_passed"]:
+            blockers.add("sequence_zero_event_binding_failed")
+
+    if (
+        claim_result["claim_structural_valid"]
+        and event_result["event_structural_valid"]
+        and snapshot_result["snapshot_structural_valid"]
+    ):
+        snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
+            snapshot,
+            claim_record,
+            [sequence_zero_event],
+        )
+        if not snapshot_binding["snapshot_binding_passed"]:
+            blockers.add("snapshot_binding_failed")
+
+    for field_name, record in [
+        ("claim_record_bytes", claim_record),
+        ("sequence_zero_event_bytes", sequence_zero_event),
+        ("snapshot_bytes", snapshot),
+    ]:
+        bytes_value = prepared_commit.get(field_name)
+        if type(bytes_value) is not bytes:
+            blockers.add(f"{field_name}_invalid")
+            continue
+        try:
+            decoded = bytes_value.decode("utf-8")
+            round_trip = json.loads(decoded)
+            canonical = _canonical_contract_json_bytes(record)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            blockers.add(f"{field_name}_invalid")
+            continue
+        if bytes_value != canonical or round_trip != _contract_mapping(record):
+            blockers.add(f"{field_name}_invalid")
+
+    uniqueness_entries = prepared_commit.get("uniqueness_entries")
+    if type(uniqueness_entries) is not list or len(uniqueness_entries) != 3:
+        blockers.add("prepared_commit_uniqueness_invalid")
+    elif claim_result["claim_structural_valid"]:
+        claim_data = _contract_mapping(claim_record)
+        attempt_id = claim_data["attempt_id"]
+        for index, key_name in enumerate(CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS):
+            entry = uniqueness_entries[index]
+            blocker_name = f"{key_name}_uniqueness_invalid"
+            if type(entry) is not dict or set(entry) != {key_name}:
+                blockers.add(blocker_name)
+                continue
+            key_map = entry.get(key_name)
+            expected_key = claim_data[key_name]
+            if (
+                type(key_map) is not dict
+                or set(key_map) != {expected_key}
+                or key_map.get(expected_key) != attempt_id
+            ):
+                blockers.add(blocker_name)
+
+    return _prepared_commit_validation_result(
+        structural_valid=not structural_blockers,
+        binding_passed=not blockers,
+        blockers=blockers,
+    )
+
+
 def validate_codex_pilot_audit_event_record(event: object) -> dict[str, Any]:
     """Validate a candidate codex-pilot-audit-event.v1 record."""
     errors = codex_pilot_audit_event_structural_errors(event)
@@ -1516,6 +1674,19 @@ def _prepared_initial_claim_failure(blocker: str) -> dict[str, object]:
         "prepared_commit_passed": False,
         "prepared_commit_blockers": [blocker],
         "prepared_commit": None,
+    }
+
+
+def _prepared_commit_validation_result(
+    *,
+    structural_valid: bool,
+    binding_passed: bool,
+    blockers: set[str] | list[str],
+) -> dict[str, object]:
+    return {
+        "prepared_commit_structural_valid": structural_valid,
+        "prepared_commit_binding_passed": binding_passed,
+        "prepared_commit_blockers": sorted(set(blockers)),
     }
 
 

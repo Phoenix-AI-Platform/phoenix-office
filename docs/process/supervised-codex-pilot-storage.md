@@ -30,6 +30,17 @@ This helper only accepts the exact successful shape produced by `compose_codex_p
 - one deterministic prepared unit containing claim/event/snapshot records, canonical UTF-8 JSON bytes for each record, and exactly three ordered uniqueness mappings (`attempt_id`, `authorization_id`, `authorization_fingerprint`) to the same immutable `attempt_id`; or
 - a fail-closed result with fixed sanitized blockers and no partial prepared bytes/state.
 
+The final read-only gate before any future durable storage adapter is:
+
+```python
+validate_codex_pilot_prepared_initial_claim_commit(
+    preparation_result: object,
+    authorization_package: object,
+) -> dict[str, object]
+```
+
+It revalidates the prepared wrapper, record bindings, canonical bytes, and uniqueness entries without mutating inputs or repairing mismatches.
+
 Inputs:
 
 - `bundle` must be the successful output of `compose_codex_pilot_initial_claim_bundle(...)`
