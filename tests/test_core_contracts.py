@@ -36,6 +36,7 @@ from phoenix_office.core.contracts import (
     Requester,
     RequesterType,
     RiskLevel,
+    SerializableContract,
     SourceKind,
     TaskEnvelope,
     TaskPermissions,
@@ -67,6 +68,14 @@ from phoenix_office.core.contracts import (
 )
 
 FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
+
+
+class _CustomBytesLike:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def __bytes__(self) -> bytes:
+        return self.payload
 
 
 def test_contract_enum_values_match_architecture_docs():
@@ -1305,7 +1314,10 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_stale_and_ma
         byte_variants = {
             "stale": stale_bytes,
             "malformed": b"{",
-            "non_bytes": bytearray(claim_bytes),
+            "string": "not-bytes",
+            "memoryview": memoryview(claim_bytes),
+            "bytearray": bytearray(claim_bytes),
+            "custom_bytes_like": _CustomBytesLike(claim_bytes),
             "bom_prefixed": b"\xef\xbb\xbf" + claim_bytes,
             "newline_suffixed": claim_bytes + b"\n",
             "alternate_spacing": json.dumps(
@@ -1315,6 +1327,17 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_stale_and_ma
                 ensure_ascii=False,
             ).encode("utf-8"),
         }
+        expected_structural = {
+            "stale": True,
+            "malformed": False,
+            "string": False,
+            "memoryview": False,
+            "bytearray": False,
+            "custom_bytes_like": False,
+            "bom_prefixed": False,
+            "newline_suffixed": True,
+            "alternate_spacing": True,
+        }
         for variant_bytes in byte_variants.values():
             candidate = copy.deepcopy(prepared)
             candidate["prepared_commit"][field_name] = variant_bytes
@@ -1323,7 +1346,10 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_stale_and_ma
                 authorization,
             )
 
-            assert result["prepared_commit_structural_valid"] is True
+            expected = expected_structural[
+                next(key for key, value in byte_variants.items() if value is variant_bytes)
+            ]
+            assert result["prepared_commit_structural_valid"] is expected
             assert result["prepared_commit_binding_passed"] is False
             assert f"{field_name}_invalid" in result["prepared_commit_blockers"]
 
@@ -1340,7 +1366,7 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_uniqueness_s
         "authorization_fingerprint"
     ]
 
-    invalid_cases = []
+    structural_cases = []
 
     reordered_entries = copy.deepcopy(prepared)
     reordered_entries["prepared_commit"]["uniqueness_entries"] = [
@@ -1348,44 +1374,112 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_uniqueness_s
         reordered_entries["prepared_commit"]["uniqueness_entries"][0],
         reordered_entries["prepared_commit"]["uniqueness_entries"][2],
     ]
-    invalid_cases.append(reordered_entries)
+    structural_cases.append(reordered_entries)
 
     missing_entry = copy.deepcopy(prepared)
     missing_entry["prepared_commit"]["uniqueness_entries"] = missing_entry["prepared_commit"][
         "uniqueness_entries"
     ][:2]
-    invalid_cases.append(missing_entry)
+    structural_cases.append(missing_entry)
 
     extra_entry = copy.deepcopy(prepared)
     extra_entry["prepared_commit"]["uniqueness_entries"].append(
         {"extra": {attempt_id: attempt_id}}
     )
-    invalid_cases.append(extra_entry)
+    structural_cases.append(extra_entry)
 
-    aliased_entry = copy.deepcopy(prepared)
-    aliased_entry["prepared_commit"]["uniqueness_entries"][0] = {"attempt_id": {attempt_id: None}}
-    invalid_cases.append(aliased_entry)
-
-    stale_key_entry = copy.deepcopy(prepared)
-    stale_key_entry["prepared_commit"]["uniqueness_entries"][1] = {
-        "authorization_id": {"pilot-auth-issue-stale": attempt_id}
+    non_list_entries = copy.deepcopy(prepared)
+    non_list_entries["prepared_commit"]["uniqueness_entries"] = {
+        "attempt_id": {attempt_id: attempt_id}
     }
-    invalid_cases.append(stale_key_entry)
+    structural_cases.append(non_list_entries)
 
-    stale_target_entry = copy.deepcopy(prepared)
-    stale_target_entry["prepared_commit"]["uniqueness_entries"][2] = {
-        "authorization_fingerprint": {authorization_fingerprint: "pilot-attempt-zzz999"}
+    non_dict_entry = copy.deepcopy(prepared)
+    non_dict_entry["prepared_commit"]["uniqueness_entries"][0] = ["attempt_id"]
+    structural_cases.append(non_dict_entry)
+
+    wrong_entry_key_shape = copy.deepcopy(prepared)
+    wrong_entry_key_shape["prepared_commit"]["uniqueness_entries"][0] = {
+        "attempt_id": {attempt_id: attempt_id},
+        "unexpected": {attempt_id: attempt_id},
     }
-    invalid_cases.append(stale_target_entry)
+    structural_cases.append(wrong_entry_key_shape)
 
-    for candidate in invalid_cases:
+    non_dict_key_map = copy.deepcopy(prepared)
+    non_dict_key_map["prepared_commit"]["uniqueness_entries"][0] = {
+        "attempt_id": "not-a-map"
+    }
+    structural_cases.append(non_dict_key_map)
+
+    multi_entry_key_map = copy.deepcopy(prepared)
+    multi_entry_key_map["prepared_commit"]["uniqueness_entries"][0] = {
+        "attempt_id": {attempt_id: attempt_id, "extra": attempt_id}
+    }
+    structural_cases.append(multi_entry_key_map)
+
+    for candidate in structural_cases:
         result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
+        assert result["prepared_commit_structural_valid"] is False
         assert result["prepared_commit_binding_passed"] is False
         assert any(
             blocker.endswith("_uniqueness_invalid")
             or blocker == "prepared_commit_uniqueness_invalid"
             for blocker in result["prepared_commit_blockers"]
         )
+
+    stale_key_entry = copy.deepcopy(prepared)
+    stale_key_entry["prepared_commit"]["uniqueness_entries"][1] = {
+        "authorization_id": {"pilot-auth-issue-stale": attempt_id}
+    }
+    assert validate_codex_pilot_prepared_initial_claim_commit(
+        stale_key_entry,
+        authorization,
+    )["prepared_commit_structural_valid"] is True
+
+    stale_target_entry = copy.deepcopy(prepared)
+    stale_target_entry["prepared_commit"]["uniqueness_entries"][2] = {
+        "authorization_fingerprint": {authorization_fingerprint: "pilot-attempt-zzz999"}
+    }
+    assert validate_codex_pilot_prepared_initial_claim_commit(
+        stale_target_entry,
+        authorization,
+    )["prepared_commit_structural_valid"] is True
+
+    for candidate in [stale_key_entry, stale_target_entry]:
+        result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
+        assert result["prepared_commit_binding_passed"] is False
+        assert any(
+            blocker.endswith("_uniqueness_invalid")
+            for blocker in result["prepared_commit_blockers"]
+        )
+
+
+def test_validate_codex_pilot_prepared_initial_claim_commit_fails_closed_for_malformed_records():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    malformed_values = [
+        object(),
+        SerializableContract(),
+        {1, 2, 3},
+    ]
+
+    for field_name in ["claim_record", "sequence_zero_event", "snapshot"]:
+        for value in malformed_values:
+            candidate = copy.deepcopy(prepared)
+            candidate["prepared_commit"][field_name] = value
+
+            result = validate_codex_pilot_prepared_initial_claim_commit(
+                candidate,
+                authorization,
+            )
+
+            assert result["prepared_commit_structural_valid"] is False
+            assert result["prepared_commit_binding_passed"] is False
+            assert f"{field_name}_invalid" in result["prepared_commit_blockers"]
 
 
 def test_validate_prepared_commit_detects_record_mutation_after_preparation():

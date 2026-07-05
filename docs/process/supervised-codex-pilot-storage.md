@@ -39,7 +39,7 @@ validate_codex_pilot_prepared_initial_claim_commit(
 ) -> dict[str, object]
 ```
 
-It revalidates the prepared wrapper, record bindings, canonical bytes, and uniqueness entries without mutating inputs or repairing mismatches.
+It revalidates the prepared wrapper, record bindings, canonical bytes, and uniqueness entries without mutating inputs or repairing mismatches. Structural shape failures are reported through `prepared_commit_structural_valid = false`; stale but well-formed content remains binding-only failure so a future storage adapter can distinguish malformed input from drift.
 
 Inputs:
 
