@@ -51,6 +51,7 @@ from phoenix_office.core.contracts import (
     WorkerEventType,
     WorkerType,
     _canonical_contract_json_bytes,
+    classify_codex_pilot_initial_claim_conflicts,
     codex_pilot_audit_event_digest,
     codex_pilot_authorization_fingerprint,
     codex_pilot_objective_digest,
@@ -594,6 +595,19 @@ def _valid_codex_audit_event_chain() -> tuple[
         previous_event_digest=event_zero["event_digest"],
     )
     return claim, event_zero, event_one
+
+
+def _valid_conflict_observation(
+    *,
+    attempt_id_conflict: bool = False,
+    authorization_id_conflict: bool = False,
+    authorization_fingerprint_conflict: bool = False,
+) -> dict[str, bool]:
+    return {
+        "attempt_id_conflict": attempt_id_conflict,
+        "authorization_id_conflict": authorization_id_conflict,
+        "authorization_fingerprint_conflict": authorization_fingerprint_conflict,
+    }
 
 
 def test_codex_pilot_claim_record_validation_and_binding_are_deterministic():
@@ -1283,6 +1297,246 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_revalidates_bindings
     assert snapshot_binding_result["prepared_commit_structural_valid"] is True
     assert snapshot_binding_result["prepared_commit_binding_passed"] is False
     assert "snapshot_binding_failed" in snapshot_binding_result["prepared_commit_blockers"]
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_is_deterministic_and_exact():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    prepared_original = copy.deepcopy(prepared)
+    authorization_original = copy.deepcopy(authorization)
+
+    first = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        _valid_conflict_observation(),
+    )
+    second = classify_codex_pilot_initial_claim_conflicts(
+        copy.deepcopy(prepared),
+        copy.deepcopy(authorization),
+        _valid_conflict_observation(),
+    )
+
+    assert first == second
+    assert first == {
+        "conflict_classification_passed": True,
+        "conflict_detected": False,
+        "conflict_category": None,
+        "conflict_classification_blockers": [],
+    }
+    assert prepared == prepared_original
+    assert authorization == authorization_original
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_uses_fixed_precedence():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    cases = [
+        ((False, False, False), False, None),
+        ((True, False, False), True, "attempt_id_conflict"),
+        ((False, True, False), True, "authorization_id_conflict"),
+        ((False, False, True), True, "authorization_fingerprint_conflict"),
+        ((True, True, False), True, "attempt_id_conflict"),
+        ((True, False, True), True, "attempt_id_conflict"),
+        ((False, True, True), True, "authorization_id_conflict"),
+        ((True, True, True), True, "attempt_id_conflict"),
+    ]
+
+    for flags, expected_detected, expected_category in cases:
+        observation = _valid_conflict_observation(
+            attempt_id_conflict=flags[0],
+            authorization_id_conflict=flags[1],
+            authorization_fingerprint_conflict=flags[2],
+        )
+        result = classify_codex_pilot_initial_claim_conflicts(
+            prepared,
+            authorization,
+            observation,
+        )
+
+        assert result["conflict_classification_passed"] is True
+        assert result["conflict_detected"] is expected_detected
+        assert result["conflict_category"] == expected_category
+        assert result["conflict_classification_blockers"] == []
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_ignores_observation_insertion_order():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    first = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        {
+            "attempt_id_conflict": True,
+            "authorization_id_conflict": True,
+            "authorization_fingerprint_conflict": True,
+        },
+    )
+    second = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        {
+            "authorization_fingerprint_conflict": True,
+            "authorization_id_conflict": True,
+            "attempt_id_conflict": True,
+        },
+    )
+
+    assert first == second
+    assert first["conflict_category"] == "attempt_id_conflict"
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_rejects_invalid_inputs():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+
+    invalid_prepared = copy.deepcopy(prepared)
+    invalid_prepared["prepared_commit"]["uniqueness_entries"] = []
+    prepared_result = classify_codex_pilot_initial_claim_conflicts(
+        invalid_prepared,
+        authorization,
+        _valid_conflict_observation(),
+    )
+    assert prepared_result == {
+        "conflict_classification_passed": False,
+        "conflict_detected": None,
+        "conflict_category": None,
+        "conflict_classification_blockers": ["prepared_commit_uniqueness_invalid"],
+    }
+
+    invalid_authorization = copy.deepcopy(authorization)
+    invalid_authorization["allowed_paths"] = [
+        "docs/process/zeta.md",
+        "docs/process/alpha.md",
+    ]
+    authorization_result = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        invalid_authorization,
+        _valid_conflict_observation(),
+    )
+    assert authorization_result == {
+        "conflict_classification_passed": False,
+        "conflict_detected": None,
+        "conflict_category": None,
+        "conflict_classification_blockers": ["authorization_package_invalid"],
+    }
+
+    class _Truthy:
+        def __bool__(self) -> bool:
+            return True
+
+    invalid_observations = [
+        object(),
+        {},
+        {"attempt_id_conflict": False},
+        {
+            "attempt_id_conflict": False,
+            "authorization_id_conflict": False,
+            "authorization_fingerprint_conflict": False,
+            "metadata": "not allowed",
+        },
+        {
+            "attempt_id_conflict": False,
+            "authorization_id_conflict": False,
+            "authorization_fingerprint_conflict": {"nested": True},
+        },
+        _valid_conflict_observation(
+            attempt_id_conflict=0,
+            authorization_id_conflict=False,
+            authorization_fingerprint_conflict=False,
+        ),
+        _valid_conflict_observation(
+            attempt_id_conflict=False,
+            authorization_id_conflict=1,
+            authorization_fingerprint_conflict=False,
+        ),
+        _valid_conflict_observation(
+            attempt_id_conflict=False,
+            authorization_id_conflict=False,
+            authorization_fingerprint_conflict="true",
+        ),
+        _valid_conflict_observation(
+            attempt_id_conflict=False,
+            authorization_id_conflict=False,
+            authorization_fingerprint_conflict=None,
+        ),
+        _valid_conflict_observation(
+            attempt_id_conflict=_Truthy(),
+            authorization_id_conflict=False,
+            authorization_fingerprint_conflict=False,
+        ),
+    ]
+
+    for observation in invalid_observations:
+        result = classify_codex_pilot_initial_claim_conflicts(
+            prepared,
+            authorization,
+            observation,
+        )
+        assert result == {
+            "conflict_classification_passed": False,
+            "conflict_detected": None,
+            "conflict_category": None,
+            "conflict_classification_blockers": ["conflict_observation_invalid"],
+        }
+
+
+def test_classify_codex_pilot_initial_claim_conflicts_does_not_touch_external_dependencies(
+    monkeypatch,
+):
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    prepared_original = copy.deepcopy(prepared)
+    authorization_original = copy.deepcopy(authorization)
+
+    class _Sentinel:
+        def __getattr__(self, name):
+            raise AssertionError(name)
+
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(contracts, "datetime", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "Path", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "random", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "subprocess", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "socket", _Sentinel(), raising=False)
+
+    first = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        _valid_conflict_observation(),
+    )
+    second = classify_codex_pilot_initial_claim_conflicts(
+        prepared,
+        authorization,
+        _valid_conflict_observation(),
+    )
+
+    assert first == second
+    assert first["conflict_classification_passed"] is True
+    assert prepared == prepared_original
+    assert authorization == authorization_original
 
 
 def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_stale_and_malformed_bytes():
