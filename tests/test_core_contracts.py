@@ -1512,7 +1512,7 @@ def test_classify_codex_pilot_initial_claim_conflicts_rejects_truthy_custom_obje
     ):
         observation = _valid_conflict_observation()
         observation[field_name] = _Truthy()
-        observation_before = copy.deepcopy(observation)
+        observation_before = dict(observation)
 
         result = classify_codex_pilot_initial_claim_conflicts(
             prepared,
@@ -1608,7 +1608,10 @@ def test_classify_codex_pilot_initial_claim_conflicts_sorts_and_deduplicates_blo
         set(result["conflict_classification_blockers"])
     )
     assert "already blocked" not in result["conflict_classification_blockers"]
-    assert not any("already blocked" in blocker for blocker in result["conflict_classification_blockers"])
+    assert not any(
+        "already blocked" in blocker
+        for blocker in result["conflict_classification_blockers"]
+    )
     assert set(result["conflict_classification_blockers"]) == {
         "claim_record_bytes_invalid",
         "claim_record_invalid",
