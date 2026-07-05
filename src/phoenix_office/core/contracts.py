@@ -803,6 +803,11 @@ CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS = [
     "authorization_id",
     "authorization_fingerprint",
 ]
+CODEX_PILOT_INITIAL_CLAIM_CONFLICT_FIELDS = {
+    "attempt_id_conflict",
+    "authorization_id_conflict",
+    "authorization_fingerprint_conflict",
+}
 CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS = {
     "claim_record",
     "sequence_zero_event",
@@ -1407,6 +1412,56 @@ def validate_codex_pilot_prepared_initial_claim_commit(
     )
 
 
+def classify_codex_pilot_initial_claim_conflicts(
+    preparation_result: object,
+    authorization_package: object,
+    conflict_observation: object,
+) -> dict[str, object]:
+    """Classify exact initial-claim uniqueness conflicts without side effects."""
+    prepared_commit_result = validate_codex_pilot_prepared_initial_claim_commit(
+        preparation_result,
+        authorization_package,
+    )
+    if not (
+        prepared_commit_result["prepared_commit_structural_valid"]
+        and prepared_commit_result["prepared_commit_binding_passed"]
+    ):
+        return _conflict_classification_result(
+            conflict_classification_passed=False,
+            conflict_detected=None,
+            conflict_category=None,
+            blockers=prepared_commit_result["prepared_commit_blockers"],
+        )
+
+    conflict_observation_result = _validate_initial_claim_conflict_observation(
+        conflict_observation
+    )
+    if not conflict_observation_result["conflict_observation_passed"]:
+        return _conflict_classification_result(
+            conflict_classification_passed=False,
+            conflict_detected=None,
+            conflict_category=None,
+            blockers=conflict_observation_result["conflict_classification_blockers"],
+        )
+
+    observation = conflict_observation_result["conflict_observation"]
+    if observation["attempt_id_conflict"] is True:
+        conflict_category = "attempt_id_conflict"
+    elif observation["authorization_id_conflict"] is True:
+        conflict_category = "authorization_id_conflict"
+    elif observation["authorization_fingerprint_conflict"] is True:
+        conflict_category = "authorization_fingerprint_conflict"
+    else:
+        conflict_category = None
+
+    return _conflict_classification_result(
+        conflict_classification_passed=True,
+        conflict_detected=conflict_category is not None,
+        conflict_category=conflict_category,
+        blockers=[],
+    )
+
+
 def validate_codex_pilot_audit_event_record(event: object) -> dict[str, Any]:
     """Validate a candidate codex-pilot-audit-event.v1 record."""
     errors = codex_pilot_audit_event_structural_errors(event)
@@ -1710,6 +1765,60 @@ def _prepared_commit_validation_result(
         "prepared_commit_structural_valid": structural_valid,
         "prepared_commit_binding_passed": binding_passed,
         "prepared_commit_blockers": sorted(set(blockers)),
+    }
+
+
+def _conflict_classification_result(
+    *,
+    conflict_classification_passed: bool,
+    conflict_detected: bool | None,
+    conflict_category: str | None,
+    blockers: set[str] | list[str],
+) -> dict[str, object]:
+    return {
+        "conflict_classification_passed": conflict_classification_passed,
+        "conflict_detected": conflict_detected,
+        "conflict_category": conflict_category,
+        "conflict_classification_blockers": sorted(set(blockers)),
+    }
+
+
+def _validate_initial_claim_conflict_observation(
+    conflict_observation: object,
+) -> dict[str, object]:
+    blockers: set[str] = set()
+    if type(conflict_observation) is not dict:
+        blockers.add("conflict_observation_invalid")
+        return {
+            "conflict_observation_passed": False,
+            "conflict_observation": None,
+            "conflict_classification_blockers": sorted(blockers),
+        }
+
+    observation = conflict_observation
+    if set(observation) != CODEX_PILOT_INITIAL_CLAIM_CONFLICT_FIELDS:
+        blockers.add("conflict_observation_invalid")
+    else:
+        for field_name in (
+            "attempt_id_conflict",
+            "authorization_id_conflict",
+            "authorization_fingerprint_conflict",
+        ):
+            if type(observation.get(field_name)) is not bool:
+                blockers.add("conflict_observation_invalid")
+                break
+
+    if blockers:
+        return {
+            "conflict_observation_passed": False,
+            "conflict_observation": None,
+            "conflict_classification_blockers": sorted(blockers),
+        }
+
+    return {
+        "conflict_observation_passed": True,
+        "conflict_observation": observation,
+        "conflict_classification_blockers": [],
     }
 
 
