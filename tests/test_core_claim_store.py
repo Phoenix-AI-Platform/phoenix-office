@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 from enum import Enum, StrEnum
@@ -12,6 +13,7 @@ import pytest
 from phoenix_office.core import (
     CodexPilotInitialClaimReader,
     CodexPilotInitialClaimStore,
+    validate_codex_pilot_initial_claim_read_request,
     validate_codex_pilot_initial_claim_store_create_result,
     validate_codex_pilot_initial_claim_store_read_result,
 )
@@ -86,6 +88,51 @@ class _Bomb:
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("unexpected dependency access")
+
+
+def _valid_codex_pilot_authorization_packet() -> dict[str, object]:
+    return {
+        "schema_version": "codex-pilot-authorization.v1",
+        "authorization_id": "pilot-auth-issue-320",
+        "repository": "Phoenix-AI-Platform/phoenix-office",
+        "pilot_kind": "docs-only-supervised",
+        "decision_state": "human_authorized_for_one_run",
+        "authorizer_role": "human_operator",
+        "base_commit_sha": "0" * 40,
+        "handoff_path": "docs/process/supervised-codex-pilot-handoff.json",
+        "evidence_path": "docs/process/supervised-codex-pilot-evidence.json",
+        "handoff_id": "codex-handoff-issue-320",
+        "objective": "Document the supervised Codex pilot authorization packet.",
+        "allowed_paths": ["docs/process/supervised-codex-pilot-storage.md"],
+        "expected_pr_title": "docs: update supervised Codex pilot authorization",
+        "branch_name": "codex/supervised-pilot-authorization",
+        "validation_commands": [
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp",
+            "python -m ruff check . --no-cache",
+            "git diff --check",
+        ],
+        "budget_metric": "tokens",
+        "budget_ceiling": 50000,
+        "budget_enforcement_ref": "budget-control-reviewed",
+        "timeout_seconds": 3600,
+        "cancellation_ref": "cancellation-control-reviewed",
+        "authentication_runner_ref": "authentication-runner-reviewed",
+        "branch_permission_ref": "branch-permission-reviewed",
+        "pr_permission_ref": "pr-permission-reviewed",
+        "duplicate_pr_check_ref": "duplicate-pr-check-reviewed",
+        "branch_collision_check_ref": "branch-collision-check-reviewed",
+        "codex_no_approve_merge_ref": "codex-no-approve-merge-reviewed",
+        "final_ci_required": True,
+        "assistant_review_required": True,
+        "worker_may_approve": False,
+        "worker_may_merge": False,
+        "one_invocation_only": True,
+        "retry_authorized": False,
+        "background_execution_authorized": False,
+    }
+
+
+VALID_ATTEMPT_ID = "pilot-attempt-abc123def456"
 
 
 def test_codex_pilot_initial_claim_store_protocol_is_exact_and_not_runtime_checkable():
@@ -386,4 +433,184 @@ def test_validate_initial_claim_store_create_result_no_external_dependencies(mon
         "claim_created": True,
         "claim_store_create_category": "created",
         "claim_store_create_result_blockers": [],
+    }
+
+
+def test_validate_codex_pilot_initial_claim_read_request_is_valid_deterministic_and_pure():
+    authorization = _valid_codex_pilot_authorization_packet()
+    original = copy.deepcopy(authorization)
+
+    first = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    second = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID,
+        copy.deepcopy(authorization),
+    )
+
+    assert first == second
+    assert first == {
+        "claim_read_request_valid": True,
+        "attempt_id_valid": True,
+        "authorization_context_valid": True,
+        "claim_read_request_blockers": [],
+    }
+    assert authorization == original
+
+
+@pytest.mark.parametrize(
+    "attempt_id",
+    [
+        _StrSubclass(VALID_ATTEMPT_ID),
+        f" {VALID_ATTEMPT_ID}",
+        f"{VALID_ATTEMPT_ID} ",
+        "PILOT-ATTEMPT-ABC123DEF456",
+        "pilot-attemptabc123def456",
+        "pilot-attempt-abc123def45",
+        "pilot-attempt-abc123def456789012345678901234567890123456789012345678901234567890123",
+        "pilot-attempt-abc123defhome456",
+        True,
+        1,
+        b"pilot-attempt-abc123def456",
+        _FieldEnum.CLAIM_STORE_CREATE_CATEGORY,
+        {"attempt_id": VALID_ATTEMPT_ID},
+        Exception("pilot-attempt-abc123def456"),
+        _TruthyCategory(),
+    ],
+)
+def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_attempt_ids(
+    attempt_id: object,
+):
+    authorization = _valid_codex_pilot_authorization_packet()
+    original = copy.deepcopy(authorization)
+
+    result = validate_codex_pilot_initial_claim_read_request(attempt_id, authorization)
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "claim_read_request_valid": False,
+        "attempt_id_valid": False,
+        "authorization_context_valid": True,
+        "claim_read_request_blockers": ["attempt_id_invalid"],
+    }
+    if isinstance(attempt_id, str):
+        assert attempt_id not in output
+    assert authorization == original
+
+
+@pytest.mark.parametrize(
+    "authorization_package",
+    [
+        None,
+        [],
+        {"schema_version": "codex-pilot-authorization.v1"},
+        {
+            **_valid_codex_pilot_authorization_packet(),
+            "objective": {"nested": True},
+        },
+        {
+            **_valid_codex_pilot_authorization_packet(),
+            "allowed_paths": [
+                "docs/process/zeta.md",
+                "docs/process/alpha.md",
+            ],
+        },
+    ],
+)
+def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_authorization_contexts(
+    authorization_package: object,
+):
+    original = copy.deepcopy(authorization_package)
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID,
+        authorization_package,
+    )
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "claim_read_request_valid": False,
+        "attempt_id_valid": True,
+        "authorization_context_valid": False,
+        "claim_read_request_blockers": ["authorization_context_invalid"],
+    }
+    if isinstance(authorization_package, dict):
+        assert authorization_package == original
+    assert "authorization_id" not in output or authorization_package is None
+
+
+@pytest.mark.parametrize(
+    "failing_helper",
+    [
+        "codex_pilot_authorization_fingerprint",
+        "codex_pilot_objective_digest",
+    ],
+)
+def test_validate_codex_pilot_initial_claim_read_request_fails_closed_on_digest_errors(
+    monkeypatch,
+    failing_helper: str,
+):
+    import phoenix_office.core.contracts as contracts
+
+    authorization = _valid_codex_pilot_authorization_packet()
+
+    def _raise_value_error(*args: object, **kwargs: object) -> str:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(contracts, failing_helper, _raise_value_error)
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "claim_read_request_valid": False,
+        "attempt_id_valid": True,
+        "authorization_context_valid": False,
+        "claim_read_request_blockers": ["authorization_context_invalid"],
+    }
+    assert authorization == _valid_codex_pilot_authorization_packet()
+
+
+def test_validate_codex_pilot_initial_claim_read_request_checks_both_inputs(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    calls: list[str] = []
+
+    def _fake_attempt_id(value: object) -> bool:
+        calls.append("attempt_id")
+        return False
+
+    def _fake_authorization_packet(value: object) -> dict[str, object]:
+        calls.append("authorization")
+        return {
+            "authorization_structural_valid": False,
+            "authorization_structural_errors": ["authorization package root must be an object"],
+        }
+
+    monkeypatch.setattr(contracts, "_is_exact_codex_pilot_attempt_id", _fake_attempt_id)
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_authorization_packet",
+        _fake_authorization_packet,
+    )
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        _StrSubclass(VALID_ATTEMPT_ID),
+        object(),
+    )
+
+    assert calls == ["attempt_id", "authorization"]
+    assert result == {
+        "claim_read_request_valid": False,
+        "attempt_id_valid": False,
+        "authorization_context_valid": False,
+        "claim_read_request_blockers": [
+            "attempt_id_invalid",
+            "authorization_context_invalid",
+        ],
     }
