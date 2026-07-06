@@ -540,17 +540,34 @@ def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_attempt
 def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_authorization_contexts(
     authorization_package: object,
 ):
-    sentinel = "sentinel-authorization-objective-987654321"
-    candidate = (
-        {**authorization_package, "objective": sentinel}
-        if isinstance(authorization_package, dict)
-        else authorization_package
-    )
-    original = copy.deepcopy(candidate)
+    original = copy.deepcopy(authorization_package)
 
     result = validate_codex_pilot_initial_claim_read_request(
         VALID_ATTEMPT_ID,
-        candidate,
+        authorization_package,
+    )
+
+    assert result == {
+        "claim_read_request_valid": False,
+        "attempt_id_valid": True,
+        "authorization_context_valid": False,
+        "claim_read_request_blockers": ["authorization_context_invalid"],
+    }
+    if isinstance(authorization_package, dict):
+        assert authorization_package == original
+
+
+def test_validate_codex_pilot_initial_claim_read_request_authorization_no_echo():
+    sentinel = "sentinel-authorization-objective-987654321"
+    authorization_package = {
+        **_valid_codex_pilot_authorization_packet(),
+        "objective": {"nested": sentinel},
+    }
+    original = copy.deepcopy(authorization_package)
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID,
+        authorization_package,
     )
     output = json.dumps(result, sort_keys=True)
 
@@ -560,8 +577,7 @@ def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_authori
         "authorization_context_valid": False,
         "claim_read_request_blockers": ["authorization_context_invalid"],
     }
-    if isinstance(candidate, dict):
-        assert candidate == original
+    assert authorization_package == original
     assert sentinel not in output
     assert sentinel not in "".join(result["claim_read_request_blockers"])
 
