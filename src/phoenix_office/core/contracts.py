@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum, StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 
 class _StringEnum(StrEnum):
@@ -808,6 +808,24 @@ CODEX_PILOT_INITIAL_CLAIM_CONFLICT_FIELDS = {
     "authorization_id_conflict",
     "authorization_fingerprint_conflict",
 }
+CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_RESULT_FIELDS = {
+    "claim_store_create_category",
+}
+CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_CATEGORIES = {
+    "created",
+    "bundle_invalid",
+    "authorization_context_invalid",
+    "bundle_binding_mismatch",
+    "attempt_id_conflict",
+    "authorization_id_conflict",
+    "authorization_fingerprint_conflict",
+    "claim_store_unavailable",
+    "claim_durability_uncertain",
+    "commit_incomplete",
+    "claim_record_corrupt",
+    "audit_event_corrupt",
+    "snapshot_corrupt",
+}
 CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS = {
     "claim_record",
     "sequence_zero_event",
@@ -817,6 +835,18 @@ CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS = {
     "snapshot_bytes",
     "uniqueness_entries",
 }
+
+
+class CodexPilotInitialClaimStore(Protocol):
+    """Backend-neutral atomic initial-claim create boundary."""
+
+    def create_initial_claim_commit(
+        self,
+        preparation_result: object,
+        authorization_package: object,
+    ) -> object:
+        """Create one initial-claim commit atomically."""
+        ...
 
 
 def codex_pilot_authorization_fingerprint(package: object) -> str:
@@ -1768,6 +1798,21 @@ def _prepared_commit_validation_result(
     }
 
 
+def _initial_claim_store_create_result(
+    *,
+    result_valid: bool,
+    claim_created: bool | None,
+    category: str | None,
+    blockers: set[str] | list[str],
+) -> dict[str, object]:
+    return {
+        "claim_store_create_result_valid": result_valid,
+        "claim_created": claim_created,
+        "claim_store_create_category": category,
+        "claim_store_create_result_blockers": sorted(set(blockers)),
+    }
+
+
 def _conflict_classification_result(
     *,
     conflict_classification_passed: bool,
@@ -1781,6 +1826,59 @@ def _conflict_classification_result(
         "conflict_category": conflict_category,
         "conflict_classification_blockers": sorted(set(blockers)),
     }
+
+
+def validate_codex_pilot_initial_claim_store_create_result(
+    result: object,
+) -> dict[str, object]:
+    """Validate the bounded initial-claim store create result shape."""
+    if type(result) is not dict:
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=["claim_store_create_result_invalid"],
+        )
+
+    data = result
+    if len(data) != 1:
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=["claim_store_create_result_invalid"],
+        )
+
+    key = next(iter(data))
+    if type(key) is not str or key != "claim_store_create_category":
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=["claim_store_create_result_invalid"],
+        )
+
+    category = data["claim_store_create_category"]
+    blockers: set[str] = set()
+    if type(category) is not str or category not in (
+        CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_CATEGORIES
+    ):
+        blockers.add("claim_store_create_category_invalid")
+
+    if blockers:
+        return _initial_claim_store_create_result(
+            result_valid=False,
+            claim_created=None,
+            category=None,
+            blockers=blockers,
+        )
+
+    return _initial_claim_store_create_result(
+        result_valid=True,
+        claim_created=category == "created",
+        category=category,
+        blockers=[],
+    )
 
 
 def _validate_initial_claim_conflict_observation(

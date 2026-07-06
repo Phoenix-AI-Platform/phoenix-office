@@ -22,6 +22,7 @@ from phoenix_office.core.contracts import (
     CodexPilotEvidencePackage,
     CodexPilotEvidenceReviewerRole,
     CodexPilotEvidenceStatus,
+    CodexPilotInitialClaimStore,
     EventSeverity,
     EvidenceResult,
     EvidenceType,
@@ -63,6 +64,7 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
+    validate_codex_pilot_initial_claim_store_create_result,
     validate_codex_pilot_prepared_initial_claim_commit,
 )
 
@@ -112,6 +114,7 @@ __all__ = [
     "WorkerEvent",
     "WorkerEventType",
     "WorkerType",
+    "CodexPilotInitialClaimStore",
     "codex_pilot_audit_event_digest",
     "codex_pilot_audit_event_structural_errors",
     "codex_pilot_attempt_snapshot_structural_errors",
@@ -121,6 +124,7 @@ __all__ = [
     "compose_codex_pilot_initial_claim_bundle",
     "classify_codex_pilot_initial_claim_conflicts",
     "prepare_codex_pilot_initial_claim_commit",
+    "validate_codex_pilot_initial_claim_store_create_result",
     "validate_codex_pilot_prepared_initial_claim_commit",
     "derive_codex_pilot_attempt_snapshot",
     "validate_codex_pilot_audit_event_binding",
