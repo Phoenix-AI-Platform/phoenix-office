@@ -826,6 +826,26 @@ CODEX_PILOT_INITIAL_CLAIM_STORE_CREATE_CATEGORIES = {
     "audit_event_corrupt",
     "snapshot_corrupt",
 }
+CODEX_PILOT_INITIAL_CLAIM_STORE_READ_RESULT_FIELDS = {
+    "claim_store_read_category",
+}
+CODEX_PILOT_INITIAL_CLAIM_STORE_READ_CATEGORIES = {
+    "read_success",
+    "attempt_id_invalid",
+    "authorization_context_invalid",
+    "bundle_binding_mismatch",
+    "missing_commit",
+    "commit_incomplete",
+    "claim_record_corrupt",
+    "audit_event_corrupt",
+    "snapshot_corrupt",
+    "uniqueness_entry_corrupt",
+    "digest_mismatch",
+    "identity_mismatch",
+    "history_mismatch",
+    "claim_store_unavailable",
+    "claim_durability_uncertain",
+}
 CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS = {
     "claim_record",
     "sequence_zero_event",
@@ -846,6 +866,18 @@ class CodexPilotInitialClaimStore(Protocol):
         authorization_package: object,
     ) -> object:
         """Create one initial-claim commit atomically."""
+        ...
+
+
+class CodexPilotInitialClaimReader(Protocol):
+    """Backend-neutral read boundary for one committed initial-claim unit."""
+
+    def read_initial_claim_bundle(
+        self,
+        attempt_id: object,
+        authorization_package: object,
+    ) -> object:
+        """Read one committed initial-claim unit atomically."""
         ...
 
 
@@ -1813,6 +1845,21 @@ def _initial_claim_store_create_result(
     }
 
 
+def _initial_claim_store_read_result(
+    *,
+    result_valid: bool,
+    claim_read_succeeded: bool | None,
+    category: str | None,
+    blockers: set[str] | list[str],
+) -> dict[str, object]:
+    return {
+        "claim_store_read_result_valid": result_valid,
+        "claim_read_succeeded": claim_read_succeeded,
+        "claim_store_read_category": category,
+        "claim_store_read_result_blockers": sorted(set(blockers)),
+    }
+
+
 def _conflict_classification_result(
     *,
     conflict_classification_passed: bool,
@@ -1876,6 +1923,59 @@ def validate_codex_pilot_initial_claim_store_create_result(
     return _initial_claim_store_create_result(
         result_valid=True,
         claim_created=category == "created",
+        category=category,
+        blockers=[],
+    )
+
+
+def validate_codex_pilot_initial_claim_store_read_result(
+    result: object,
+) -> dict[str, object]:
+    """Validate the bounded initial-claim store read result shape."""
+    if type(result) is not dict:
+        return _initial_claim_store_read_result(
+            result_valid=False,
+            claim_read_succeeded=None,
+            category=None,
+            blockers=["claim_store_read_result_invalid"],
+        )
+
+    data = result
+    if len(data) != 1:
+        return _initial_claim_store_read_result(
+            result_valid=False,
+            claim_read_succeeded=None,
+            category=None,
+            blockers=["claim_store_read_result_invalid"],
+        )
+
+    key = next(iter(data))
+    if type(key) is not str or key != "claim_store_read_category":
+        return _initial_claim_store_read_result(
+            result_valid=False,
+            claim_read_succeeded=None,
+            category=None,
+            blockers=["claim_store_read_result_invalid"],
+        )
+
+    category = data["claim_store_read_category"]
+    blockers: set[str] = set()
+    if type(category) is not str or category not in (
+        CODEX_PILOT_INITIAL_CLAIM_STORE_READ_CATEGORIES
+    ):
+        blockers.add("claim_store_read_category_invalid")
+
+    if blockers:
+        return _initial_claim_store_read_result(
+            result_valid=False,
+            claim_read_succeeded=None,
+            category=None,
+            blockers=blockers,
+        )
+
+    return _initial_claim_store_read_result(
+        result_valid=True,
+        claim_read_succeeded=category == "read_success",
         category=category,
         blockers=[],
     )
