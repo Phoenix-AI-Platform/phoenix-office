@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from phoenix_office.cli import _validate_codex_pilot_authorization_packet
@@ -65,6 +66,7 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
+    validate_codex_pilot_initial_claim_uniqueness_entries,
     validate_codex_pilot_prepared_initial_claim_commit,
 )
 
@@ -82,6 +84,50 @@ class _CustomBytesLike:
 class _Truthy:
     def __bool__(self) -> bool:
         return True
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _Truthy:
+        return self
+
+
+class _ListSubclass(list):
+    pass
+
+
+class _DictSubclass(dict):
+    pass
+
+
+class _StringSubclass(str):
+    pass
+
+
+class _ClaimFieldEnum(StrEnum):
+    ATTEMPT_ID = "attempt_id"
+    AUTHORIZATION_ID = "authorization_id"
+    AUTHORIZATION_FINGERPRINT = "authorization_fingerprint"
+
+
+class _HostileKey:
+    def __init__(self, label: str):
+        self.label = label
+        self.hash_calls = 0
+        self.eq_calls = 0
+
+    def __hash__(self) -> int:
+        self.hash_calls += 1
+        return hash(self.label)
+
+    def __eq__(self, other: object) -> bool:
+        self.eq_calls += 1
+        raise AssertionError("unexpected equality check")
+
+    def __deepcopy__(self, memo: dict[int, object]) -> _HostileKey:
+        return self
+
+
+class _ExceptionValue(ValueError):
+    def __deepcopy__(self, memo: dict[int, object]) -> _ExceptionValue:
+        return self
 
 
 def test_contract_enum_values_match_architecture_docs():
@@ -1137,6 +1183,411 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_is_deterministic_and
     assert authorization == authorization_original
 
 
+def test_validate_initial_claim_uniqueness_entries_exact_types_and_hostile_edges():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    claim_record = copy.deepcopy(prepared["prepared_commit"]["claim_record"])
+    uniqueness_entries = copy.deepcopy(prepared["prepared_commit"]["uniqueness_entries"])
+    attempt_id = claim_record["attempt_id"]
+    authorization_id = claim_record["authorization_id"]
+    authorization_fingerprint = claim_record["authorization_fingerprint"]
+
+    def assert_result(
+        candidate_entries: object,
+        *,
+        candidate_claim: object | None = None,
+        expected_structural_valid: bool,
+        expected_binding_passed: bool,
+        expected_blockers: set[str],
+        rejected_sentinel: str | None = None,
+        hostile_key: _HostileKey | None = None,
+    ) -> None:
+        entries_before = copy.deepcopy(candidate_entries)
+        claim = claim_record if candidate_claim is None else candidate_claim
+        claim_before = copy.deepcopy(claim)
+        result = validate_codex_pilot_initial_claim_uniqueness_entries(
+            candidate_entries,
+            claim,
+        )
+
+        assert result == {
+            "uniqueness_entries_structural_valid": expected_structural_valid,
+            "uniqueness_entries_binding_passed": expected_binding_passed,
+            "uniqueness_entry_blockers": sorted(expected_blockers),
+        }
+        assert candidate_entries == entries_before
+        assert claim == claim_before
+        if rejected_sentinel is not None:
+            assert rejected_sentinel not in json.dumps(result, sort_keys=True)
+        if hostile_key is not None:
+            assert hostile_key.eq_calls == 0
+
+    assert_result(
+        uniqueness_entries,
+        expected_structural_valid=True,
+        expected_binding_passed=True,
+        expected_blockers=set(),
+    )
+
+    assert_result(
+        _ListSubclass(uniqueness_entries),
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"uniqueness_entries_invalid"},
+    )
+
+    assert_result(
+        [
+            copy.deepcopy(uniqueness_entries[0]),
+            _DictSubclass(uniqueness_entries[1]),
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"authorization_id_uniqueness_invalid"},
+    )
+
+    assert_result(
+        [
+            {_StringSubclass("attempt_id"): {attempt_id: attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {_ClaimFieldEnum.ATTEMPT_ID: {attempt_id: attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": _DictSubclass({attempt_id: attempt_id})},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {_StringSubclass(attempt_id): attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {_ClaimFieldEnum.ATTEMPT_ID: attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: _StringSubclass(attempt_id)}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: _ClaimFieldEnum.ATTEMPT_ID}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: {"nested": "metadata"}}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: _ExceptionValue("boom")}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: True}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: 1}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: b"attempt-id"}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: _Truthy()}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
+
+    assert_result(
+        uniqueness_entries[:2],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"uniqueness_entries_invalid"},
+    )
+
+    extra_entries = copy.deepcopy(uniqueness_entries)
+    extra_entries.append({"extra": {attempt_id: attempt_id}})
+    assert_result(
+        extra_entries,
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"uniqueness_entries_invalid"},
+    )
+
+    reordered_entries = copy.deepcopy(uniqueness_entries)
+    reordered_entries[0], reordered_entries[1] = reordered_entries[1], reordered_entries[0]
+    assert_result(
+        reordered_entries,
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={
+            "attempt_id_uniqueness_invalid",
+            "authorization_id_uniqueness_invalid",
+        },
+    )
+
+    duplicate_entries = [
+        copy.deepcopy(uniqueness_entries[0]),
+        copy.deepcopy(uniqueness_entries[0]),
+        copy.deepcopy(uniqueness_entries[2]),
+    ]
+    assert_result(
+        duplicate_entries,
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"authorization_id_uniqueness_invalid"},
+    )
+
+    hostile_outer_key = _HostileKey("outer")
+    assert_result(
+        [
+            {hostile_outer_key: {attempt_id: attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+        hostile_key=hostile_outer_key,
+    )
+
+    hostile_inner_key = _HostileKey("inner")
+    assert_result(
+        [
+            {"attempt_id": {hostile_inner_key: attempt_id}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+        hostile_key=hostile_inner_key,
+    )
+
+    rejected_sentinel = "rejected-uniqueness-sentinel"
+    assert_result(
+        [
+            {"attempt_id": {attempt_id: rejected_sentinel}},
+            uniqueness_entries[1],
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=True,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+        rejected_sentinel=rejected_sentinel,
+    )
+
+    assert_result(
+        [
+            uniqueness_entries[0],
+            {"authorization_id": {authorization_id: rejected_sentinel}},
+            uniqueness_entries[2],
+        ],
+        expected_structural_valid=True,
+        expected_binding_passed=False,
+        expected_blockers={"authorization_id_uniqueness_invalid"},
+        rejected_sentinel=rejected_sentinel,
+    )
+
+    assert_result(
+        [
+            uniqueness_entries[0],
+            uniqueness_entries[1],
+            {"authorization_fingerprint": {authorization_fingerprint: rejected_sentinel}},
+        ],
+        expected_structural_valid=True,
+        expected_binding_passed=False,
+        expected_blockers={"authorization_fingerprint_uniqueness_invalid"},
+        rejected_sentinel=rejected_sentinel,
+    )
+
+
+def test_validate_initial_claim_uniqueness_entries_rejects_invalid_claim_roots_and_records():
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    uniqueness_entries = copy.deepcopy(prepared["prepared_commit"]["uniqueness_entries"])
+    valid_claim = copy.deepcopy(prepared["prepared_commit"]["claim_record"])
+
+    invalid_root_claim: object = []
+    invalid_root_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        invalid_root_claim,
+    )
+    assert invalid_root_result == {
+        "uniqueness_entries_structural_valid": True,
+        "uniqueness_entries_binding_passed": False,
+        "uniqueness_entry_blockers": [
+            "attempt_id_uniqueness_invalid",
+            "authorization_fingerprint_uniqueness_invalid",
+            "authorization_id_uniqueness_invalid",
+            "claim_record_invalid",
+        ],
+    }
+    assert invalid_root_claim == []
+
+    structurally_invalid_claim = copy.deepcopy(valid_claim)
+    structurally_invalid_claim["attempt_id"] = "pilot-attempt-token-value"
+    structurally_invalid_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        structurally_invalid_claim,
+    )
+    structurally_invalid_output = json.dumps(
+        structurally_invalid_result,
+        sort_keys=True,
+    )
+    assert structurally_invalid_result == {
+        "uniqueness_entries_structural_valid": True,
+        "uniqueness_entries_binding_passed": False,
+        "uniqueness_entry_blockers": [
+            "attempt_id_uniqueness_invalid",
+            "authorization_fingerprint_uniqueness_invalid",
+            "authorization_id_uniqueness_invalid",
+            "claim_record_invalid",
+        ],
+    }
+    assert "token-value" not in structurally_invalid_output
+    assert structurally_invalid_claim == {
+        "attempt_id": "pilot-attempt-token-value",
+        **{
+            key: value
+            for key, value in valid_claim.items()
+            if key != "attempt_id"
+        },
+    }
+
+
+def test_validate_initial_claim_uniqueness_entries_no_external_dependencies(monkeypatch):
+    authorization = _valid_codex_authorization_dict()
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization,
+        "pilot-attempt-abc123def456",
+    )
+    prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    claim_record = copy.deepcopy(prepared["prepared_commit"]["claim_record"])
+    uniqueness_entries = copy.deepcopy(prepared["prepared_commit"]["uniqueness_entries"])
+    claim_record_original = copy.deepcopy(claim_record)
+    uniqueness_entries_original = copy.deepcopy(uniqueness_entries)
+
+    class _Sentinel:
+        def __getattr__(self, name):
+            raise AssertionError(name)
+
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(contracts, "datetime", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "Path", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "random", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "subprocess", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "socket", _Sentinel(), raising=False)
+    monkeypatch.setattr(contracts, "sqlite3", _Sentinel(), raising=False)
+
+    first = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        claim_record,
+    )
+    second = validate_codex_pilot_initial_claim_uniqueness_entries(
+        copy.deepcopy(uniqueness_entries),
+        copy.deepcopy(claim_record),
+    )
+
+    assert first == second
+    assert first == {
+        "uniqueness_entries_structural_valid": True,
+        "uniqueness_entries_binding_passed": True,
+        "uniqueness_entry_blockers": [],
+    }
+    assert claim_record == claim_record_original
+    assert uniqueness_entries == uniqueness_entries_original
+
+
 def test_validate_prepared_commit_wrapper_and_payload_shapes():
     authorization = _valid_codex_authorization_dict()
     bundle = compose_codex_pilot_initial_claim_bundle(
@@ -1749,97 +2200,105 @@ def test_validate_codex_pilot_prepared_initial_claim_commit_rejects_uniqueness_s
         "pilot-attempt-abc123def456",
     )
     prepared = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    prepared_original = copy.deepcopy(prepared)
+    authorization_id = prepared["prepared_commit"]["claim_record"]["authorization_id"]
     attempt_id = prepared["prepared_commit"]["claim_record"]["attempt_id"]
-    authorization_fingerprint = prepared["prepared_commit"]["claim_record"][
-        "authorization_fingerprint"
-    ]
 
-    structural_cases = []
+    def assert_result(
+        candidate: object,
+        *,
+        expected_structural_valid: bool,
+        expected_binding_passed: bool,
+        expected_blockers: set[str],
+    ) -> None:
+        candidate_before = copy.deepcopy(candidate)
+        result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
 
-    reordered_entries = copy.deepcopy(prepared)
-    reordered_entries["prepared_commit"]["uniqueness_entries"] = [
-        reordered_entries["prepared_commit"]["uniqueness_entries"][1],
-        reordered_entries["prepared_commit"]["uniqueness_entries"][0],
-        reordered_entries["prepared_commit"]["uniqueness_entries"][2],
-    ]
-    structural_cases.append(reordered_entries)
+        assert result == {
+            "prepared_commit_structural_valid": expected_structural_valid,
+            "prepared_commit_binding_passed": expected_binding_passed,
+            "prepared_commit_blockers": sorted(expected_blockers),
+        }
+        assert candidate == candidate_before
 
-    missing_entry = copy.deepcopy(prepared)
-    missing_entry["prepared_commit"]["uniqueness_entries"] = missing_entry["prepared_commit"][
-        "uniqueness_entries"
-    ][:2]
-    structural_cases.append(missing_entry)
-
-    extra_entry = copy.deepcopy(prepared)
-    extra_entry["prepared_commit"]["uniqueness_entries"].append(
-        {"extra": {attempt_id: attempt_id}}
+    assert_result(
+        {
+            "prepared_commit_passed": True,
+            "prepared_commit_blockers": [],
+            "prepared_commit": {
+                **prepared["prepared_commit"],
+                "uniqueness_entries": {
+                    "attempt_id": {attempt_id: attempt_id},
+                },
+            },
+        },
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"prepared_commit_uniqueness_invalid"},
     )
-    structural_cases.append(extra_entry)
 
-    non_list_entries = copy.deepcopy(prepared)
-    non_list_entries["prepared_commit"]["uniqueness_entries"] = {
-        "attempt_id": {attempt_id: attempt_id}
-    }
-    structural_cases.append(non_list_entries)
+    assert_result(
+        {
+            "prepared_commit_passed": True,
+            "prepared_commit_blockers": [],
+            "prepared_commit": {
+                **prepared["prepared_commit"],
+                "uniqueness_entries": prepared["prepared_commit"]["uniqueness_entries"][:2],
+            },
+        },
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"prepared_commit_uniqueness_invalid"},
+    )
 
-    non_dict_entry = copy.deepcopy(prepared)
-    non_dict_entry["prepared_commit"]["uniqueness_entries"][0] = ["attempt_id"]
-    structural_cases.append(non_dict_entry)
+    assert_result(
+        {
+            "prepared_commit_passed": True,
+            "prepared_commit_blockers": [],
+            "prepared_commit": {
+                **prepared["prepared_commit"],
+                "uniqueness_entries": [
+                    ["attempt_id"],
+                    prepared["prepared_commit"]["uniqueness_entries"][1],
+                    prepared["prepared_commit"]["uniqueness_entries"][2],
+                ],
+            },
+        },
+        expected_structural_valid=False,
+        expected_binding_passed=False,
+        expected_blockers={"attempt_id_uniqueness_invalid"},
+    )
 
-    wrong_entry_key_shape = copy.deepcopy(prepared)
-    wrong_entry_key_shape["prepared_commit"]["uniqueness_entries"][0] = {
-        "attempt_id": {attempt_id: attempt_id},
-        "unexpected": {attempt_id: attempt_id},
-    }
-    structural_cases.append(wrong_entry_key_shape)
+    assert_result(
+        {
+            "prepared_commit_passed": True,
+            "prepared_commit_blockers": [],
+            "prepared_commit": {
+                **prepared["prepared_commit"],
+                "uniqueness_entries": [
+                    prepared["prepared_commit"]["uniqueness_entries"][0],
+                    {
+                        "authorization_id": {
+                            authorization_id: "pilot-attempt-stale",
+                        }
+                    },
+                    prepared["prepared_commit"]["uniqueness_entries"][2],
+                ],
+            },
+        },
+        expected_structural_valid=True,
+        expected_binding_passed=False,
+        expected_blockers={"authorization_id_uniqueness_invalid"},
+    )
 
-    non_dict_key_map = copy.deepcopy(prepared)
-    non_dict_key_map["prepared_commit"]["uniqueness_entries"][0] = {
-        "attempt_id": "not-a-map"
-    }
-    structural_cases.append(non_dict_key_map)
+    assert_result(
+        prepared,
+        expected_structural_valid=True,
+        expected_binding_passed=True,
+        expected_blockers=set(),
+    )
 
-    multi_entry_key_map = copy.deepcopy(prepared)
-    multi_entry_key_map["prepared_commit"]["uniqueness_entries"][0] = {
-        "attempt_id": {attempt_id: attempt_id, "extra": attempt_id}
-    }
-    structural_cases.append(multi_entry_key_map)
-
-    for candidate in structural_cases:
-        result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
-        assert result["prepared_commit_structural_valid"] is False
-        assert result["prepared_commit_binding_passed"] is False
-        assert any(
-            blocker.endswith("_uniqueness_invalid")
-            or blocker == "prepared_commit_uniqueness_invalid"
-            for blocker in result["prepared_commit_blockers"]
-        )
-
-    stale_key_entry = copy.deepcopy(prepared)
-    stale_key_entry["prepared_commit"]["uniqueness_entries"][1] = {
-        "authorization_id": {"pilot-auth-issue-stale": attempt_id}
-    }
-    assert validate_codex_pilot_prepared_initial_claim_commit(
-        stale_key_entry,
-        authorization,
-    )["prepared_commit_structural_valid"] is True
-
-    stale_target_entry = copy.deepcopy(prepared)
-    stale_target_entry["prepared_commit"]["uniqueness_entries"][2] = {
-        "authorization_fingerprint": {authorization_fingerprint: "pilot-attempt-zzz999"}
-    }
-    assert validate_codex_pilot_prepared_initial_claim_commit(
-        stale_target_entry,
-        authorization,
-    )["prepared_commit_structural_valid"] is True
-
-    for candidate in [stale_key_entry, stale_target_entry]:
-        result = validate_codex_pilot_prepared_initial_claim_commit(candidate, authorization)
-        assert result["prepared_commit_binding_passed"] is False
-        assert any(
-            blocker.endswith("_uniqueness_invalid")
-            for blocker in result["prepared_commit_blockers"]
-        )
+    assert prepared == prepared_original
 
 
 def test_validate_codex_pilot_prepared_initial_claim_commit_fails_closed_for_malformed_records():

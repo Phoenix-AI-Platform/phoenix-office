@@ -68,6 +68,7 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_initial_claim_read_request,
     validate_codex_pilot_initial_claim_store_create_result,
     validate_codex_pilot_initial_claim_store_read_result,
+    validate_codex_pilot_initial_claim_uniqueness_entries,
     validate_codex_pilot_prepared_initial_claim_commit,
 )
 
@@ -128,6 +129,7 @@ __all__ = [
     "compose_codex_pilot_initial_claim_bundle",
     "classify_codex_pilot_initial_claim_conflicts",
     "prepare_codex_pilot_initial_claim_commit",
+    "validate_codex_pilot_initial_claim_uniqueness_entries",
     "validate_codex_pilot_initial_claim_read_request",
     "validate_codex_pilot_initial_claim_store_create_result",
     "validate_codex_pilot_initial_claim_store_read_result",

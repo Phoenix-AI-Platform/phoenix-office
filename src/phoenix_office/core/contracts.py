@@ -1031,6 +1031,86 @@ def validate_codex_pilot_claim_binding(
     }
 
 
+def validate_codex_pilot_initial_claim_uniqueness_entries(
+    uniqueness_entries: object,
+    claim_record: object,
+) -> dict[str, object]:
+    """Validate the ordered v1 initial-claim uniqueness entries without side effects."""
+    blockers: set[str] = set()
+    claim_result = validate_codex_pilot_claim_record(claim_record)
+    claim_structural_valid = claim_result["claim_structural_valid"]
+    if not claim_structural_valid:
+        blockers.add("claim_record_invalid")
+
+    structural_valid = True
+    binding_passed = claim_structural_valid
+
+    if type(uniqueness_entries) is not list:
+        blockers.add("uniqueness_entries_invalid")
+        structural_valid = False
+        binding_passed = False
+    elif len(uniqueness_entries) != 3:
+        blockers.add("uniqueness_entries_invalid")
+        structural_valid = False
+        binding_passed = False
+    else:
+        claim_data = _contract_mapping(claim_record) if claim_structural_valid else None
+        authoritative_attempt_id = (
+            claim_data["attempt_id"] if claim_data is not None else None
+        )
+        for index, key_name in enumerate(CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS):
+            entry = uniqueness_entries[index]
+            blocker_name = f"{key_name}_uniqueness_invalid"
+            if type(entry) is not dict or len(entry) != 1:
+                blockers.add(blocker_name)
+                structural_valid = False
+                binding_passed = False
+                continue
+
+            outer_key = next(iter(entry))
+            if type(outer_key) is not str or outer_key != key_name:
+                blockers.add(blocker_name)
+                structural_valid = False
+                binding_passed = False
+                continue
+
+            key_map = entry[outer_key]
+            if type(key_map) is not dict or len(key_map) != 1:
+                blockers.add(blocker_name)
+                structural_valid = False
+                binding_passed = False
+                continue
+
+            inner_key = next(iter(key_map))
+            if type(inner_key) is not str:
+                blockers.add(blocker_name)
+                structural_valid = False
+                binding_passed = False
+                continue
+
+            if claim_data is not None and inner_key != claim_data[key_name]:
+                blockers.add(blocker_name)
+                binding_passed = False
+                continue
+
+            value = key_map[inner_key]
+            if type(value) is not str:
+                blockers.add(blocker_name)
+                structural_valid = False
+                binding_passed = False
+                continue
+
+            if value != authoritative_attempt_id:
+                blockers.add(blocker_name)
+                binding_passed = False
+
+    return {
+        "uniqueness_entries_structural_valid": structural_valid,
+        "uniqueness_entries_binding_passed": binding_passed,
+        "uniqueness_entry_blockers": sorted(blockers),
+    }
+
+
 def compose_codex_pilot_initial_claim_bundle(
     authorization_package: object,
     attempt_id: object,
@@ -1430,42 +1510,18 @@ def validate_codex_pilot_prepared_initial_claim_commit(
             blockers.add(f"{field_name}_invalid")
 
     uniqueness_entries = prepared_commit.get("uniqueness_entries")
-    if type(uniqueness_entries) is not list:
-        blockers.add("prepared_commit_uniqueness_invalid")
+    uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        claim_record,
+    )
+    if not uniqueness_result["uniqueness_entries_structural_valid"]:
         structural_blockers.add("prepared_commit_uniqueness_invalid")
-    elif len(uniqueness_entries) != 3:
-        blockers.add("prepared_commit_uniqueness_invalid")
-        structural_blockers.add("prepared_commit_uniqueness_invalid")
-    else:
-        claim_data = (
-            _contract_mapping(claim_record)
-            if claim_result["claim_structural_valid"]
-            else None
-        )
-        attempt_id = claim_data["attempt_id"] if claim_data is not None else None
-        for index, key_name in enumerate(CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS):
-            entry = uniqueness_entries[index]
-            blocker_name = f"{key_name}_uniqueness_invalid"
-            if type(entry) is not dict or set(entry) != {key_name}:
-                blockers.add(blocker_name)
-                structural_blockers.add(blocker_name)
-                continue
-            key_map = entry.get(key_name)
-            if type(key_map) is not dict:
-                blockers.add(blocker_name)
-                structural_blockers.add(blocker_name)
-                continue
-            if len(key_map) != 1:
-                blockers.add(blocker_name)
-                structural_blockers.add(blocker_name)
-                continue
-            expected_key = claim_data[key_name] if claim_data is not None else next(iter(key_map))
-            actual_key = next(iter(key_map))
-            if actual_key != expected_key:
-                blockers.add(blocker_name)
-                continue
-            if key_map.get(expected_key) != attempt_id:
-                blockers.add(blocker_name)
+    for blocker_name in uniqueness_result["uniqueness_entry_blockers"]:
+        if blocker_name == "uniqueness_entries_invalid":
+            blockers.add("prepared_commit_uniqueness_invalid")
+            structural_blockers.add("prepared_commit_uniqueness_invalid")
+        else:
+            blockers.add(blocker_name)
 
     return _prepared_commit_validation_result(
         structural_valid=not structural_blockers,
