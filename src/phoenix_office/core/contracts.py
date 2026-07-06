@@ -1860,6 +1860,21 @@ def _initial_claim_store_read_result(
     }
 
 
+def _initial_claim_read_request_result(
+    *,
+    request_valid: bool,
+    attempt_id_valid: bool,
+    authorization_context_valid: bool,
+    blockers: set[str] | list[str],
+) -> dict[str, object]:
+    return {
+        "claim_read_request_valid": request_valid,
+        "attempt_id_valid": attempt_id_valid,
+        "authorization_context_valid": authorization_context_valid,
+        "claim_read_request_blockers": sorted(set(blockers)),
+    }
+
+
 def _conflict_classification_result(
     *,
     conflict_classification_passed: bool,
@@ -1978,6 +1993,42 @@ def validate_codex_pilot_initial_claim_store_read_result(
         claim_read_succeeded=category == "read_success",
         category=category,
         blockers=[],
+    )
+
+
+def validate_codex_pilot_initial_claim_read_request(
+    attempt_id: object,
+    authorization_package: object,
+) -> dict[str, object]:
+    """Validate a deterministic pre-read request for a committed initial claim."""
+    attempt_id_valid = _is_exact_codex_pilot_attempt_id(attempt_id)
+    authorization_context_valid = False
+
+    authorization_result = validate_codex_pilot_authorization_packet(authorization_package)
+    if authorization_result["authorization_structural_valid"]:
+        try:
+            authorization = _contract_mapping(authorization_package)
+        except ValueError:
+            authorization_context_valid = False
+        else:
+            try:
+                codex_pilot_authorization_fingerprint(authorization)
+                codex_pilot_objective_digest(authorization["objective"])
+            except ValueError:
+                authorization_context_valid = False
+            else:
+                authorization_context_valid = True
+
+    blockers: set[str] = set()
+    if not attempt_id_valid:
+        blockers.add("attempt_id_invalid")
+    if not authorization_context_valid:
+        blockers.add("authorization_context_invalid")
+    return _initial_claim_read_request_result(
+        request_valid=attempt_id_valid and authorization_context_valid,
+        attempt_id_valid=attempt_id_valid,
+        authorization_context_valid=authorization_context_valid,
+        blockers=blockers,
     )
 
 
@@ -2563,7 +2614,7 @@ def _is_safe_identifier(value: object) -> bool:
 
 def _is_attempt_id(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) <= 80
         and re.fullmatch(r"pilot-attempt-[a-z0-9][a-z0-9._-]{11,62}", value)
         is not None
@@ -2572,7 +2623,7 @@ def _is_attempt_id(value: object) -> bool:
 
 
 def _is_exact_codex_pilot_attempt_id(value: object) -> bool:
-    return _is_safe_identifier(value) and _is_attempt_id(value)
+    return type(value) is str and _is_safe_identifier(value) and _is_attempt_id(value)
 
 
 def _is_lower_hex(value: object, length: int) -> bool:
