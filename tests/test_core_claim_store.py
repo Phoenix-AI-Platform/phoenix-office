@@ -133,6 +133,7 @@ def _valid_codex_pilot_authorization_packet() -> dict[str, object]:
 
 
 VALID_ATTEMPT_ID = "pilot-attempt-abc123def456"
+VALID_ATTEMPT_ID_NON_HEX = "pilot-attempt-abc123defghz"
 
 
 def test_codex_pilot_initial_claim_store_protocol_is_exact_and_not_runtime_checkable():
@@ -459,6 +460,24 @@ def test_validate_codex_pilot_initial_claim_read_request_is_valid_deterministic_
     assert authorization == original
 
 
+def test_validate_codex_pilot_initial_claim_read_request_accepts_safe_non_hex_letters():
+    authorization = _valid_codex_pilot_authorization_packet()
+    original = copy.deepcopy(authorization)
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID_NON_HEX,
+        authorization,
+    )
+
+    assert result == {
+        "claim_read_request_valid": True,
+        "attempt_id_valid": True,
+        "authorization_context_valid": True,
+        "claim_read_request_blockers": [],
+    }
+    assert authorization == original
+
+
 @pytest.mark.parametrize(
     "attempt_id",
     [
@@ -521,11 +540,17 @@ def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_attempt
 def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_authorization_contexts(
     authorization_package: object,
 ):
-    original = copy.deepcopy(authorization_package)
+    sentinel = "sentinel-authorization-objective-987654321"
+    candidate = (
+        {**authorization_package, "objective": sentinel}
+        if isinstance(authorization_package, dict)
+        else authorization_package
+    )
+    original = copy.deepcopy(candidate)
 
     result = validate_codex_pilot_initial_claim_read_request(
         VALID_ATTEMPT_ID,
-        authorization_package,
+        candidate,
     )
     output = json.dumps(result, sort_keys=True)
 
@@ -535,9 +560,36 @@ def test_validate_codex_pilot_initial_claim_read_request_rejects_invalid_authori
         "authorization_context_valid": False,
         "claim_read_request_blockers": ["authorization_context_invalid"],
     }
-    if isinstance(authorization_package, dict):
-        assert authorization_package == original
-    assert "authorization_id" not in output or authorization_package is None
+    if isinstance(candidate, dict):
+        assert candidate == original
+    assert sentinel not in output
+    assert sentinel not in "".join(result["claim_read_request_blockers"])
+
+
+def test_validate_codex_pilot_initial_claim_read_request_no_external_dependencies(monkeypatch):
+    import builtins
+
+    import phoenix_office.core.contracts as contracts
+
+    bomb = _Bomb()
+    monkeypatch.setattr(contracts, "datetime", bomb, raising=False)
+    monkeypatch.setattr(contracts, "Path", bomb, raising=False)
+    monkeypatch.setattr(contracts, "random", bomb, raising=False)
+    monkeypatch.setattr(contracts, "subprocess", bomb, raising=False)
+    monkeypatch.setattr(contracts, "socket", bomb, raising=False)
+    monkeypatch.setattr(builtins, "open", bomb, raising=True)
+
+    result = validate_codex_pilot_initial_claim_read_request(
+        VALID_ATTEMPT_ID_NON_HEX,
+        _valid_codex_pilot_authorization_packet(),
+    )
+
+    assert result == {
+        "claim_read_request_valid": True,
+        "attempt_id_valid": True,
+        "authorization_context_valid": True,
+        "claim_read_request_blockers": [],
+    }
 
 
 @pytest.mark.parametrize(
