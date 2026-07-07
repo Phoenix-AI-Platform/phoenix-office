@@ -1,7 +1,9 @@
-"""Safe committed initial-claim unit validation."""
+"""Reserved module for committed initial-claim validation."""
 
 from __future__ import annotations
 
-import json
+import json as _json
 
 import phoenix_office.core.contracts as _contracts
+
+__all__ = ["_contracts", "_json"]
