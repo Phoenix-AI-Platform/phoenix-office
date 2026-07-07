@@ -86,7 +86,9 @@ class CodexPilotEvidenceReviewerRole(_StringEnum):
 
     HUMAN_OPERATOR = "human_operator"
     ASSISTANT_REVIEWER = "assistant_reviewer"
-    HUMAN_OPERATOR_AND_ASSISTANT_REVIEWER = "human_operator_and_assistant_reviewer"
+    HUMAN_OPERATOR_AND_ASSISTANT_REVIEWER = (
+        "human_operator_and_assistant_reviewer"
+    )
 
 
 class WorkerEventType(_StringEnum):
@@ -381,7 +383,9 @@ CODEX_PILOT_AUTHORIZATION_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
 CODEX_PILOT_AUTHORIZATION_KIND = "docs-only-supervised"
 CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
 CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
-CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = "phoenix-codex-authorization-fingerprint.v1"
+CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
+    "phoenix-codex-authorization-fingerprint.v1"
+)
 CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX = (
     f"{CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION}\n"
 )
@@ -480,7 +484,9 @@ CODEX_PILOT_AUTHORIZATION_REQUIRED_FALSE_FIELDS = [
 ]
 CODEX_PILOT_CLAIM_SCHEMA_VERSION = "codex-pilot-claim.v1"
 CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION = "codex-pilot-objective-digest.v1"
-CODEX_PILOT_OBJECTIVE_DIGEST_PREFIX = f"{CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION}\n"
+CODEX_PILOT_OBJECTIVE_DIGEST_PREFIX = (
+    f"{CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION}\n"
+)
 CODEX_PILOT_CLAIM_REQUIRED_FIELDS = {
     "schema_version",
     "attempt_id",
@@ -565,8 +571,12 @@ CODEX_PILOT_CLAIM_PROJECTION_FIELDS = [
     "background_execution_authorized",
 ]
 CODEX_PILOT_AUDIT_EVENT_SCHEMA_VERSION = "codex-pilot-audit-event.v1"
-CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION = "codex-pilot-audit-event-digest.v1"
-CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX = f"{CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION}\n"
+CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION = (
+    "codex-pilot-audit-event-digest.v1"
+)
+CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX = (
+    f"{CODEX_PILOT_AUDIT_EVENT_DIGEST_SCHEMA_VERSION}\n"
+)
 CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS = {
     "schema_version",
     "attempt_id",
@@ -757,7 +767,9 @@ CODEX_PILOT_ATTEMPT_SNAPSHOT_FIELDS = {
     "authorization_reusable",
 }
 CODEX_PILOT_AUDIT_LIFECYCLE_STATES = {
-    state for transition in CODEX_PILOT_AUDIT_EVENT_TRANSITIONS for state in transition
+    state
+    for transition in CODEX_PILOT_AUDIT_EVENT_TRANSITIONS
+    for state in transition
 }
 CODEX_PILOT_ATTEMPT_SNAPSHOT_STATE_SEQUENCES = {
     "claim_created": {0},
@@ -875,7 +887,8 @@ def codex_pilot_authorization_fingerprint(package: object) -> str:
     if set(data) != CODEX_PILOT_AUTHORIZATION_PACKAGE_FIELDS:
         raise ValueError("authorization fingerprint field set is invalid")
     payload = {
-        field_name: data[field_name] for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
+        field_name: data[field_name]
+        for field_name in CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS
     }
     _validate_codex_pilot_fingerprint_payload(payload)
     canonical = json.dumps(
@@ -884,8 +897,9 @@ def codex_pilot_authorization_fingerprint(package: object) -> str:
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    digest_input = CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8") + canonical.encode(
-        "utf-8"
+    digest_input = (
+        CODEX_PILOT_AUTHORIZATION_FINGERPRINT_PREFIX.encode("utf-8")
+        + canonical.encode("utf-8")
     )
     return hashlib.sha256(digest_input).hexdigest()
 
@@ -895,7 +909,8 @@ def codex_pilot_objective_digest(objective: object) -> str:
     if not isinstance(objective, str) or not _is_safe_text(objective, 200):
         raise ValueError("objective is invalid")
     return hashlib.sha256(
-        CODEX_PILOT_OBJECTIVE_DIGEST_PREFIX.encode("utf-8") + objective.encode("utf-8")
+        CODEX_PILOT_OBJECTIVE_DIGEST_PREFIX.encode("utf-8")
+        + objective.encode("utf-8")
     ).hexdigest()
 
 
@@ -909,8 +924,9 @@ def codex_pilot_audit_event_digest(event: object) -> str:
         separators=(",", ":"),
         ensure_ascii=False,
     )
-    digest_input = CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX.encode("utf-8") + canonical.encode(
-        "utf-8"
+    digest_input = (
+        CODEX_PILOT_AUDIT_EVENT_DIGEST_PREFIX.encode("utf-8")
+        + canonical.encode("utf-8")
     )
     return hashlib.sha256(digest_input).hexdigest()
 
@@ -971,7 +987,9 @@ def validate_codex_pilot_claim_binding(
     except ValueError:
         return {
             **structural,
-            "authorization_structural_errors": ["authorization package root must be an object"],
+            "authorization_structural_errors": [
+                "authorization package root must be an object"
+            ],
             "claim_binding_blockers": ["authorization package is invalid"],
             "claim_binding_passed": False,
         }
@@ -1037,7 +1055,9 @@ def validate_codex_pilot_initial_claim_uniqueness_entries(
         binding_passed = False
     else:
         claim_data = _contract_mapping(claim_record) if claim_structural_valid else None
-        authoritative_attempt_id = claim_data["attempt_id"] if claim_data is not None else None
+        authoritative_attempt_id = (
+            claim_data["attempt_id"] if claim_data is not None else None
+        )
         for index, key_name in enumerate(CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS):
             entry = uniqueness_entries[index]
             blocker_name = f"{key_name}_uniqueness_invalid"
@@ -1088,6 +1108,159 @@ def validate_codex_pilot_initial_claim_uniqueness_entries(
         "uniqueness_entries_structural_valid": structural_valid,
         "uniqueness_entries_binding_passed": binding_passed,
         "uniqueness_entry_blockers": sorted(blockers),
+    }
+
+
+def validate_codex_pilot_initial_claim_committed_unit(
+    committed_unit: object,
+    attempt_id: object,
+    authorization_package: object,
+) -> dict[str, object]:
+    """Validate one already-loaded committed initial-claim unit in memory."""
+    request_result = validate_codex_pilot_initial_claim_read_request(
+        attempt_id,
+        authorization_package,
+    )
+    if not request_result["claim_read_request_valid"]:
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": request_result["claim_read_request_blockers"],
+        }
+
+    blockers: set[str] = set()
+    required_fields = CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS
+    if type(committed_unit) is not dict:
+        blockers.add("commit_incomplete")
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": sorted(blockers),
+        }
+
+    if set(committed_unit) != required_fields:
+        blockers.add("commit_incomplete")
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": sorted(blockers),
+        }
+
+    def _validate_record_bytes(field_name: str, record: dict[str, Any]) -> None:
+        bytes_value = committed_unit[field_name]
+        if type(bytes_value) is not bytes:
+            blockers.add("digest_mismatch")
+            return
+        try:
+            decoded = bytes_value.decode("utf-8")
+            round_trip = json.loads(decoded)
+            canonical = _canonical_contract_json_bytes(record)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            blockers.add("digest_mismatch")
+            return
+        if bytes_value != canonical or round_trip != record:
+            blockers.add("digest_mismatch")
+
+    claim_record = committed_unit["claim_record"]
+    claim_structural_valid = False
+    if type(claim_record) is not dict:
+        blockers.add("claim_record_corrupt")
+    else:
+        claim_result = validate_codex_pilot_claim_record(claim_record)
+        claim_structural_valid = claim_result["claim_structural_valid"]
+        if not claim_structural_valid:
+            blockers.add("claim_record_corrupt")
+        _validate_record_bytes("claim_record_bytes", claim_record)
+        if claim_structural_valid and claim_record.get("attempt_id") != attempt_id:
+            blockers.add("identity_mismatch")
+        if claim_structural_valid:
+            claim_binding = validate_codex_pilot_claim_binding(
+                claim_record,
+                authorization_package,
+            )
+            if not claim_binding["claim_binding_passed"]:
+                blockers.add("bundle_binding_mismatch")
+
+    sequence_zero_event = committed_unit["sequence_zero_event"]
+    event_structural_valid = False
+    if type(sequence_zero_event) is not dict:
+        blockers.add("audit_event_corrupt")
+    else:
+        event_result = validate_codex_pilot_audit_event_record(sequence_zero_event)
+        event_structural_valid = event_result["event_structural_valid"]
+        if not event_structural_valid:
+            blockers.add("audit_event_corrupt")
+        _validate_record_bytes("sequence_zero_event_bytes", sequence_zero_event)
+        if claim_structural_valid and event_structural_valid:
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]:
+                if sequence_zero_event.get(field_name) != claim_record.get(field_name):
+                    blockers.add("identity_mismatch")
+                    break
+            event_binding = validate_codex_pilot_audit_event_binding(
+                sequence_zero_event,
+                claim_record,
+                None,
+            )
+            if not event_binding["event_binding_passed"]:
+                if (
+                    sequence_zero_event.get("event_sequence") != 0
+                    or sequence_zero_event.get("previous_event_digest") is not None
+                    or sequence_zero_event.get("previous_lifecycle_state")
+                    != "claim_not_started"
+                    or sequence_zero_event.get("next_lifecycle_state") != "claim_created"
+                ):
+                    blockers.add("history_mismatch")
+
+    snapshot = committed_unit["snapshot"]
+    snapshot_structural_valid = False
+    if type(snapshot) is not dict:
+        blockers.add("snapshot_corrupt")
+    else:
+        snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
+        snapshot_structural_valid = snapshot_result["snapshot_structural_valid"]
+        if not snapshot_structural_valid:
+            blockers.add("snapshot_corrupt")
+        _validate_record_bytes("snapshot_bytes", snapshot)
+        if claim_structural_valid and snapshot_structural_valid:
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]:
+                if snapshot.get(field_name) != claim_record.get(field_name):
+                    blockers.add("identity_mismatch")
+                    break
+        if event_structural_valid and snapshot_structural_valid:
+            if snapshot.get("latest_event_digest") != sequence_zero_event.get("event_digest"):
+                blockers.add("digest_mismatch")
+        if claim_structural_valid and event_structural_valid and snapshot_structural_valid:
+            snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
+                snapshot,
+                claim_record,
+                [sequence_zero_event],
+            )
+            if not snapshot_binding["snapshot_binding_passed"]:
+                if (
+                    "identity_mismatch" not in blockers
+                    and "digest_mismatch" not in blockers
+                ):
+                    blockers.add("history_mismatch")
+
+    uniqueness_entries = committed_unit["uniqueness_entries"]
+    if claim_structural_valid:
+        uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+            uniqueness_entries,
+            claim_record,
+        )
+        if not uniqueness_result["uniqueness_entries_structural_valid"]:
+            blockers.add("uniqueness_entry_corrupt")
+        elif not uniqueness_result["uniqueness_entries_binding_passed"]:
+            blockers.add("identity_mismatch")
+
+    return {
+        "committed_unit_validation_passed": not blockers,
+        "committed_unit_blockers": sorted(blockers),
     }
 
 
@@ -1288,7 +1461,9 @@ def prepare_codex_pilot_initial_claim_commit(
         return _prepared_initial_claim_failure("initial claim bundle is invalid")
     sequence_zero_event = audit_events[0]
 
-    authorization_result = validate_codex_pilot_authorization_packet(authorization_package)
+    authorization_result = validate_codex_pilot_authorization_packet(
+        authorization_package
+    )
     if not authorization_result["authorization_structural_valid"]:
         return _prepared_initial_claim_failure("authorization package is invalid")
 
@@ -1346,7 +1521,9 @@ def prepare_codex_pilot_initial_claim_commit(
         "sequence_zero_event": prepared_sequence_zero_event,
         "snapshot": prepared_snapshot,
         "claim_record_bytes": _canonical_contract_json_bytes(prepared_claim_record),
-        "sequence_zero_event_bytes": _canonical_contract_json_bytes(prepared_sequence_zero_event),
+        "sequence_zero_event_bytes": _canonical_contract_json_bytes(
+            prepared_sequence_zero_event
+        ),
         "snapshot_bytes": _canonical_contract_json_bytes(prepared_snapshot),
         "uniqueness_entries": uniqueness_entries,
     }
@@ -1504,198 +1681,6 @@ def validate_codex_pilot_prepared_initial_claim_commit(
         binding_passed=not blockers,
         blockers=blockers,
     )
-
-
-def validate_codex_pilot_initial_claim_committed_unit(
-    committed_unit: object,
-    attempt_id: object,
-    authorization_package: object,
-) -> dict[str, object]:
-    """Validate one already-loaded committed initial-claim unit in memory."""
-    request_result = validate_codex_pilot_initial_claim_read_request(
-        attempt_id,
-        authorization_package,
-    )
-    if not request_result["claim_read_request_valid"]:
-        return {
-            "committed_unit_validation_passed": False,
-            "committed_unit_blockers": request_result["claim_read_request_blockers"],
-        }
-
-    blockers: set[str] = set()
-    required_fields = CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS
-    if type(committed_unit) is not dict:
-        blockers.add("commit_incomplete")
-        return {
-            "committed_unit_validation_passed": False,
-            "committed_unit_blockers": sorted(blockers),
-        }
-
-    if len(committed_unit) != len(required_fields):
-        blockers.add("commit_incomplete")
-    else:
-        seen_fields: set[str] = set()
-        for field_name in committed_unit:
-            if type(field_name) is not str or field_name not in required_fields:
-                blockers.add("commit_incomplete")
-                break
-            seen_fields.add(field_name)
-        if seen_fields != required_fields:
-            blockers.add("commit_incomplete")
-
-    if blockers:
-        return {
-            "committed_unit_validation_passed": False,
-            "committed_unit_blockers": sorted(blockers),
-        }
-
-    claim_record = committed_unit["claim_record"]
-    sequence_zero_event = committed_unit["sequence_zero_event"]
-    snapshot = committed_unit["snapshot"]
-    uniqueness_entries = committed_unit["uniqueness_entries"]
-    claim_data: dict[str, Any] | None = None
-    event_data: dict[str, Any] | None = None
-
-    def _validate_bytes(field_name: str, record: dict[str, Any]) -> None:
-        bytes_value = committed_unit[field_name]
-        if type(bytes_value) is not bytes:
-            blockers.add("digest_mismatch")
-            return
-        try:
-            decoded = bytes_value.decode("utf-8")
-            round_trip = json.loads(decoded)
-            canonical = _canonical_contract_json_bytes(record)
-        except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            blockers.add("digest_mismatch")
-            return
-        if round_trip != record or bytes_value != canonical:
-            blockers.add("digest_mismatch")
-
-    claim_result = validate_codex_pilot_claim_record(claim_record)
-    claim_structural_valid = claim_result["claim_structural_valid"]
-    if not claim_structural_valid:
-        blockers.add("claim_record_corrupt")
-    else:
-        claim_data = _contract_mapping(claim_record)
-        _validate_bytes("claim_record_bytes", claim_data)
-        if claim_data["attempt_id"] != attempt_id:
-            blockers.add("identity_mismatch")
-        claim_binding = validate_codex_pilot_claim_binding(
-            claim_record,
-            authorization_package,
-        )
-        if not claim_binding["claim_binding_passed"]:
-            blockers.add("bundle_binding_mismatch")
-
-    event_result = validate_codex_pilot_audit_event_record(sequence_zero_event)
-    event_structural_valid = event_result["event_structural_valid"]
-    if not event_structural_valid:
-        try:
-            event_data = _contract_mapping(sequence_zero_event)
-        except ValueError:
-            blockers.add("audit_event_corrupt")
-        else:
-            try:
-                expected_event_digest = codex_pilot_audit_event_digest(
-                    _audit_event_digest_payload_from_record(event_data)
-                )
-            except ValueError:
-                blockers.add("audit_event_corrupt")
-            else:
-                if event_data["event_digest"] != expected_event_digest:
-                    blockers.add("digest_mismatch")
-                else:
-                    blockers.add("audit_event_corrupt")
-    else:
-        event_data = _contract_mapping(sequence_zero_event)
-        _validate_bytes("sequence_zero_event_bytes", event_data)
-        if claim_data is not None:
-            for field_name in (
-                "attempt_id",
-                "authorization_id",
-                "authorization_fingerprint",
-            ):
-                if event_data[field_name] != claim_data[field_name]:
-                    blockers.add("identity_mismatch")
-                    break
-            event_binding = validate_codex_pilot_audit_event_binding(
-                sequence_zero_event,
-                claim_record,
-                None,
-            )
-            if not event_binding["event_binding_passed"]:
-                if (
-                    event_data["event_sequence"] != 0
-                    or event_data["previous_event_digest"] is not None
-                    or event_data["previous_lifecycle_state"] != "claim_not_started"
-                    or event_data["next_lifecycle_state"] != "claim_created"
-                ):
-                    blockers.add("history_mismatch")
-        try:
-            expected_event_digest = codex_pilot_audit_event_digest(
-                _audit_event_digest_payload_from_record(event_data)
-            )
-        except ValueError:
-            blockers.add("audit_event_corrupt")
-        else:
-            if event_data["event_digest"] != expected_event_digest:
-                blockers.add("digest_mismatch")
-
-    snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
-    snapshot_structural_valid = snapshot_result["snapshot_structural_valid"]
-    if not snapshot_structural_valid:
-        blockers.add("snapshot_corrupt")
-    else:
-        snapshot_data = _contract_mapping(snapshot)
-        _validate_bytes("snapshot_bytes", snapshot_data)
-        if claim_data is not None:
-            for field_name in (
-                "attempt_id",
-                "authorization_id",
-                "authorization_fingerprint",
-            ):
-                if snapshot_data[field_name] != claim_data[field_name]:
-                    blockers.add("identity_mismatch")
-                    break
-        if event_data is not None and (
-            snapshot_data["latest_event_digest"] != event_data["event_digest"]
-        ):
-            blockers.add("digest_mismatch")
-        if claim_data is not None and event_data is not None:
-            snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
-                snapshot,
-                claim_record,
-                [sequence_zero_event],
-            )
-            if not snapshot_binding["snapshot_binding_passed"]:
-                if (
-                    "identity_mismatch" not in blockers
-                    and "digest_mismatch" not in blockers
-                ):
-                    blockers.add("history_mismatch")
-
-    if claim_data is not None:
-        uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
-            uniqueness_entries,
-            claim_record,
-        )
-        if not uniqueness_result["uniqueness_entries_structural_valid"]:
-            blockers.add("uniqueness_entry_corrupt")
-        else:
-            expected_uniqueness_entries = [
-                {key_name: {claim_data[key_name]: claim_data["attempt_id"]}}
-                for key_name in CODEX_PILOT_INITIAL_CLAIM_PREPARATION_UNIQUENESS_KEYS
-            ]
-            if (
-                not uniqueness_result["uniqueness_entries_binding_passed"]
-                or uniqueness_entries != expected_uniqueness_entries
-            ):
-                blockers.add("identity_mismatch")
-
-    return {
-        "committed_unit_validation_passed": not blockers,
-        "committed_unit_blockers": sorted(blockers),
-    }
 
 
 def classify_codex_pilot_initial_claim_conflicts(
@@ -1949,7 +1934,9 @@ def derive_codex_pilot_attempt_snapshot(
         "latest_event_sequence": latest_event["event_sequence"],
         "latest_event_digest": latest_event["event_digest"],
         "current_lifecycle_state": latest_event["next_lifecycle_state"],
-        "terminal": (latest_event["next_lifecycle_state"] in CODEX_PILOT_AUDIT_TERMINAL_STATES),
+        "terminal": (
+            latest_event["next_lifecycle_state"] in CODEX_PILOT_AUDIT_TERMINAL_STATES
+        ),
         "branch_identity": branch_identity,
         "pull_request_identity": pull_request_identity,
         "final_ci_category": final_ci_category,
@@ -1992,8 +1979,12 @@ def validate_codex_pilot_attempt_snapshot_binding(
         "event_chain_valid": derivation_result["event_chain_valid"],
         "snapshot_binding_blockers": sorted(set(blockers)),
         "snapshot_binding_passed": not blockers,
-        "snapshot_derivation_blockers": derivation_result["snapshot_derivation_blockers"],
-        "snapshot_derivation_passed": derivation_result["snapshot_derivation_passed"],
+        "snapshot_derivation_blockers": derivation_result[
+            "snapshot_derivation_blockers"
+        ],
+        "snapshot_derivation_passed": derivation_result[
+            "snapshot_derivation_passed"
+        ],
     }
 
 
@@ -2372,10 +2363,18 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
         errors.append("authorization validation commands are invalid")
 
     budget_ceiling = package.get("budget_ceiling")
-    if type(budget_ceiling) is not int or budget_ceiling < 1 or budget_ceiling > 1_000_000:
+    if (
+        type(budget_ceiling) is not int
+        or budget_ceiling < 1
+        or budget_ceiling > 1_000_000
+    ):
         errors.append("authorization budget is invalid")
     timeout_seconds = package.get("timeout_seconds")
-    if type(timeout_seconds) is not int or timeout_seconds < 60 or timeout_seconds > 7200:
+    if (
+        type(timeout_seconds) is not int
+        or timeout_seconds < 60
+        or timeout_seconds > 7200
+    ):
         errors.append("authorization timeout is invalid")
 
     for field_name in CODEX_PILOT_AUTHORIZATION_REQUIRED_TRUE_FIELDS:
@@ -2397,7 +2396,9 @@ def _audit_event_structural_errors(event: dict[str, Any]) -> list[str]:
     _validate_audit_event_core_shape(event, errors)
     if _can_digest_audit_event_record(event):
         try:
-            digest = codex_pilot_audit_event_digest(_audit_event_digest_payload_from_record(event))
+            digest = codex_pilot_audit_event_digest(
+                _audit_event_digest_payload_from_record(event)
+            )
         except ValueError:
             errors.append("event_digest_mismatch")
         else:
@@ -2524,17 +2525,13 @@ def _attempt_snapshot_structural_errors(snapshot: dict[str, Any]) -> list[str]:
         _is_safe_pull_request_identity(snapshot.get("pull_request_identity"))
     ):
         errors.append("snapshot pull_request_identity is invalid")
-    if (
-        snapshot.get("final_ci_category") is not None
-        and snapshot.get("final_ci_category")
-        not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["final_ci_category"]
-    ):
+    if snapshot.get("final_ci_category") is not None and snapshot.get(
+        "final_ci_category"
+    ) not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["final_ci_category"]:
         errors.append("snapshot final_ci_category is invalid")
-    if (
-        snapshot.get("assistant_review_verdict") is not None
-        and snapshot.get("assistant_review_verdict")
-        not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["assistant_review_verdict"]
-    ):
+    if snapshot.get("assistant_review_verdict") is not None and snapshot.get(
+        "assistant_review_verdict"
+    ) not in CODEX_PILOT_AUDIT_EVENT_ALLOWED_VALUES["assistant_review_verdict"]:
         errors.append("snapshot assistant_review_verdict is invalid")
     for field_name in ["codex_approved", "codex_merged", "authorization_reusable"]:
         if type(snapshot.get(field_name)) is not bool or snapshot.get(field_name) is not False:
@@ -2599,7 +2596,9 @@ def _can_digest_audit_event_record(event: dict[str, Any]) -> bool:
     return (
         "event_digest" in event
         and _is_lower_hex(event.get("event_digest"), 64)
-        and not _audit_event_candidate_errors(_audit_event_digest_payload_from_record(event))
+        and not _audit_event_candidate_errors(
+            _audit_event_digest_payload_from_record(event)
+        )
     )
 
 
@@ -2618,7 +2617,9 @@ def _audit_event_digest_payload_errors(payload: Any) -> list[str]:
     if "event_digest" in payload:
         return ["audit event digest payload is invalid"]
     payload_fields = set(payload)
-    required_payload_fields = CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS - {"event_digest"}
+    required_payload_fields = CODEX_PILOT_AUDIT_EVENT_REQUIRED_FIELDS - {
+        "event_digest"
+    }
     if required_payload_fields - payload_fields:
         return ["audit event digest payload is invalid"]
     if payload_fields - (CODEX_PILOT_AUDIT_EVENT_FIELDS - {"event_digest"}):
@@ -2661,7 +2662,10 @@ def _validate_audit_digest_value(value: Any) -> None:
 
 
 def _is_safe_pull_request_identity(value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"pr-[1-9][0-9]{0,9}", value) is not None
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"pr-[1-9][0-9]{0,9}", value) is not None
+    )
 
 
 def _is_fingerprint_safe_text(value: str, max_length: int) -> bool:
@@ -2821,7 +2825,8 @@ def _is_attempt_id(value: object) -> bool:
     return (
         type(value) is str
         and len(value) <= 80
-        and re.fullmatch(r"pilot-attempt-[a-z0-9][a-z0-9._-]{11,62}", value) is not None
+        and re.fullmatch(r"pilot-attempt-[a-z0-9][a-z0-9._-]{11,62}", value)
+        is not None
         and not _contains_unsafe_marker(value)
     )
 
@@ -2902,7 +2907,10 @@ def _is_allowed_doc_path(value: str) -> bool:
         or value == "docs/development/project_state.md"
     ):
         return False
-    if not (value.startswith("docs/process/") or value.startswith("docs/development/")):
+    if not (
+        value.startswith("docs/process/")
+        or value.startswith("docs/development/")
+    ):
         return False
     segments = value.split("/")
     lowered_segments = {segment.lower() for segment in segments}
@@ -2940,15 +2948,21 @@ def _is_allowed_doc_path(value: str) -> bool:
 
 
 def _is_safe_authorization_json_path(value: object) -> bool:
-    return isinstance(value, str) and _is_safe_repo_relative_path(
-        value, suffix=".json", max_length=160
+    return (
+        isinstance(value, str)
+        and _is_safe_repo_relative_path(value, suffix=".json", max_length=160)
     )
 
 
 def _is_safe_authorization_objective(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    if not _is_safe_text(value, 200) or "/" in value or "\\" in value or "=" in value:
+    if (
+        not _is_safe_text(value, 200)
+        or "/" in value
+        or "\\" in value
+        or "=" in value
+    ):
         return False
     lowered = value.lower()
     return "document" in lowered or "docs" in lowered or "documentation" in lowered
