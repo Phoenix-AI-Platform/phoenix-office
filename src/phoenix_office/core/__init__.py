@@ -145,3 +145,7 @@ __all__ = [
     "validate_codex_pilot_claim_binding",
     "validate_codex_pilot_claim_record",
 ]
+
+from phoenix_office.core.committed_unit_override import (
+    validate_codex_pilot_initial_claim_committed_unit,
+)
