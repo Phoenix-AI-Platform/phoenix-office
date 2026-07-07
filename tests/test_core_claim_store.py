@@ -87,6 +87,14 @@ class _HostileKey:
         raise AssertionError("unexpected equality check")
 
 
+class _HostileCollidingKey:
+    def __hash__(self) -> int:
+        return hash("claim_record")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
+
+
 class _Bomb:
     def __getattr__(self, name: str) -> object:
         raise AssertionError(name)
@@ -112,6 +120,10 @@ class _CustomMapping(Mapping):
 
     def __getitem__(self, key: str) -> object:
         return self._data[key]
+
+
+class _CommittedUnitFieldStrEnum(StrEnum):
+    CLAIM_RECORD = "claim_record"
 
 
 def _valid_codex_pilot_authorization_packet() -> dict[str, object]:
@@ -769,6 +781,32 @@ def test_committed_unit_invalid_request_short_circuits():
 
 
 @pytest.mark.parametrize(
+    "bad_key",
+    [
+        _StrSubclass("claim_record"),
+        _CommittedUnitFieldStrEnum.CLAIM_RECORD,
+        _HostileCollidingKey(),
+    ],
+)
+def test_committed_unit_rejects_exact_root_key_subclasses(bad_key: object):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    claim_record = candidate.pop("claim_record")
+    candidate[bad_key] = claim_record
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["commit_incomplete"],
+    }
+
+
+@pytest.mark.parametrize(
     "committed_unit",
     [
         None,
@@ -825,11 +863,33 @@ def test_committed_unit_rejects_exact_dict_subclasses_and_custom_mappings(
     }
 
 
+def test_committed_unit_reports_digest_mismatch_for_consistently_rewritten_event_digest():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_digest"] = "f" * 64
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch"],
+    }
+
+
 @pytest.mark.parametrize(
     "field_name, missing_field, expected_blocker",
     [
         ("claim_record", "attempt_id", "claim_record_corrupt"),
-        ("sequence_zero_event", "attempt_id", "audit_event_corrupt"),
+        ("sequence_zero_event", "authorization_id", "audit_event_corrupt"),
         ("snapshot", "attempt_id", "snapshot_corrupt"),
     ],
 )
@@ -854,7 +914,7 @@ def test_committed_unit_reports_corruption_and_digest_mismatch_independently(
     }
 
 
-@pytest.mark.parametrize("missing_field", ["event_digest", "attempt_id"])
+@pytest.mark.parametrize("missing_field", ["attempt_id", "authorization_id"])
 def test_committed_unit_rejects_missing_event_fields_without_snapshot_binding(
     monkeypatch,
     missing_field: str,
@@ -881,6 +941,37 @@ def test_committed_unit_rejects_missing_event_fields_without_snapshot_binding(
     assert result == {
         "committed_unit_validation_passed": False,
         "committed_unit_blockers": ["audit_event_corrupt", "digest_mismatch"],
+    }
+
+
+def test_committed_unit_rejects_missing_event_digest_without_binding_helper(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"].pop("event_digest")
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot binding helper should not be called")
+
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch"],
     }
 
 
@@ -932,6 +1023,9 @@ def test_committed_unit_no_external_dependencies(monkeypatch):
     monkeypatch.setattr(contracts, "random", bomb, raising=False)
     monkeypatch.setattr(contracts, "subprocess", bomb, raising=False)
     monkeypatch.setattr(contracts, "socket", bomb, raising=False)
+    monkeypatch.setattr(contracts, "os", bomb, raising=False)
+    monkeypatch.setattr(contracts, "sqlite3", bomb, raising=False)
+    monkeypatch.setattr(contracts, "urllib", bomb, raising=False)
     monkeypatch.setattr(builtins, "open", bomb, raising=True)
 
     committed_unit, authorization = _valid_codex_pilot_committed_unit()

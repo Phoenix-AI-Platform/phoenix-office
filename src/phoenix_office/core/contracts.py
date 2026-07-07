@@ -1136,6 +1136,21 @@ def validate_codex_pilot_initial_claim_committed_unit(
             "committed_unit_blockers": sorted(blockers),
         }
 
+    if len(committed_unit) != len(required_fields):
+        blockers.add("commit_incomplete")
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": sorted(blockers),
+        }
+
+    for key in committed_unit:
+        if type(key) is not str or key not in required_fields:
+            blockers.add("commit_incomplete")
+            return {
+                "committed_unit_validation_passed": False,
+                "committed_unit_blockers": sorted(blockers),
+            }
+
     if set(committed_unit) != required_fields:
         blockers.add("commit_incomplete")
         return {
@@ -1183,12 +1198,19 @@ def validate_codex_pilot_initial_claim_committed_unit(
     if type(sequence_zero_event) is not dict:
         blockers.add("audit_event_corrupt")
     else:
-        event_result = validate_codex_pilot_audit_event_record(sequence_zero_event)
-        event_structural_valid = event_result["event_structural_valid"]
+        event_payload = _audit_event_digest_payload_from_record(sequence_zero_event)
+        event_structural_valid = not _audit_event_candidate_errors(event_payload)
         if not event_structural_valid:
             blockers.add("audit_event_corrupt")
         _validate_record_bytes("sequence_zero_event_bytes", sequence_zero_event)
-        if claim_structural_valid and event_structural_valid:
+        if claim_structural_valid and all(
+            field_name in sequence_zero_event
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]
+        ):
             for field_name in [
                 "attempt_id",
                 "authorization_id",
@@ -1197,6 +1219,15 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 if sequence_zero_event.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
                     break
+        if event_structural_valid:
+            try:
+                recomputed_event_digest = codex_pilot_audit_event_digest(event_payload)
+            except ValueError:
+                blockers.add("audit_event_corrupt")
+            else:
+                if sequence_zero_event.get("event_digest") != recomputed_event_digest:
+                    blockers.add("digest_mismatch")
+        if claim_structural_valid and event_structural_valid and "digest_mismatch" not in blockers:
             event_binding = validate_codex_pilot_audit_event_binding(
                 sequence_zero_event,
                 claim_record,
@@ -1222,7 +1253,14 @@ def validate_codex_pilot_initial_claim_committed_unit(
         if not snapshot_structural_valid:
             blockers.add("snapshot_corrupt")
         _validate_record_bytes("snapshot_bytes", snapshot)
-        if claim_structural_valid and snapshot_structural_valid:
+        if claim_structural_valid and all(
+            field_name in snapshot
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]
+        ):
             for field_name in [
                 "attempt_id",
                 "authorization_id",
@@ -1234,7 +1272,12 @@ def validate_codex_pilot_initial_claim_committed_unit(
         if event_structural_valid and snapshot_structural_valid:
             if snapshot.get("latest_event_digest") != sequence_zero_event.get("event_digest"):
                 blockers.add("digest_mismatch")
-        if claim_structural_valid and event_structural_valid and snapshot_structural_valid:
+        if (
+            claim_structural_valid
+            and event_structural_valid
+            and snapshot_structural_valid
+            and "digest_mismatch" not in blockers
+        ):
             snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
                 snapshot,
                 claim_record,
