@@ -1168,16 +1168,19 @@ def validate_codex_pilot_initial_claim_committed_unit(
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             blockers.add("digest_mismatch")
             return
-        if type(record) is dict:
-            try:
-                canonical = _canonical_contract_json_bytes(record)
-            except ValueError:
-                blockers.add("digest_mismatch")
-                return
-            if bytes_value != canonical or round_trip != record:
-                blockers.add("digest_mismatch")
+        if type(round_trip) is not dict:
+            blockers.add("digest_mismatch")
             return
-        if not isinstance(round_trip, dict):
+        canonical = json.dumps(
+            round_trip,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if bytes_value != canonical:
+            blockers.add("digest_mismatch")
+            return
+        if type(record) is dict and round_trip != record:
             blockers.add("digest_mismatch")
 
     claim_record = committed_unit["claim_record"]
@@ -1204,6 +1207,9 @@ def validate_codex_pilot_initial_claim_committed_unit(
     _validate_record_bytes("sequence_zero_event_bytes", sequence_zero_event)
     event_structural_valid = False
     event_digest_valid = False
+    event_identity_mismatch = False
+    event_digest_mismatch = False
+    event_binding_result: dict[str, Any] | None = None
     if type(sequence_zero_event) is not dict:
         blockers.add("audit_event_corrupt")
     else:
@@ -1217,7 +1223,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
         if not event_structural_valid or not event_digest_valid:
             blockers.add("audit_event_corrupt")
         if claim_structural_valid and event_structural_valid and event_digest_valid:
-            validate_codex_pilot_audit_event_binding(
+            event_binding_result = validate_codex_pilot_audit_event_binding(
                 sequence_zero_event,
                 claim_record,
                 None,
@@ -1237,6 +1243,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
             ]:
                 if sequence_zero_event.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
+                    event_identity_mismatch = True
                     break
         if event_structural_valid and event_digest_valid:
             try:
@@ -1246,10 +1253,22 @@ def validate_codex_pilot_initial_claim_committed_unit(
             else:
                 if event_digest != recomputed_event_digest:
                     blockers.add("digest_mismatch")
+                    event_digest_mismatch = True
+        if (
+            event_binding_result is not None
+            and not event_binding_result["event_binding_passed"]
+            and not event_identity_mismatch
+            and not event_digest_mismatch
+        ):
+            blockers.add("history_mismatch")
 
     snapshot = committed_unit["snapshot"]
     _validate_record_bytes("snapshot_bytes", snapshot)
     snapshot_structural_valid = False
+    snapshot_identity_mismatch = False
+    snapshot_digest_mismatch = False
+    snapshot_history_mismatch = False
+    snapshot_binding_result: dict[str, Any] | None = None
     if type(snapshot) is not dict:
         blockers.add("snapshot_corrupt")
     else:
@@ -1272,6 +1291,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
             ]:
                 if snapshot.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
+                    snapshot_identity_mismatch = True
                     break
         if (
             claim_structural_valid
@@ -1279,7 +1299,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
             and event_digest_valid
             and snapshot_structural_valid
         ):
-            validate_codex_pilot_attempt_snapshot_binding(
+            snapshot_binding_result = validate_codex_pilot_attempt_snapshot_binding(
                 snapshot,
                 claim_record,
                 [sequence_zero_event],
@@ -1287,6 +1307,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
         if event_structural_valid and event_digest_valid and snapshot_structural_valid:
             if snapshot.get("latest_event_digest") != event_digest:
                 blockers.add("digest_mismatch")
+                snapshot_digest_mismatch = True
             if (
                 snapshot.get("latest_event_sequence")
                 != sequence_zero_event.get("event_sequence")
@@ -1295,6 +1316,17 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 or snapshot.get("terminal") is not False
             ):
                 blockers.add("history_mismatch")
+                snapshot_history_mismatch = True
+        if (
+            snapshot_binding_result is not None
+            and not snapshot_binding_result["snapshot_binding_passed"]
+            and not event_identity_mismatch
+            and not event_digest_mismatch
+            and not snapshot_identity_mismatch
+            and not snapshot_digest_mismatch
+            and not snapshot_history_mismatch
+        ):
+            blockers.add("history_mismatch")
 
     uniqueness_entries = committed_unit["uniqueness_entries"]
     uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(

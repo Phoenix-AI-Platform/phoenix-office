@@ -993,6 +993,9 @@ def test_committed_unit_rejects_missing_event_fields_without_snapshot_binding(
         raise AssertionError("snapshot binding helper should not be called")
 
     monkeypatch.setattr(
+        contracts, "validate_codex_pilot_audit_event_binding", _bomb
+    )
+    monkeypatch.setattr(
         contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
     )
 
@@ -1023,6 +1026,9 @@ def test_committed_unit_rejects_missing_event_digest_without_binding_helper(
     def _bomb(*args: object, **kwargs: object) -> object:
         raise AssertionError("snapshot binding helper should not be called")
 
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_audit_event_binding", _bomb
+    )
     monkeypatch.setattr(
         contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
     )
@@ -1064,6 +1070,187 @@ def test_committed_unit_rejects_invalid_event_digest_without_binding_helper(
     def _bomb(*args: object, **kwargs: object) -> object:
         raise AssertionError("snapshot binding helper should not be called")
 
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["audit_event_corrupt"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_for_valid_later_event_and_matching_snapshot():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+
+    previous_event_digest = candidate["sequence_zero_event"]["event_digest"]
+    candidate["sequence_zero_event"]["event_sequence"] = 1
+    candidate["sequence_zero_event"]["previous_lifecycle_state"] = "claim_created"
+    candidate["sequence_zero_event"]["next_lifecycle_state"] = "invocation_starting"
+    candidate["sequence_zero_event"]["event_category"] = "invocation_starting"
+    candidate["sequence_zero_event"]["result_category"] = "started"
+    candidate["sequence_zero_event"]["actor_role"] = "phoenix_gate"
+    candidate["sequence_zero_event"]["previous_event_digest"] = previous_event_digest
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_when_event_binding_helper_fails(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+
+    def _fail(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "event_binding_passed": False,
+            "event_binding_blockers": ["previous event is required"],
+            "event_structural_valid": True,
+            "claim_structural_valid": True,
+            "event_structural_errors": [],
+            "previous_event_structural_valid": None,
+        }
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_binding",
+        _fail,
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_when_snapshot_binding_helper_fails(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+
+    def _fail(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "snapshot_binding_passed": False,
+            "snapshot_binding_blockers": ["snapshot mismatch"],
+            "snapshot_structural_valid": True,
+            "snapshot_structural_errors": [],
+            "claim_structural_valid": True,
+            "event_chain_valid": True,
+            "snapshot_derivation_passed": True,
+            "snapshot_derivation_blockers": [],
+            "snapshot": committed_unit["snapshot"],
+        }
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot_binding",
+        _fail,
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, expected_blocker",
+    [
+        ("claim_record", "claim_record_corrupt"),
+        ("sequence_zero_event", "audit_event_corrupt"),
+        ("snapshot", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_rejects_noncanonical_bytes_for_hostile_non_exact_roots(
+    field_name: str,
+    expected_blocker: str,
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name] = _HostileRecordMapping(candidate[field_name])
+    candidate[f"{field_name}_bytes"] = json.dumps(
+        candidate[field_name]._data,
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=False,
+    ).encode("utf-8")
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": sorted([expected_blocker, "digest_mismatch"]),
+    }
+
+
+def test_committed_unit_rejects_non_null_previous_event_digest_on_sequence_zero(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["previous_event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("binding helper should not be called")
+
+    monkeypatch.setattr(contracts, "validate_codex_pilot_audit_event_binding", _bomb)
     monkeypatch.setattr(
         contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
     )
