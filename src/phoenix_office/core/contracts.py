@@ -1164,12 +1164,20 @@ def validate_codex_pilot_initial_claim_committed_unit(
             blockers.add("digest_mismatch")
             return
         try:
-            canonical = _canonical_contract_json_bytes(record)
             round_trip = json.loads(bytes_value.decode("utf-8"))
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             blockers.add("digest_mismatch")
             return
-        if bytes_value != canonical or round_trip != record:
+        if type(record) is dict:
+            try:
+                canonical = _canonical_contract_json_bytes(record)
+            except ValueError:
+                blockers.add("digest_mismatch")
+                return
+            if bytes_value != canonical or round_trip != record:
+                blockers.add("digest_mismatch")
+            return
+        if not isinstance(round_trip, dict):
             blockers.add("digest_mismatch")
 
     claim_record = committed_unit["claim_record"]
@@ -1208,6 +1216,12 @@ def validate_codex_pilot_initial_claim_committed_unit(
         )
         if not event_structural_valid or not event_digest_valid:
             blockers.add("audit_event_corrupt")
+        if claim_structural_valid and event_structural_valid and event_digest_valid:
+            validate_codex_pilot_audit_event_binding(
+                sequence_zero_event,
+                claim_record,
+                None,
+            )
         if claim_structural_valid and all(
             field_name in sequence_zero_event
             for field_name in [
@@ -1259,6 +1273,17 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 if snapshot.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
                     break
+        if (
+            claim_structural_valid
+            and event_structural_valid
+            and event_digest_valid
+            and snapshot_structural_valid
+        ):
+            validate_codex_pilot_attempt_snapshot_binding(
+                snapshot,
+                claim_record,
+                [sequence_zero_event],
+            )
         if event_structural_valid and event_digest_valid and snapshot_structural_valid:
             if snapshot.get("latest_event_digest") != event_digest:
                 blockers.add("digest_mismatch")

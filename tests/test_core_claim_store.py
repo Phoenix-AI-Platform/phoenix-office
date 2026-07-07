@@ -108,18 +108,21 @@ class _HostileCommittedUnit:
         raise AssertionError(name)
 
 
-class _CustomMapping(Mapping):
+class _HostileRecordMapping(Mapping):
     def __init__(self, data: dict[str, object]):
         self._data = dict(data)
 
     def __iter__(self):
-        return iter(self._data)
+        raise AssertionError("unexpected iteration")
 
     def __len__(self) -> int:
-        return len(self._data)
+        raise AssertionError("unexpected length")
 
     def __getitem__(self, key: str) -> object:
-        return self._data[key]
+        raise AssertionError("unexpected mapping access")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
 
 
 class _CommittedUnitFieldStrEnum(StrEnum):
@@ -839,15 +842,15 @@ def test_validate_codex_pilot_initial_claim_committed_unit_rejects_invalid_roots
         ("snapshot", _DictSubclass, ["snapshot_corrupt"]),
         (
             "claim_record",
-            _CustomMapping,
-            ["claim_record_corrupt", "digest_mismatch"],
+            _HostileRecordMapping,
+            ["claim_record_corrupt"],
         ),
         (
             "sequence_zero_event",
-            _CustomMapping,
-            ["audit_event_corrupt", "digest_mismatch"],
+            _HostileRecordMapping,
+            ["audit_event_corrupt"],
         ),
-        ("snapshot", _CustomMapping, ["digest_mismatch", "snapshot_corrupt"]),
+        ("snapshot", _HostileRecordMapping, ["snapshot_corrupt"]),
     ],
 )
 def test_committed_unit_rejects_exact_dict_subclasses_and_custom_mappings(
@@ -960,8 +963,8 @@ def test_committed_unit_reports_corruption_and_digest_mismatch_for_custom_mappin
 ):
     committed_unit, authorization = _valid_codex_pilot_committed_unit()
     candidate = copy.deepcopy(committed_unit)
-    candidate[field_name] = _CustomMapping(candidate[field_name])
-    candidate[f"{field_name}_bytes"] = b"{}"
+    candidate[field_name] = _HostileRecordMapping(candidate[field_name])
+    candidate[f"{field_name}_bytes"] = b"{"
 
     result = validate_codex_pilot_initial_claim_committed_unit(
         candidate,
