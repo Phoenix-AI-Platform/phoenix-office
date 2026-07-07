@@ -146,6 +146,6 @@ __all__ = [
     "validate_codex_pilot_claim_record",
 ]
 
-from phoenix_office.core.committed_unit_override import (
+from phoenix_office.core.committed_unit_override import (  # noqa: E402, F811
     validate_codex_pilot_initial_claim_committed_unit,
 )
