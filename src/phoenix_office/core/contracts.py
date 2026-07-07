@@ -1195,12 +1195,18 @@ def validate_codex_pilot_initial_claim_committed_unit(
 
     sequence_zero_event = committed_unit["sequence_zero_event"]
     event_structural_valid = False
+    event_digest_valid = False
     if type(sequence_zero_event) is not dict:
         blockers.add("audit_event_corrupt")
     else:
         event_payload = _audit_event_digest_payload_from_record(sequence_zero_event)
         event_structural_valid = not _audit_event_candidate_errors(event_payload)
-        if not event_structural_valid:
+        event_digest = sequence_zero_event.get("event_digest")
+        event_digest_valid = type(event_digest) is str and _is_lower_hex(
+            event_digest,
+            64,
+        )
+        if not event_structural_valid or not event_digest_valid:
             blockers.add("audit_event_corrupt")
         _validate_record_bytes("sequence_zero_event_bytes", sequence_zero_event)
         if claim_structural_valid and all(
@@ -1219,15 +1225,15 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 if sequence_zero_event.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
                     break
-        if event_structural_valid:
+        if event_structural_valid and event_digest_valid:
             try:
                 recomputed_event_digest = codex_pilot_audit_event_digest(event_payload)
             except ValueError:
                 blockers.add("audit_event_corrupt")
             else:
-                if sequence_zero_event.get("event_digest") != recomputed_event_digest:
+                if event_digest != recomputed_event_digest:
                     blockers.add("digest_mismatch")
-        if claim_structural_valid and event_structural_valid and "digest_mismatch" not in blockers:
+        if claim_structural_valid and event_structural_valid and event_digest_valid:
             event_binding = validate_codex_pilot_audit_event_binding(
                 sequence_zero_event,
                 claim_record,
@@ -1269,14 +1275,14 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 if snapshot.get(field_name) != claim_record.get(field_name):
                     blockers.add("identity_mismatch")
                     break
-        if event_structural_valid and snapshot_structural_valid:
-            if snapshot.get("latest_event_digest") != sequence_zero_event.get("event_digest"):
+        if event_structural_valid and event_digest_valid and snapshot_structural_valid:
+            if snapshot.get("latest_event_digest") != event_digest:
                 blockers.add("digest_mismatch")
         if (
             claim_structural_valid
             and event_structural_valid
+            and event_digest_valid
             and snapshot_structural_valid
-            and "digest_mismatch" not in blockers
         ):
             snapshot_binding = validate_codex_pilot_attempt_snapshot_binding(
                 snapshot,
@@ -1284,22 +1290,18 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 [sequence_zero_event],
             )
             if not snapshot_binding["snapshot_binding_passed"]:
-                if (
-                    "identity_mismatch" not in blockers
-                    and "digest_mismatch" not in blockers
-                ):
+                if "identity_mismatch" not in blockers:
                     blockers.add("history_mismatch")
 
     uniqueness_entries = committed_unit["uniqueness_entries"]
-    if claim_structural_valid:
-        uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
-            uniqueness_entries,
-            claim_record,
-        )
-        if not uniqueness_result["uniqueness_entries_structural_valid"]:
-            blockers.add("uniqueness_entry_corrupt")
-        elif not uniqueness_result["uniqueness_entries_binding_passed"]:
-            blockers.add("identity_mismatch")
+    uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        claim_record,
+    )
+    if not uniqueness_result["uniqueness_entries_structural_valid"]:
+        blockers.add("uniqueness_entry_corrupt")
+    elif claim_structural_valid and not uniqueness_result["uniqueness_entries_binding_passed"]:
+        blockers.add("identity_mismatch")
 
     return {
         "committed_unit_validation_passed": not blockers,
