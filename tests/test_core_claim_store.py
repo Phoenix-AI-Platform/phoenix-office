@@ -832,20 +832,28 @@ def test_validate_codex_pilot_initial_claim_committed_unit_rejects_invalid_roots
 
 
 @pytest.mark.parametrize(
-    "field_name, wrapper, expected_blocker",
+    "field_name, wrapper, expected_blockers",
     [
-        ("claim_record", _DictSubclass, "claim_record_corrupt"),
-        ("sequence_zero_event", _DictSubclass, "audit_event_corrupt"),
-        ("snapshot", _DictSubclass, "snapshot_corrupt"),
-        ("claim_record", _CustomMapping, "claim_record_corrupt"),
-        ("sequence_zero_event", _CustomMapping, "audit_event_corrupt"),
-        ("snapshot", _CustomMapping, "snapshot_corrupt"),
+        ("claim_record", _DictSubclass, ["claim_record_corrupt"]),
+        ("sequence_zero_event", _DictSubclass, ["audit_event_corrupt"]),
+        ("snapshot", _DictSubclass, ["snapshot_corrupt"]),
+        (
+            "claim_record",
+            _CustomMapping,
+            ["claim_record_corrupt", "digest_mismatch"],
+        ),
+        (
+            "sequence_zero_event",
+            _CustomMapping,
+            ["audit_event_corrupt", "digest_mismatch"],
+        ),
+        ("snapshot", _CustomMapping, ["digest_mismatch", "snapshot_corrupt"]),
     ],
 )
 def test_committed_unit_rejects_exact_dict_subclasses_and_custom_mappings(
     field_name: str,
     wrapper,
-    expected_blocker: str,
+    expected_blockers: list[str],
 ):
     committed_unit, authorization = _valid_codex_pilot_committed_unit()
     candidate = copy.deepcopy(committed_unit)
@@ -859,7 +867,7 @@ def test_committed_unit_rejects_exact_dict_subclasses_and_custom_mappings(
 
     assert result == {
         "committed_unit_validation_passed": False,
-        "committed_unit_blockers": [expected_blocker],
+        "committed_unit_blockers": expected_blockers,
     }
 
 
@@ -871,6 +879,30 @@ def test_committed_unit_reports_digest_mismatch_for_consistently_rewritten_event
         candidate["sequence_zero_event"]
     )
     candidate["snapshot"]["latest_event_digest"] = "f" * 64
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch"],
+    }
+
+
+def test_committed_unit_reports_digest_and_history_mismatch_when_snapshot_is_really_wrong():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
     candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
 
     result = validate_codex_pilot_initial_claim_committed_unit(
@@ -901,6 +933,35 @@ def test_committed_unit_reports_corruption_and_digest_mismatch_independently(
     committed_unit, authorization = _valid_codex_pilot_committed_unit()
     candidate = copy.deepcopy(committed_unit)
     candidate[field_name].pop(missing_field)
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": sorted([expected_blocker, "digest_mismatch"]),
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, expected_blocker",
+    [
+        ("claim_record", "claim_record_corrupt"),
+        ("sequence_zero_event", "audit_event_corrupt"),
+        ("snapshot", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_reports_corruption_and_digest_mismatch_for_custom_mapping(
+    field_name: str,
+    expected_blocker: str,
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name] = _CustomMapping(candidate[field_name])
+    candidate[f"{field_name}_bytes"] = b"{}"
 
     result = validate_codex_pilot_initial_claim_committed_unit(
         candidate,
@@ -1049,6 +1110,44 @@ def test_committed_unit_reports_identity_and_digest_drift_without_echo():
     assert result == {
         "committed_unit_validation_passed": False,
         "committed_unit_blockers": ["digest_mismatch", "identity_mismatch"],
+    }
+    assert sentinel not in output
+
+
+def test_committed_unit_reports_identity_and_history_mismatch_without_echo():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    sentinel = "pilot-auth-issue-987654322"
+
+    candidate["sequence_zero_event"]["authorization_id"] = sentinel
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch", "identity_mismatch"],
     }
     assert sentinel not in output
 
