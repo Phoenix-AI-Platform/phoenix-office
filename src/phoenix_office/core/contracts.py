@@ -1111,6 +1111,262 @@ def validate_codex_pilot_initial_claim_uniqueness_entries(
     }
 
 
+def validate_codex_pilot_initial_claim_committed_unit(
+    committed_unit: object,
+    attempt_id: object,
+    authorization_package: object,
+) -> dict[str, object]:
+    """Validate one already-loaded committed initial-claim unit in memory."""
+    request_result = validate_codex_pilot_initial_claim_read_request(
+        attempt_id,
+        authorization_package,
+    )
+    if not request_result["claim_read_request_valid"]:
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": request_result["claim_read_request_blockers"],
+        }
+
+    blockers: set[str] = set()
+    required_fields = CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS
+    if type(committed_unit) is not dict:
+        blockers.add("commit_incomplete")
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": sorted(blockers),
+        }
+
+    if len(committed_unit) != len(required_fields):
+        blockers.add("commit_incomplete")
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": sorted(blockers),
+        }
+
+    for key in committed_unit:
+        if type(key) is not str:
+            blockers.add("commit_incomplete")
+            return {
+                "committed_unit_validation_passed": False,
+                "committed_unit_blockers": sorted(blockers),
+            }
+
+        if key not in required_fields:
+            blockers.add("commit_incomplete")
+            return {
+                "committed_unit_validation_passed": False,
+                "committed_unit_blockers": sorted(blockers),
+            }
+
+    def _validate_record_bytes(field_name: str, record: object) -> None:
+        bytes_value = committed_unit[field_name]
+        if type(bytes_value) is not bytes:
+            blockers.add("digest_mismatch")
+            return
+        try:
+            round_trip = json.loads(bytes_value.decode("utf-8"))
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            blockers.add("digest_mismatch")
+            return
+        if type(round_trip) is not dict:
+            blockers.add("digest_mismatch")
+            return
+        canonical = json.dumps(
+            round_trip,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if bytes_value != canonical:
+            blockers.add("digest_mismatch")
+            return
+        if type(record) is dict:
+            try:
+                record_canonical = json.dumps(
+                    record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                return
+            if bytes_value != record_canonical:
+                blockers.add("digest_mismatch")
+
+    claim_record = committed_unit["claim_record"]
+    _validate_record_bytes("claim_record_bytes", claim_record)
+    claim_structural_valid = False
+    if type(claim_record) is not dict:
+        blockers.add("claim_record_corrupt")
+    else:
+        claim_result = validate_codex_pilot_claim_record(claim_record)
+        claim_structural_valid = claim_result["claim_structural_valid"]
+        if not claim_structural_valid:
+            blockers.add("claim_record_corrupt")
+        if claim_structural_valid and claim_record.get("attempt_id") != attempt_id:
+            blockers.add("identity_mismatch")
+        if claim_structural_valid:
+            claim_binding = validate_codex_pilot_claim_binding(
+                claim_record,
+                authorization_package,
+            )
+            if not claim_binding["claim_binding_passed"]:
+                blockers.add("bundle_binding_mismatch")
+
+    sequence_zero_event = committed_unit["sequence_zero_event"]
+    _validate_record_bytes("sequence_zero_event_bytes", sequence_zero_event)
+    event_structural_valid = False
+    event_digest_valid = False
+    event_identity_mismatch = False
+    event_digest_mismatch = False
+    event_history_mismatch = False
+    event_binding_result: dict[str, Any] | None = None
+    if type(sequence_zero_event) is not dict:
+        blockers.add("audit_event_corrupt")
+    else:
+        event_payload = _audit_event_digest_payload_from_record(sequence_zero_event)
+        event_structural_valid = not _audit_event_candidate_errors(event_payload)
+        event_digest = sequence_zero_event.get("event_digest")
+        event_digest_valid = type(event_digest) is str and _is_lower_hex(
+            event_digest,
+            64,
+        )
+        if not event_structural_valid or not event_digest_valid:
+            blockers.add("audit_event_corrupt")
+        if claim_structural_valid and event_structural_valid and event_digest_valid:
+            event_binding_result = validate_codex_pilot_audit_event_binding(
+                sequence_zero_event,
+                claim_record,
+                None,
+            )
+        if claim_structural_valid and all(
+            field_name in sequence_zero_event
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]
+        ):
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]:
+                if sequence_zero_event.get(field_name) != claim_record.get(field_name):
+                    blockers.add("identity_mismatch")
+                    event_identity_mismatch = True
+                    break
+        if event_structural_valid and event_digest_valid:
+            try:
+                recomputed_event_digest = codex_pilot_audit_event_digest(event_payload)
+            except ValueError:
+                blockers.add("audit_event_corrupt")
+            else:
+                if event_digest != recomputed_event_digest:
+                    blockers.add("digest_mismatch")
+                    event_digest_mismatch = True
+        event_history_mismatch = (
+            event_structural_valid
+            and event_digest_valid
+            and (
+                sequence_zero_event.get("event_sequence") != 0
+                or sequence_zero_event.get("previous_event_digest") is not None
+                or (
+                    sequence_zero_event.get("previous_lifecycle_state"),
+                    sequence_zero_event.get("next_lifecycle_state"),
+                )
+                != ("claim_not_started", "claim_created")
+            )
+        )
+        if (
+            event_binding_result is not None
+            and not event_binding_result["event_binding_passed"]
+            and event_history_mismatch
+        ):
+            blockers.add("history_mismatch")
+
+    snapshot = committed_unit["snapshot"]
+    _validate_record_bytes("snapshot_bytes", snapshot)
+    snapshot_structural_valid = False
+    snapshot_identity_mismatch = False
+    snapshot_digest_mismatch = False
+    snapshot_history_mismatch = False
+    snapshot_binding_result: dict[str, Any] | None = None
+    if type(snapshot) is not dict:
+        blockers.add("snapshot_corrupt")
+    else:
+        snapshot_result = validate_codex_pilot_attempt_snapshot(snapshot)
+        snapshot_structural_valid = snapshot_result["snapshot_structural_valid"]
+        if not snapshot_structural_valid:
+            blockers.add("snapshot_corrupt")
+        if claim_structural_valid and all(
+            field_name in snapshot
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]
+        ):
+            for field_name in [
+                "attempt_id",
+                "authorization_id",
+                "authorization_fingerprint",
+            ]:
+                if snapshot.get(field_name) != claim_record.get(field_name):
+                    blockers.add("identity_mismatch")
+                    snapshot_identity_mismatch = True
+                    break
+        if (
+            claim_structural_valid
+            and event_structural_valid
+            and event_digest_valid
+            and snapshot_structural_valid
+        ):
+            snapshot_binding_result = validate_codex_pilot_attempt_snapshot_binding(
+                snapshot,
+                claim_record,
+                [sequence_zero_event],
+            )
+        if event_structural_valid and event_digest_valid and snapshot_structural_valid:
+            if snapshot.get("latest_event_digest") != event_digest:
+                blockers.add("digest_mismatch")
+                snapshot_digest_mismatch = True
+            if (
+                snapshot.get("latest_event_sequence")
+                != sequence_zero_event.get("event_sequence")
+                or snapshot.get("current_lifecycle_state")
+                != sequence_zero_event.get("next_lifecycle_state")
+                or snapshot.get("terminal") is not False
+            ):
+                blockers.add("history_mismatch")
+                snapshot_history_mismatch = True
+        if (
+            snapshot_binding_result is not None
+            and not snapshot_binding_result["snapshot_binding_passed"]
+            and not event_identity_mismatch
+            and not event_digest_mismatch
+            and not snapshot_identity_mismatch
+            and not snapshot_digest_mismatch
+            and not snapshot_history_mismatch
+        ):
+            blockers.add("history_mismatch")
+
+    uniqueness_entries = committed_unit["uniqueness_entries"]
+    uniqueness_result = validate_codex_pilot_initial_claim_uniqueness_entries(
+        uniqueness_entries,
+        claim_record,
+    )
+    if not uniqueness_result["uniqueness_entries_structural_valid"]:
+        blockers.add("uniqueness_entry_corrupt")
+    elif claim_structural_valid and not uniqueness_result["uniqueness_entries_binding_passed"]:
+        blockers.add("identity_mismatch")
+
+    return {
+        "committed_unit_validation_passed": not blockers,
+        "committed_unit_blockers": sorted(blockers),
+    }
+
+
 def compose_codex_pilot_initial_claim_bundle(
     authorization_package: object,
     attempt_id: object,

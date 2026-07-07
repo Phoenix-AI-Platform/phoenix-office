@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+from collections.abc import Mapping
 from enum import Enum, StrEnum
 from typing import get_type_hints
 
@@ -13,6 +14,10 @@ import pytest
 from phoenix_office.core import (
     CodexPilotInitialClaimReader,
     CodexPilotInitialClaimStore,
+    codex_pilot_audit_event_digest,
+    compose_codex_pilot_initial_claim_bundle,
+    prepare_codex_pilot_initial_claim_commit,
+    validate_codex_pilot_initial_claim_committed_unit,
     validate_codex_pilot_initial_claim_read_request,
     validate_codex_pilot_initial_claim_store_create_result,
     validate_codex_pilot_initial_claim_store_read_result,
@@ -61,6 +66,13 @@ class _StrSubclass(str):
     pass
 
 
+class _EqualityBombStr(str):
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
+
+
 class _FieldEnum(Enum):
     CLAIM_STORE_CREATE_CATEGORY = "claim_store_create_category"
 
@@ -82,12 +94,46 @@ class _HostileKey:
         raise AssertionError("unexpected equality check")
 
 
+class _HostileCollidingKey:
+    def __hash__(self) -> int:
+        return hash("claim_record")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
+
+
 class _Bomb:
     def __getattr__(self, name: str) -> object:
         raise AssertionError(name)
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         raise AssertionError("unexpected dependency access")
+
+
+class _HostileCommittedUnit:
+    def __getattribute__(self, name: str) -> object:
+        raise AssertionError(name)
+
+
+class _HostileRecordMapping(Mapping):
+    def __init__(self, data: dict[str, object]):
+        self._data = dict(data)
+
+    def __iter__(self):
+        raise AssertionError("unexpected iteration")
+
+    def __len__(self) -> int:
+        raise AssertionError("unexpected length")
+
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError("unexpected mapping access")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("unexpected equality check")
+
+
+class _CommittedUnitFieldStrEnum(StrEnum):
+    CLAIM_RECORD = "claim_record"
 
 
 def _valid_codex_pilot_authorization_packet() -> dict[str, object]:
@@ -134,6 +180,25 @@ def _valid_codex_pilot_authorization_packet() -> dict[str, object]:
 
 VALID_ATTEMPT_ID = "pilot-attempt-abc123def456"
 VALID_ATTEMPT_ID_NON_HEX = "pilot-attempt-abc123defghz"
+
+
+def _canonical_json_bytes(record: object) -> bytes:
+    return json.dumps(
+        record,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _valid_codex_pilot_committed_unit() -> tuple[dict[str, object], dict[str, object]]:
+    authorization = _valid_codex_pilot_authorization_packet()
+    bundle = compose_codex_pilot_initial_claim_bundle(authorization, VALID_ATTEMPT_ID)
+    assert bundle["claim_bundle_passed"] is True
+    preparation = prepare_codex_pilot_initial_claim_commit(bundle, authorization)
+    committed_unit = preparation["prepared_commit"]
+    assert committed_unit is not None
+    return committed_unit, authorization
 
 
 def test_codex_pilot_initial_claim_store_protocol_is_exact_and_not_runtime_checkable():
@@ -681,4 +746,847 @@ def test_validate_codex_pilot_initial_claim_read_request_checks_both_inputs(
             "attempt_id_invalid",
             "authorization_context_invalid",
         ],
+    }
+
+
+def test_validate_codex_pilot_initial_claim_committed_unit_is_valid_deterministic_and_pure():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    original_unit = copy.deepcopy(committed_unit)
+    original_authorization = copy.deepcopy(authorization)
+
+    first = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    second = validate_codex_pilot_initial_claim_committed_unit(
+        copy.deepcopy(committed_unit),
+        VALID_ATTEMPT_ID,
+        copy.deepcopy(authorization),
+    )
+
+    assert first == second
+    assert first == {
+        "committed_unit_validation_passed": True,
+        "committed_unit_blockers": [],
+    }
+    assert committed_unit == original_unit
+    assert authorization == original_authorization
+
+
+def test_committed_unit_invalid_request_short_circuits():
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        _HostileCommittedUnit(),
+        _StrSubclass("pilot-attempt-abc123def457"),
+        object(),
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": [
+            "attempt_id_invalid",
+            "authorization_context_invalid",
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    [
+        _StrSubclass("claim_record"),
+        _CommittedUnitFieldStrEnum.CLAIM_RECORD,
+        _HostileCollidingKey(),
+    ],
+)
+def test_committed_unit_rejects_exact_root_key_subclasses(bad_key: object):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    claim_record = candidate.pop("claim_record")
+    candidate[bad_key] = claim_record
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["commit_incomplete"],
+    }
+
+
+@pytest.mark.parametrize(
+    "committed_unit",
+    [
+        None,
+        [],
+        {},
+    ],
+)
+def test_validate_codex_pilot_initial_claim_committed_unit_rejects_invalid_roots(
+    committed_unit: object,
+):
+    authorization = _valid_codex_pilot_authorization_packet()
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["commit_incomplete"],
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, wrapper, expected_blockers",
+    [
+        ("claim_record", _DictSubclass, ["claim_record_corrupt"]),
+        ("sequence_zero_event", _DictSubclass, ["audit_event_corrupt"]),
+        ("snapshot", _DictSubclass, ["snapshot_corrupt"]),
+        (
+            "claim_record",
+            _HostileRecordMapping,
+            ["claim_record_corrupt"],
+        ),
+        (
+            "sequence_zero_event",
+            _HostileRecordMapping,
+            ["audit_event_corrupt"],
+        ),
+        ("snapshot", _HostileRecordMapping, ["snapshot_corrupt"]),
+    ],
+)
+def test_committed_unit_rejects_exact_dict_subclasses_and_custom_mappings(
+    field_name: str,
+    wrapper,
+    expected_blockers: list[str],
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name] = wrapper(candidate[field_name])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": expected_blockers,
+    }
+
+
+def test_committed_unit_reports_digest_mismatch_for_consistently_rewritten_event_digest():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_digest"] = "f" * 64
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch"],
+    }
+
+
+def test_committed_unit_reports_digest_and_history_mismatch_when_snapshot_is_really_wrong():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch", "history_mismatch"],
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, missing_field, expected_blocker",
+    [
+        ("claim_record", "attempt_id", "claim_record_corrupt"),
+        ("sequence_zero_event", "authorization_id", "audit_event_corrupt"),
+        ("snapshot", "attempt_id", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_reports_corruption_and_digest_mismatch_independently(
+    field_name: str,
+    missing_field: str,
+    expected_blocker: str,
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name].pop(missing_field)
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": sorted([expected_blocker, "digest_mismatch"]),
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, expected_blocker",
+    [
+        ("claim_record", "claim_record_corrupt"),
+        ("sequence_zero_event", "audit_event_corrupt"),
+        ("snapshot", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_reports_corruption_and_digest_mismatch_for_custom_mapping(
+    field_name: str,
+    expected_blocker: str,
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name] = _HostileRecordMapping(candidate[field_name])
+    candidate[f"{field_name}_bytes"] = b"{"
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": sorted([expected_blocker, "digest_mismatch"]),
+    }
+
+
+@pytest.mark.parametrize("missing_field", ["attempt_id", "authorization_id"])
+def test_committed_unit_rejects_missing_event_fields_without_snapshot_binding(
+    monkeypatch,
+    missing_field: str,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"].pop(missing_field)
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot binding helper should not be called")
+
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_audit_event_binding", _bomb
+    )
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["audit_event_corrupt", "digest_mismatch"],
+    }
+
+
+def test_committed_unit_rejects_missing_event_digest_without_binding_helper(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"].pop("event_digest")
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot binding helper should not be called")
+
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_audit_event_binding", _bomb
+    )
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["audit_event_corrupt"],
+    }
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    [
+        None,
+        123,
+        True,
+        _StrSubclass("f" * 64),
+    ],
+)
+def test_committed_unit_rejects_invalid_event_digest_without_binding_helper(
+    monkeypatch,
+    invalid_digest: object,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["event_digest"] = invalid_digest
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("snapshot binding helper should not be called")
+
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["audit_event_corrupt"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_for_valid_later_event_and_matching_snapshot():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+
+    previous_event_digest = candidate["sequence_zero_event"]["event_digest"]
+    candidate["sequence_zero_event"]["event_sequence"] = 1
+    candidate["sequence_zero_event"]["previous_lifecycle_state"] = "claim_created"
+    candidate["sequence_zero_event"]["next_lifecycle_state"] = "invocation_starting"
+    candidate["sequence_zero_event"]["event_category"] = "invocation_starting"
+    candidate["sequence_zero_event"]["result_category"] = "started"
+    candidate["sequence_zero_event"]["actor_role"] = "phoenix_gate"
+    candidate["sequence_zero_event"]["previous_event_digest"] = previous_event_digest
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_history_and_identity_mismatch_for_later_event_drift():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    sentinel = "pilot-auth-issue-987654333"
+
+    previous_event_digest = candidate["sequence_zero_event"]["event_digest"]
+    candidate["sequence_zero_event"]["event_sequence"] = 1
+    candidate["sequence_zero_event"]["previous_lifecycle_state"] = "claim_created"
+    candidate["sequence_zero_event"]["next_lifecycle_state"] = "invocation_starting"
+    candidate["sequence_zero_event"]["event_category"] = "invocation_starting"
+    candidate["sequence_zero_event"]["result_category"] = "started"
+    candidate["sequence_zero_event"]["actor_role"] = "phoenix_gate"
+    candidate["sequence_zero_event"]["authorization_id"] = sentinel
+    candidate["sequence_zero_event"]["previous_event_digest"] = previous_event_digest
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch", "identity_mismatch"],
+    }
+    assert sentinel not in output
+
+
+def test_committed_unit_reports_history_and_digest_mismatch_for_later_event_digest_drift():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+
+    candidate["sequence_zero_event"]["event_sequence"] = 1
+    candidate["sequence_zero_event"]["previous_lifecycle_state"] = "claim_created"
+    candidate["sequence_zero_event"]["next_lifecycle_state"] = "invocation_starting"
+    candidate["sequence_zero_event"]["event_category"] = "invocation_starting"
+    candidate["sequence_zero_event"]["result_category"] = "started"
+    candidate["sequence_zero_event"]["actor_role"] = "phoenix_gate"
+    candidate["sequence_zero_event"]["previous_event_digest"] = candidate[
+        "sequence_zero_event"
+    ]["event_digest"]
+    candidate["sequence_zero_event"]["event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch", "history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_when_event_binding_helper_fails(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+
+    def _fail(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "event_binding_passed": False,
+            "event_binding_blockers": ["previous event is required"],
+            "event_structural_valid": True,
+            "claim_structural_valid": True,
+            "event_structural_errors": [],
+            "previous_event_structural_valid": None,
+        }
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_audit_event_binding",
+        _fail,
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_history_mismatch_when_snapshot_binding_helper_fails(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+
+    def _fail(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "snapshot_binding_passed": False,
+            "snapshot_binding_blockers": ["snapshot mismatch"],
+            "snapshot_structural_valid": True,
+            "snapshot_structural_errors": [],
+            "claim_structural_valid": True,
+            "event_chain_valid": True,
+            "snapshot_derivation_passed": True,
+            "snapshot_derivation_blockers": [],
+            "snapshot": committed_unit["snapshot"],
+        }
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_attempt_snapshot_binding",
+        _fail,
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch"],
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, expected_blocker",
+    [
+        ("claim_record", "claim_record_corrupt"),
+        ("sequence_zero_event", "audit_event_corrupt"),
+        ("snapshot", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_rejects_noncanonical_bytes_for_hostile_non_exact_roots(
+    field_name: str,
+    expected_blocker: str,
+):
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name] = _HostileRecordMapping(candidate[field_name])
+    candidate[f"{field_name}_bytes"] = json.dumps(
+        candidate[field_name]._data,
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=False,
+    ).encode("utf-8")
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": sorted([expected_blocker, "digest_mismatch"]),
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name, expected_blocker",
+    [
+        ("claim_record", "claim_record_corrupt"),
+        ("sequence_zero_event", "audit_event_corrupt"),
+        ("snapshot", "snapshot_corrupt"),
+    ],
+)
+def test_committed_unit_rejects_hostile_equality_exact_dict_roots(
+    monkeypatch,
+    field_name: str,
+    expected_blocker: str,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate[field_name]["attempt_id"] = _EqualityBombStr(VALID_ATTEMPT_ID)
+    candidate[f"{field_name}_bytes"] = _canonical_json_bytes(candidate[field_name])
+
+    if field_name == "claim_record":
+        monkeypatch.setattr(
+            contracts,
+            "validate_codex_pilot_claim_record",
+            lambda record: {
+                "claim_binding_passed": False,
+                "claim_structural_errors": ["claim record is invalid"],
+                "claim_structural_valid": False,
+            },
+        )
+    elif field_name == "sequence_zero_event":
+        monkeypatch.setattr(
+            contracts,
+            "_audit_event_candidate_errors",
+            lambda event: ["audit event is invalid"],
+        )
+    else:
+        monkeypatch.setattr(
+            contracts,
+            "validate_codex_pilot_attempt_snapshot",
+            lambda snapshot: {
+                "snapshot_binding_blockers": [],
+                "snapshot_binding_passed": False,
+                "snapshot_structural_errors": ["snapshot is invalid"],
+                "snapshot_structural_valid": False,
+            },
+        )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": [expected_blocker],
+    }
+
+
+def test_committed_unit_rejects_non_null_previous_event_digest_on_sequence_zero(
+    monkeypatch,
+):
+    import phoenix_office.core.contracts as contracts
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event"]["previous_event_digest"] = "f" * 64
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+
+    def _bomb(*args: object, **kwargs: object) -> object:
+        raise AssertionError("binding helper should not be called")
+
+    monkeypatch.setattr(contracts, "validate_codex_pilot_audit_event_binding", _bomb)
+    monkeypatch.setattr(
+        contracts, "validate_codex_pilot_attempt_snapshot_binding", _bomb
+    )
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["audit_event_corrupt"],
+    }
+
+
+def test_committed_unit_reports_identity_and_digest_drift_without_echo():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    sentinel = "pilot-auth-issue-987654321"
+
+    candidate["sequence_zero_event"]["authorization_id"] = sentinel
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = json.dumps(
+        candidate["sequence_zero_event"],
+        indent=2,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch", "identity_mismatch"],
+    }
+    assert sentinel not in output
+
+
+def test_committed_unit_reports_identity_and_history_mismatch_without_echo():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    sentinel = "pilot-auth-issue-987654322"
+
+    candidate["sequence_zero_event"]["authorization_id"] = sentinel
+    candidate["sequence_zero_event"]["event_digest"] = codex_pilot_audit_event_digest(
+        {
+            key: value
+            for key, value in candidate["sequence_zero_event"].items()
+            if key != "event_digest"
+        }
+    )
+    candidate["sequence_zero_event_bytes"] = _canonical_json_bytes(
+        candidate["sequence_zero_event"]
+    )
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot"]["latest_event_digest"] = candidate["sequence_zero_event"][
+        "event_digest"
+    ]
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+    output = json.dumps(result, sort_keys=True)
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["history_mismatch", "identity_mismatch"],
+    }
+    assert sentinel not in output
+
+
+def test_committed_unit_keeps_snapshot_history_mismatch_despite_claim_byte_drift():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["claim_record_bytes"] = json.dumps(
+        candidate["claim_record"],
+        sort_keys=False,
+        indent=2,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch", "history_mismatch"],
+    }
+
+
+def test_committed_unit_keeps_snapshot_history_mismatch_despite_event_byte_drift():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["sequence_zero_event_bytes"] = json.dumps(
+        candidate["sequence_zero_event"],
+        sort_keys=False,
+        indent=2,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    candidate["snapshot"]["current_lifecycle_state"] = "invocation_starting"
+    candidate["snapshot"]["latest_event_sequence"] = 1
+    candidate["snapshot"]["terminal"] = False
+    candidate["snapshot_bytes"] = _canonical_json_bytes(candidate["snapshot"])
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["digest_mismatch", "history_mismatch"],
+    }
+
+
+def test_committed_unit_reports_uniqueness_corruption_even_when_claim_is_corrupt():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    candidate = copy.deepcopy(committed_unit)
+    candidate["claim_record"].pop("attempt_id")
+    candidate["claim_record_bytes"] = _canonical_json_bytes(candidate["claim_record"])
+    candidate["uniqueness_entries"] = [{"unexpected": {"value": VALID_ATTEMPT_ID}}]
+
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        candidate,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": False,
+        "committed_unit_blockers": ["claim_record_corrupt", "uniqueness_entry_corrupt"],
+    }
+
+
+def test_committed_unit_no_external_dependencies(monkeypatch):
+    import builtins
+
+    import phoenix_office.core.contracts as contracts
+
+    bomb = _Bomb()
+    monkeypatch.setattr(contracts, "datetime", bomb, raising=False)
+    monkeypatch.setattr(contracts, "Path", bomb, raising=False)
+    monkeypatch.setattr(contracts, "random", bomb, raising=False)
+    monkeypatch.setattr(contracts, "subprocess", bomb, raising=False)
+    monkeypatch.setattr(contracts, "socket", bomb, raising=False)
+    monkeypatch.setattr(contracts, "os", bomb, raising=False)
+    monkeypatch.setattr(contracts, "sqlite3", bomb, raising=False)
+    monkeypatch.setattr(contracts, "urllib", bomb, raising=False)
+    monkeypatch.setattr(builtins, "open", bomb, raising=True)
+
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    result = validate_codex_pilot_initial_claim_committed_unit(
+        committed_unit,
+        VALID_ATTEMPT_ID,
+        authorization,
+    )
+
+    assert result == {
+        "committed_unit_validation_passed": True,
+        "committed_unit_blockers": [],
     }

@@ -65,6 +65,7 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_authorization_packet,
     validate_codex_pilot_claim_binding,
     validate_codex_pilot_claim_record,
+    validate_codex_pilot_initial_claim_committed_unit,
     validate_codex_pilot_initial_claim_read_request,
     validate_codex_pilot_initial_claim_store_create_result,
     validate_codex_pilot_initial_claim_store_read_result,
@@ -129,6 +130,7 @@ __all__ = [
     "compose_codex_pilot_initial_claim_bundle",
     "classify_codex_pilot_initial_claim_conflicts",
     "prepare_codex_pilot_initial_claim_commit",
+    "validate_codex_pilot_initial_claim_committed_unit",
     "validate_codex_pilot_initial_claim_uniqueness_entries",
     "validate_codex_pilot_initial_claim_read_request",
     "validate_codex_pilot_initial_claim_store_create_result",
@@ -143,3 +145,7 @@ __all__ = [
     "validate_codex_pilot_claim_binding",
     "validate_codex_pilot_claim_record",
 ]
+
+from phoenix_office.core.committed_unit_override import (  # noqa: E402, F811
+    validate_codex_pilot_initial_claim_committed_unit,
+)
