@@ -18,18 +18,35 @@ def validate_codex_pilot_initial_claim_committed_unit(
     attempt_id: object,
     authorization_package: object,
 ) -> dict[str, object]:
-    if type(committed_unit) is not dict:
-        return _contracts.validate_codex_pilot_initial_claim_committed_unit(
-            committed_unit, attempt_id, authorization_package
-        )
+    request = _contracts.validate_codex_pilot_initial_claim_read_request(
+        attempt_id, authorization_package
+    )
+    if not request["claim_read_request_valid"]:
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": request["claim_read_request_blockers"],
+        }
+
+    required = _contracts.CODEX_PILOT_PREPARED_INITIAL_CLAIM_COMMIT_FIELDS
+    if type(committed_unit) is not dict or len(committed_unit) != len(required):
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": ["commit_incomplete"],
+        }
+    for key in committed_unit:
+        if type(key) is not str or key not in required:
+            return {
+                "committed_unit_validation_passed": False,
+                "committed_unit_blockers": ["commit_incomplete"],
+            }
 
     candidate = dict(committed_unit)
     forced: set[str] = set()
     for field_name, (blocker, bytes_field) in _RECORDS.items():
-        record = committed_unit.get(field_name)
+        record = committed_unit[field_name]
         if type(record) is dict and not is_exact_json_value(record):
             candidate[field_name] = {}
-            if is_canonical_object_bytes(committed_unit.get(bytes_field)):
+            if is_canonical_object_bytes(committed_unit[bytes_field]):
                 candidate[bytes_field] = b"{}"
             forced.add(blocker)
 
