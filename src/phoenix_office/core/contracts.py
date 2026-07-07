@@ -1180,8 +1180,18 @@ def validate_codex_pilot_initial_claim_committed_unit(
         if bytes_value != canonical:
             blockers.add("digest_mismatch")
             return
-        if type(record) is dict and round_trip != record:
-            blockers.add("digest_mismatch")
+        if type(record) is dict:
+            try:
+                record_canonical = json.dumps(
+                    record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                return
+            if bytes_value != record_canonical:
+                blockers.add("digest_mismatch")
 
     claim_record = committed_unit["claim_record"]
     _validate_record_bytes("claim_record_bytes", claim_record)
@@ -1209,6 +1219,7 @@ def validate_codex_pilot_initial_claim_committed_unit(
     event_digest_valid = False
     event_identity_mismatch = False
     event_digest_mismatch = False
+    event_history_mismatch = False
     event_binding_result: dict[str, Any] | None = None
     if type(sequence_zero_event) is not dict:
         blockers.add("audit_event_corrupt")
@@ -1254,11 +1265,23 @@ def validate_codex_pilot_initial_claim_committed_unit(
                 if event_digest != recomputed_event_digest:
                     blockers.add("digest_mismatch")
                     event_digest_mismatch = True
+        event_history_mismatch = (
+            event_structural_valid
+            and event_digest_valid
+            and (
+                sequence_zero_event.get("event_sequence") != 0
+                or sequence_zero_event.get("previous_event_digest") is not None
+                or (
+                    sequence_zero_event.get("previous_lifecycle_state"),
+                    sequence_zero_event.get("next_lifecycle_state"),
+                )
+                != ("claim_not_started", "claim_created")
+            )
+        )
         if (
             event_binding_result is not None
             and not event_binding_result["event_binding_passed"]
-            and not event_identity_mismatch
-            and not event_digest_mismatch
+            and event_history_mismatch
         ):
             blockers.add("history_mismatch")
 
