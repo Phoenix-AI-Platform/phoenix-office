@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Phoenix Office — contractor office automation plugin"
 requires-python = ">=3.12"
 dependencies = [
+    "phoenix-sdk @ git+https://github.com/Phoenix-AI-Platform/phoenix-sdk.git",
     "pydantic>=2.0",
     "python-docx>=1.1",
 ]
