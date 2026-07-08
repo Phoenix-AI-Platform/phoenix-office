@@ -116,6 +116,7 @@ For the current manual A-1 proposal workflow, see:
 - [Proposal workflow runbook](docs/development/proposal_workflow_runbook.md)
 - [Records CLI workflow](docs/development/records_cli.md)
 - [Output artifact conventions](docs/development/output_artifact_conventions.md)
+- [SDK compatibility map](docs/development/sdk_compatibility_map.md)
 
 ---
 
