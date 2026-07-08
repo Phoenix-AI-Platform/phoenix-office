@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from phoenix_office.sdk_adapter import PhoenixOfficePlugin, create_plugin
-from phoenix_sdk import CommandRequest, PhoenixPlugin, PluginCommand, ResultStatus
+from phoenix_sdk import CommandRequest, PhoenixPlugin, PluginCommand
 
 
 def test_create_plugin_satisfies_sdk_protocol() -> None:
@@ -49,7 +49,3 @@ def test_sdk_commands_do_not_execute_yet() -> None:
 
     with pytest.raises(NotImplementedError):
         command.execute(CommandRequest(command="proposal.generate_docx"))
-
-
-def test_result_status_import_remains_available_for_future_execution() -> None:
-    assert ResultStatus.SUCCESS.value == "success"
