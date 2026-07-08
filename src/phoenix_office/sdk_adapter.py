@@ -6,8 +6,8 @@ generation through the SDK contract yet.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 from phoenix_sdk import CommandRequest, CommandResult, PhoenixPlugin, PluginCommand, PluginManifest
 
