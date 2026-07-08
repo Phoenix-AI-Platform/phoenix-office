@@ -28,9 +28,11 @@ class PhoenixOfficeCommand:
     def execute(self, request: CommandRequest) -> CommandResult:
         """Prevent command execution until a dedicated execution PR is approved."""
 
-        raise NotImplementedError(
-            f"Phoenix Office SDK command execution is not implemented for {request.command!r}."
+        message = (
+            "Phoenix Office SDK command execution is not implemented "
+            f"for {request.command!r}."
         )
+        raise NotImplementedError(message)
 
 
 class PhoenixOfficePlugin:
