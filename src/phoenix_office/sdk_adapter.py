@@ -9,7 +9,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from phoenix_sdk import CommandRequest, CommandResult, PhoenixPlugin, PluginCommand, PluginManifest
+from phoenix_sdk import (
+    CommandRequest,
+    CommandResult,
+    PhoenixPlugin,
+    PluginCommand,
+    PluginManifest,
+)
 
 
 @dataclass(frozen=True, slots=True)
