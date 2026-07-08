@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from phoenix_sdk import CommandRequest, PhoenixPlugin, PluginCommand
 
 from phoenix_office.sdk_adapter import PhoenixOfficePlugin, create_plugin
-from phoenix_sdk import CommandRequest, PhoenixPlugin, PluginCommand
 
 
 def test_create_plugin_satisfies_sdk_protocol() -> None:
