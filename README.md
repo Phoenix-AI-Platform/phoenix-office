@@ -33,6 +33,7 @@ from phoenix_office.models.proposal import (
     ProposalInput,
     ScopeItem,
 )
+
 # 1. Build the proposal input
 proposal = ProposalInput(
     customer_name="Abby Hill",
