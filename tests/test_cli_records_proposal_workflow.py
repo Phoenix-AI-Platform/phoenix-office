@@ -4,18 +4,81 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from phoenix_office.cli import main
+import pytest
+from docx import Document
+
+import phoenix_office.cli as cli
+from phoenix_office.cli import build_parser, main
 from phoenix_office.models.proposal import ProposalInput
+from phoenix_office.records import create_sqlite_record_store
 
 ROOT = Path(__file__).parents[1]
 CUSTOMER_EXAMPLE = ROOT / "examples" / "records" / "customer_abby_hill.json"
 JOB_EXAMPLE = ROOT / "examples" / "records" / "job_abby_hill.json"
 DETAILS_EXAMPLE = ROOT / "examples" / "records" / "proposal_details_abby_hill.json"
 TEMPLATE = ROOT / "tests" / "fixtures" / "templates" / "a1_proposal_template.docx"
+SAMPLE_JOB_EXAMPLE = ROOT / "examples" / "records" / "job_sample_north_prairie.json"
 
 
 def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
+
+
+def _import_abby_records(db_path: Path) -> None:
+    assert main(
+        ["records", "import", "customer", str(CUSTOMER_EXAMPLE), "--db", str(db_path)]
+    ) == 0
+    assert main(
+        ["records", "import", "job", str(JOB_EXAMPLE), "--db", str(db_path)]
+    ) == 0
+
+
+def _proposal_build_args(
+    db_path: Path,
+    output_json: Path,
+    output_docx: Path,
+    *,
+    customer_id: str = "customer-abby-hill",
+    job_id: str = "job-abby-hill",
+    details_path: Path = DETAILS_EXAMPLE,
+    template_path: Path = TEMPLATE,
+) -> list[str]:
+    return [
+        "records",
+        "proposal-build",
+        customer_id,
+        job_id,
+        str(details_path),
+        str(output_json),
+        str(output_docx),
+        "--db",
+        str(db_path),
+        "--template",
+        str(template_path),
+    ]
+
+
+def _docx_text(path: Path) -> str:
+    document = Document(str(path))
+    values = [paragraph.text for paragraph in document.paragraphs]
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                values.extend(paragraph.text for paragraph in cell.paragraphs)
+    return _collapse_whitespace(" ".join(values))
+
+
+def _assert_no_outputs(output_json: Path, output_docx: Path) -> None:
+    assert not output_json.exists()
+    assert not output_docx.exists()
+
+
+def _write_details(tmp_path: Path, transform) -> Path:
+    payload = json.loads(DETAILS_EXAMPLE.read_text(encoding="utf-8"))
+    transform(payload)
+    path = tmp_path / "proposal_details.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def test_records_cli_proposal_input_to_docx_workflow(
@@ -137,3 +200,464 @@ def test_records_cli_proposal_input_to_docx_workflow(
 
     assert output_docx_path.exists()
     assert output_docx_path.stat().st_size > 0
+
+
+def test_proposal_build_parser_exposes_exact_command_contract(tmp_path: Path) -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        _proposal_build_args(
+            tmp_path / "records.sqlite",
+            tmp_path / "proposal.json",
+            tmp_path / "proposal.docx",
+        )
+    )
+
+    assert args.func is cli.build_record_proposal
+    assert args.customer_id == "customer-abby-hill"
+    assert args.job_id == "job-abby-hill"
+    assert args.details_json == DETAILS_EXAMPLE
+    assert args.output_proposal_input_json == tmp_path / "proposal.json"
+    assert args.output_docx == tmp_path / "proposal.docx"
+    assert args.db == tmp_path / "records.sqlite"
+    assert args.template == TEMPLATE
+
+
+@pytest.mark.parametrize("positional_count", range(5))
+def test_proposal_build_parser_requires_all_positionals(
+    tmp_path: Path,
+    positional_count: int,
+) -> None:
+    positionals = [
+        "customer-abby-hill",
+        "job-abby-hill",
+        str(DETAILS_EXAMPLE),
+        str(tmp_path / "proposal.json"),
+        str(tmp_path / "proposal.docx"),
+    ]
+    argv = [
+        "records",
+        "proposal-build",
+        *positionals[:positional_count],
+        "--db",
+        str(tmp_path / "records.sqlite"),
+        "--template",
+        str(TEMPLATE),
+    ]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
+
+
+@pytest.mark.parametrize("missing_option", ["--db", "--template"])
+def test_proposal_build_parser_requires_db_and_template(
+    tmp_path: Path,
+    missing_option: str,
+) -> None:
+    argv = _proposal_build_args(
+        tmp_path / "records.sqlite",
+        tmp_path / "proposal.json",
+        tmp_path / "proposal.docx",
+    )
+    option_index = argv.index(missing_option)
+    del argv[option_index : option_index + 2]
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
+
+
+@pytest.mark.parametrize(
+    "forbidden_option",
+    ["--force", "--allow-placeholder-proposal-input", "--allow-placeholder-intake"],
+)
+def test_proposal_build_parser_exposes_no_bypass_options(
+    tmp_path: Path,
+    forbidden_option: str,
+) -> None:
+    argv = _proposal_build_args(
+        tmp_path / "records.sqlite",
+        tmp_path / "proposal.json",
+        tmp_path / "proposal.docx",
+    )
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([*argv, forbidden_option])
+
+
+def test_proposal_build_creates_reviewable_artifacts_without_mutating_records(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    output_dir = tmp_path / "proposal"
+    output_json = output_dir / "proposal_input.json"
+    output_docx = output_dir / "proposal.docx"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+
+    store = create_sqlite_record_store(db_path)
+    customer_before = store.customers.get_customer("customer-abby-hill")
+    job_before = store.jobs.get_job("job-abby-hill")
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("out-of-scope operation invoked")
+
+    for name in (
+        "import_customer_record_file",
+        "import_customer_records_file",
+        "import_job_record_file",
+        "import_job_records_file",
+        "execute_core_command",
+        "execute_sdk_command",
+        "send_email",
+        "upload_file",
+        "file_proposal",
+    ):
+        monkeypatch.setattr(cli, name, unexpected_call, raising=False)
+    monkeypatch.setattr(cli.subprocess, "run", unexpected_call)
+    monkeypatch.setattr(cli.subprocess, "Popen", unexpected_call)
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
+    captured = capsys.readouterr()
+
+    assert output_json.exists()
+    assert output_docx.exists()
+    assert output_docx.stat().st_size > 0
+    proposal = ProposalInput.model_validate_json(output_json.read_text(encoding="utf-8"))
+    assert proposal.customer_name == "Abby Hill"
+    assert proposal.street_address == "123 Main St."
+    assert proposal.city_state_zip == "Menomonee Falls, WI 53051"
+    assert proposal.item_description == "Removal of 1,000 Gallon Aboveground Storage Tank"
+    assert [item.description for item in proposal.scope_items] == [
+        "Pump contents of tank (contents unknown)",
+        "Open and clean tank",
+        "Remove 1,000 gallon AST",
+        "Remove and dispose of tank and residual contents",
+    ]
+    assert proposal.pricing.amount == Decimal("3000.00")
+    assert proposal.pricing.is_starting_at is True
+    assert proposal.notes == []
+
+    docx_text = _docx_text(output_docx)
+    assert "Abby Hill" in docx_text
+    assert "123 Main St." in docx_text
+    assert "Removal of 1,000 Gallon Aboveground Storage Tank" in docx_text
+    assert "Starting at $3,000.00" in docx_text
+
+    summary = _collapse_whitespace(captured.out)
+    assert "Customer: Abby Hill" in summary
+    assert "Site Address: 123 Main St., Menomonee Falls, WI 53051" in summary
+    assert "Item Description: Removal of 1,000 Gallon Aboveground Storage Tank" in summary
+    assert "Scope Items: 4" in summary
+    assert "Pricing Lines: 1" in summary
+    assert "Total: Starting at $3,000.00" in summary
+    assert "Notes: none" in summary
+    assert "Company: A-1 Tank Removal LLC" in summary
+    assert f"ProposalInput JSON: {output_json}" in captured.out
+    assert f"Proposal DOCX: {output_docx}" in captured.out
+    assert captured.err == ""
+
+    store_after = create_sqlite_record_store(db_path)
+    assert store_after.customers.get_customer("customer-abby-hill") == customer_before
+    assert store_after.jobs.get_job("job-abby-hill") == job_before
+    assert set(output_dir.iterdir()) == {output_json, output_docx}
+
+
+def test_proposal_build_repeated_fresh_outputs_are_equivalent(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    first_json = tmp_path / "first" / "proposal.json"
+    first_docx = tmp_path / "first" / "proposal.docx"
+    second_json = tmp_path / "second" / "proposal.json"
+    second_docx = tmp_path / "second" / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, first_json, first_docx)) == 0
+    capsys.readouterr()
+    assert main(_proposal_build_args(db_path, second_json, second_docx)) == 0
+    capsys.readouterr()
+
+    assert first_json.read_text(encoding="utf-8") == second_json.read_text(encoding="utf-8")
+    assert _docx_text(first_docx) == _docx_text(second_docx)
+
+
+def test_proposal_build_missing_database_does_not_create_it(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "missing.sqlite"
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    captured = capsys.readouterr()
+
+    assert "records database does not exist" in captured.err
+    assert not db_path.exists()
+    _assert_no_outputs(output_json, output_docx)
+
+
+def test_proposal_build_rejects_database_directory(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "records"
+    db_path.mkdir()
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "records database path is not a file" in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+
+
+@pytest.mark.parametrize(
+    ("customer_id", "job_id", "expected_error"),
+    [
+        ("missing-customer", "job-abby-hill", "Customer not found"),
+        ("customer-abby-hill", "missing-job", "Job not found"),
+    ],
+)
+def test_proposal_build_missing_record_leaves_no_outputs(
+    tmp_path: Path,
+    capsys,
+    customer_id: str,
+    job_id: str,
+    expected_error: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            customer_id=customer_id,
+            job_id=job_id,
+        )
+    ) == 1
+    assert expected_error in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+
+
+def test_proposal_build_customer_job_mismatch_uses_existing_composition(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    assert main(
+        ["records", "import", "customer", str(CUSTOMER_EXAMPLE), "--db", str(db_path)]
+    ) == 0
+    assert main(
+        ["records", "import", "job", str(SAMPLE_JOB_EXAMPLE), "--db", str(db_path)]
+    ) == 0
+    capsys.readouterr()
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            job_id="job-sample-north-prairie",
+        )
+    ) == 1
+    assert "failed to compose proposal input" in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+
+
+@pytest.mark.parametrize("details_kind", ["missing", "directory", "malformed", "invalid"])
+def test_proposal_build_invalid_details_leave_no_outputs(
+    tmp_path: Path,
+    capsys,
+    details_kind: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    details_path = tmp_path / "details.json"
+    if details_kind == "directory":
+        details_path.mkdir()
+    elif details_kind == "malformed":
+        details_path.write_text("{", encoding="utf-8")
+    elif details_kind == "invalid":
+        details_path.write_text("{}", encoding="utf-8")
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            details_path=details_path,
+        )
+    ) == 1
+    _assert_no_outputs(output_json, output_docx)
+
+
+def test_proposal_build_unresolved_placeholders_leave_no_outputs(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    details_path = _write_details(
+        tmp_path,
+        lambda payload: payload.__setitem__(
+            "item_description",
+            "TODO: replace with explicit work",
+        ),
+    )
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            details_path=details_path,
+        )
+    ) == 1
+    captured = capsys.readouterr()
+    assert "unresolved placeholder text" in captured.err
+    assert "item_description" in captured.err
+    _assert_no_outputs(output_json, output_docx)
+
+
+@pytest.mark.parametrize("template_kind", ["missing", "directory", "corrupt"])
+def test_proposal_build_invalid_template_leaves_no_outputs(
+    tmp_path: Path,
+    capsys,
+    template_kind: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    template_path = tmp_path / "template.docx"
+    if template_kind == "directory":
+        template_path.mkdir()
+    elif template_kind == "corrupt":
+        template_path.write_bytes(b"not a docx")
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            template_path=template_path,
+        )
+    ) == 1
+    _assert_no_outputs(output_json, output_docx)
+
+
+@pytest.mark.parametrize("blocked_output", ["json", "docx"])
+def test_proposal_build_existing_output_blocks_both_artifacts_without_modification(
+    tmp_path: Path,
+    capsys,
+    blocked_output: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+    existing_path = output_json if blocked_output == "json" else output_docx
+    existing_bytes = b"existing-output"
+    existing_path.write_bytes(existing_bytes)
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    capsys.readouterr()
+
+    assert existing_path.read_bytes() == existing_bytes
+    other_path = output_docx if blocked_output == "json" else output_json
+    assert not other_path.exists()
+
+
+def test_proposal_build_rejects_identical_output_paths(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_path = tmp_path / "proposal.output"
+
+    assert main(_proposal_build_args(db_path, output_path, output_path)) == 1
+    assert "output paths must be different" in capsys.readouterr().err
+    assert not output_path.exists()
+
+
+def test_proposal_build_json_staging_failure_cleans_outputs_and_temporaries(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_dir = tmp_path / "proposal"
+    output_json = output_dir / "proposal.json"
+    output_docx = output_dir / "proposal.docx"
+
+    def fail_json_staging(*_args, **_kwargs):
+        raise OSError("forced JSON staging failure")
+
+    monkeypatch.setattr(cli, "_write_proposal_input_json", fail_json_staging)
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "failed to stage proposal input JSON" in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+    assert list(output_dir.iterdir()) == []
+
+
+def test_proposal_build_renderer_failure_cleans_outputs_and_temporaries(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_dir = tmp_path / "proposal"
+    output_json = output_dir / "proposal.json"
+    output_docx = output_dir / "proposal.docx"
+
+    def fail_render(*_args, **_kwargs):
+        raise OSError("forced renderer failure")
+
+    monkeypatch.setattr(cli.DocxProposalRenderer, "render", fail_render)
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "failed to render proposal DOCX" in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+    assert list(output_dir.iterdir()) == []
+
+
+def test_proposal_build_second_publication_failure_removes_first_output(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_dir = tmp_path / "proposal"
+    output_json = output_dir / "proposal.json"
+    output_docx = output_dir / "proposal.docx"
+    original_publish = cli._publish_staged_artifact
+    call_count = 0
+
+    def fail_second_publish(staged_path, final_path, created_final_paths):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise OSError("forced second publication failure")
+        original_publish(staged_path, final_path, created_final_paths)
+
+    monkeypatch.setattr(cli, "_publish_staged_artifact", fail_second_publish)
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "failed to publish final proposal outputs" in capsys.readouterr().err
+    _assert_no_outputs(output_json, output_docx)
+    assert list(output_dir.iterdir()) == []
