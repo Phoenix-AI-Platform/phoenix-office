@@ -2344,6 +2344,96 @@ def validate_codex_pilot_initial_claim_read_request(
     )
 
 
+def classify_codex_pilot_initial_claim_read_outcome(
+    attempt_id: object,
+    authorization_package: object,
+    read_observation: object,
+    committed_unit: object,
+) -> dict[str, object]:
+    """Classify one already-observed initial-claim read without side effects."""
+    request_result = validate_codex_pilot_initial_claim_read_request(
+        attempt_id,
+        authorization_package,
+    )
+    if not request_result["attempt_id_valid"]:
+        category = "attempt_id_invalid"
+    elif not request_result["authorization_context_valid"]:
+        category = "authorization_context_invalid"
+    else:
+        observation_valid = False
+        if type(read_observation) is dict:
+            try:
+                observation_valid = (
+                    len(read_observation) == 3
+                    and all(type(key) is str for key in read_observation)
+                    and all(
+                        field_name in read_observation
+                        for field_name in (
+                            "store_available",
+                            "durability_certain",
+                            "commit_present",
+                        )
+                    )
+                    and all(
+                        type(read_observation[field_name]) is bool
+                        for field_name in (
+                            "store_available",
+                            "durability_certain",
+                            "commit_present",
+                        )
+                    )
+                )
+            except Exception:
+                observation_valid = False
+
+        if not observation_valid or read_observation["store_available"] is False:
+            category = "claim_store_unavailable"
+        elif read_observation["durability_certain"] is False:
+            category = "claim_durability_uncertain"
+        elif read_observation["commit_present"] is False:
+            category = "missing_commit"
+        else:
+            from phoenix_office.core.committed_unit_override import (
+                validate_codex_pilot_initial_claim_committed_unit as validate_committed_unit,
+            )
+
+            committed_unit_result = validate_committed_unit(
+                committed_unit,
+                attempt_id,
+                authorization_package,
+            )
+            if committed_unit_result["committed_unit_validation_passed"]:
+                category = "read_success"
+            else:
+                committed_unit_blockers = committed_unit_result[
+                    "committed_unit_blockers"
+                ]
+                category = next(
+                    (
+                        blocker
+                        for blocker in (
+                            "bundle_binding_mismatch",
+                            "commit_incomplete",
+                            "claim_record_corrupt",
+                            "audit_event_corrupt",
+                            "snapshot_corrupt",
+                            "uniqueness_entry_corrupt",
+                            "digest_mismatch",
+                            "identity_mismatch",
+                            "history_mismatch",
+                        )
+                        if blocker in committed_unit_blockers
+                    ),
+                    "commit_incomplete",
+                )
+
+    result = {"claim_store_read_category": category}
+    result_validation = validate_codex_pilot_initial_claim_store_read_result(result)
+    if not result_validation["claim_store_read_result_valid"]:
+        return {"claim_store_read_category": "claim_store_unavailable"}
+    return result
+
+
 def _validate_initial_claim_conflict_observation(
     conflict_observation: object,
 ) -> dict[str, object]:

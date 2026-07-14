@@ -14,6 +14,7 @@ import pytest
 from phoenix_office.core import (
     CodexPilotInitialClaimReader,
     CodexPilotInitialClaimStore,
+    classify_codex_pilot_initial_claim_read_outcome,
     codex_pilot_audit_event_digest,
     compose_codex_pilot_initial_claim_bundle,
     prepare_codex_pilot_initial_claim_commit,
@@ -747,6 +748,322 @@ def test_validate_codex_pilot_initial_claim_read_request_checks_both_inputs(
             "authorization_context_invalid",
         ],
     }
+
+
+def test_classify_initial_claim_read_outcome_succeeds_with_sanitized_valid_output():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        authorization,
+        {
+            "store_available": True,
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        committed_unit,
+    )
+
+    assert result == {"claim_store_read_category": "read_success"}
+    assert set(result) == {"claim_store_read_category"}
+    assert validate_codex_pilot_initial_claim_store_read_result(result)[
+        "claim_store_read_result_valid"
+    ] is True
+
+
+@pytest.mark.parametrize(
+    "attempt_id, authorization_package, expected_category",
+    [
+        (object(), None, "attempt_id_invalid"),
+        (VALID_ATTEMPT_ID, None, "authorization_context_invalid"),
+    ],
+)
+def test_classify_initial_claim_read_outcome_request_precedence_short_circuits_later_inputs(
+    monkeypatch,
+    attempt_id: object,
+    authorization_package: object,
+    expected_category: str,
+):
+    import phoenix_office.core.contracts as contracts
+
+    monkeypatch.setattr(
+        contracts,
+        "validate_codex_pilot_initial_claim_committed_unit",
+        _Bomb(),
+    )
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        attempt_id,
+        authorization_package,
+        _Bomb(),
+        _HostileCommittedUnit(),
+    )
+
+    assert result == {"claim_store_read_category": expected_category}
+    assert validate_codex_pilot_initial_claim_store_read_result(result)[
+        "claim_store_read_result_valid"
+    ] is True
+
+
+@pytest.mark.parametrize(
+    "read_observation",
+    [
+        None,
+        _DictSubclass(
+            store_available=True,
+            durability_certain=True,
+            commit_present=True,
+        ),
+        _HostileRecordMapping(
+            {
+                "store_available": True,
+                "durability_certain": True,
+                "commit_present": True,
+            }
+        ),
+        {"store_available": True, "durability_certain": True},
+        {
+            "store_available": True,
+            "durability_certain": True,
+            "commit_present": True,
+            "unexpected": False,
+        },
+        {
+            _StrSubclass("store_available"): True,
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        {
+            "store_available": "yes",
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        {
+            "store_available": 1,
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        {
+            "store_available": True,
+            "durability_certain": 0,
+            "commit_present": True,
+        },
+    ],
+)
+def test_classify_initial_claim_read_outcome_malformed_observation_fails_closed(
+    monkeypatch,
+    read_observation: object,
+):
+    import phoenix_office.core.committed_unit_override as committed_unit_override
+
+    monkeypatch.setattr(
+        committed_unit_override,
+        "validate_codex_pilot_initial_claim_committed_unit",
+        _Bomb(),
+    )
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        _valid_codex_pilot_authorization_packet(),
+        read_observation,
+        _HostileCommittedUnit(),
+    )
+
+    assert result == {"claim_store_read_category": "claim_store_unavailable"}
+    assert set(result) == {"claim_store_read_category"}
+    assert validate_codex_pilot_initial_claim_store_read_result(result)[
+        "claim_store_read_result_valid"
+    ] is True
+
+
+@pytest.mark.parametrize(
+    "read_observation, expected_category",
+    [
+        (
+            {
+                "store_available": False,
+                "durability_certain": False,
+                "commit_present": False,
+            },
+            "claim_store_unavailable",
+        ),
+        (
+            {
+                "store_available": True,
+                "durability_certain": False,
+                "commit_present": False,
+            },
+            "claim_durability_uncertain",
+        ),
+        (
+            {
+                "store_available": True,
+                "durability_certain": True,
+                "commit_present": False,
+            },
+            "missing_commit",
+        ),
+    ],
+)
+def test_classify_initial_claim_read_outcome_observation_precedence_short_circuits_unit(
+    monkeypatch,
+    read_observation: dict[str, bool],
+    expected_category: str,
+):
+    import phoenix_office.core.committed_unit_override as committed_unit_override
+
+    monkeypatch.setattr(
+        committed_unit_override,
+        "validate_codex_pilot_initial_claim_committed_unit",
+        _Bomb(),
+    )
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        _valid_codex_pilot_authorization_packet(),
+        read_observation,
+        _HostileCommittedUnit(),
+    )
+
+    assert result == {"claim_store_read_category": expected_category}
+    assert validate_codex_pilot_initial_claim_store_read_result(result)[
+        "claim_store_read_result_valid"
+    ] is True
+
+
+@pytest.mark.parametrize(
+    "blocker",
+    [
+        "bundle_binding_mismatch",
+        "commit_incomplete",
+        "claim_record_corrupt",
+        "audit_event_corrupt",
+        "snapshot_corrupt",
+        "uniqueness_entry_corrupt",
+        "digest_mismatch",
+        "identity_mismatch",
+        "history_mismatch",
+    ],
+)
+def test_classify_initial_claim_read_outcome_maps_committed_unit_failures(
+    monkeypatch,
+    blocker: str,
+):
+    import phoenix_office.core.committed_unit_override as committed_unit_override
+
+    calls: list[tuple[object, object, object]] = []
+
+    def _failed_validation(
+        committed_unit: object,
+        attempt_id: object,
+        authorization_package: object,
+    ) -> dict[str, object]:
+        calls.append((committed_unit, attempt_id, authorization_package))
+        return {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": [blocker],
+        }
+
+    monkeypatch.setattr(
+        committed_unit_override,
+        "validate_codex_pilot_initial_claim_committed_unit",
+        _failed_validation,
+    )
+    authorization = _valid_codex_pilot_authorization_packet()
+    committed_unit = object()
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        authorization,
+        {
+            "store_available": True,
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        committed_unit,
+    )
+
+    assert calls == [(committed_unit, VALID_ATTEMPT_ID, authorization)]
+    assert result == {"claim_store_read_category": blocker}
+    assert validate_codex_pilot_initial_claim_store_read_result(result)[
+        "claim_store_read_result_valid"
+    ] is True
+
+
+def test_classify_initial_claim_read_outcome_uses_deterministic_failure_precedence(
+    monkeypatch,
+):
+    import phoenix_office.core.committed_unit_override as committed_unit_override
+
+    monkeypatch.setattr(
+        committed_unit_override,
+        "validate_codex_pilot_initial_claim_committed_unit",
+        lambda *args: {
+            "committed_unit_validation_passed": False,
+            "committed_unit_blockers": [
+                "history_mismatch",
+                "identity_mismatch",
+                "digest_mismatch",
+                "uniqueness_entry_corrupt",
+                "snapshot_corrupt",
+                "audit_event_corrupt",
+                "claim_record_corrupt",
+                "commit_incomplete",
+                "bundle_binding_mismatch",
+            ],
+        },
+    )
+
+    result = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        _valid_codex_pilot_authorization_packet(),
+        {
+            "store_available": True,
+            "durability_certain": True,
+            "commit_present": True,
+        },
+        object(),
+    )
+
+    assert result == {"claim_store_read_category": "bundle_binding_mismatch"}
+
+
+def test_classify_initial_claim_read_outcome_is_pure_deterministic_and_sanitized():
+    committed_unit, authorization = _valid_codex_pilot_committed_unit()
+    observation = {
+        "store_available": True,
+        "durability_certain": True,
+        "commit_present": True,
+    }
+    original_unit = copy.deepcopy(committed_unit)
+    original_authorization = copy.deepcopy(authorization)
+    original_observation = dict(observation)
+
+    first = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        authorization,
+        observation,
+        committed_unit,
+    )
+    second = classify_codex_pilot_initial_claim_read_outcome(
+        VALID_ATTEMPT_ID,
+        authorization,
+        observation,
+        committed_unit,
+    )
+    serialized = json.dumps(first, sort_keys=True)
+
+    assert first == second == {"claim_store_read_category": "read_success"}
+    assert committed_unit == original_unit
+    assert authorization == original_authorization
+    assert observation == original_observation
+    for internal_value in (
+        VALID_ATTEMPT_ID,
+        authorization["authorization_id"],
+        authorization["objective"],
+        committed_unit["claim_record"]["attempt_id"],
+    ):
+        assert str(internal_value) not in serialized
 
 
 def test_validate_codex_pilot_initial_claim_committed_unit_is_valid_deterministic_and_pure():
