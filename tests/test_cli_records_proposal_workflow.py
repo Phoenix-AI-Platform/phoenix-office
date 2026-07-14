@@ -117,6 +117,14 @@ def _assert_no_sqlite_sidecars(db_path: Path) -> None:
         assert not Path(f"{db_path}{suffix}").exists()
 
 
+def _sqlite_sidecar_snapshot(db_path: Path) -> dict[str, bytes | None]:
+    return {
+        suffix: path.read_bytes() if path.exists() else None
+        for suffix in ("-wal", "-shm", "-journal")
+        for path in (Path(f"{db_path}{suffix}"),)
+    }
+
+
 def _enable_persistent_wal_mode(db_path: Path) -> None:
     with sqlite3.connect(db_path) as connection:
         result = connection.execute("PRAGMA journal_mode=WAL").fetchone()
@@ -911,3 +919,47 @@ def test_proposal_build_leaves_closed_wal_database_and_sidecars_unchanged(
     assert _database_snapshot(db_path) == before
     _assert_no_sqlite_sidecars(db_path)
     assert set(tmp_path.iterdir()) == {db_path, output_json, output_docx}
+
+
+def test_immutable_reads_reject_existing_wal_state_without_mutation(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    writer = sqlite3.connect(db_path)
+    try:
+        result = writer.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE customers SET display_name = ? WHERE customer_id = ?",
+            ("Committed only in WAL", "customer-abby-hill"),
+        )
+        writer.commit()
+
+        before_database = db_path.read_bytes()
+        before_sidecars = _sqlite_sidecar_snapshot(db_path)
+        assert before_sidecars["-wal"] is not None
+        assert before_sidecars["-shm"] is not None
+        assert before_sidecars["-journal"] is None
+
+        customers = SQLiteCustomerRepository(db_path, initialize=False, read_only=True)
+        jobs = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            customers.get_customer("customer-abby-hill")
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            jobs.get_job("job-abby-hill")
+
+        output_json = tmp_path / "proposal.json"
+        output_docx = tmp_path / "proposal.docx"
+        assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+        assert "failed to read records database" in capsys.readouterr().err
+        _assert_no_outputs(output_json, output_docx)
+
+        assert db_path.read_bytes() == before_database
+        assert _sqlite_sidecar_snapshot(db_path) == before_sidecars
+    finally:
+        writer.close()

@@ -47,6 +47,14 @@ def initialize_records_database(db_path: Path) -> None:
         connection.commit()
 
 
+def _require_sidecar_free_immutable_read(db_path: Path) -> None:
+    sidecar_paths = [Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")]
+    if any(path.exists() for path in sidecar_paths):
+        raise sqlite3.OperationalError(
+            "immutable reads require a closed SQLite database without sidecar files"
+        )
+
+
 class SQLiteCustomerRepository:
     """SQLite CustomerRepository implementation for local customer records."""
 
@@ -115,6 +123,7 @@ class SQLiteCustomerRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
+            _require_sidecar_free_immutable_read(self.db_path)
             database_uri = (
                 f"{self.db_path.resolve().as_uri()}"
                 "?mode=ro&immutable=1"
@@ -217,6 +226,7 @@ class SQLiteJobRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
+            _require_sidecar_free_immutable_read(self.db_path)
             database_uri = (
                 f"{self.db_path.resolve().as_uri()}"
                 "?mode=ro&immutable=1"
