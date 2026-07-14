@@ -81,7 +81,7 @@ def _assert_no_outputs(output_json: Path, output_docx: Path) -> None:
 
 
 def _database_snapshot(db_path: Path) -> tuple[object, ...]:
-    database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    database_uri = f"{db_path.resolve().as_uri()}?mode=ro&immutable=1"
     with sqlite3.connect(database_uri, uri=True) as connection:
         sqlite_master = tuple(
             connection.execute(
@@ -110,6 +110,19 @@ def _database_snapshot(db_path: Path) -> tuple[object, ...]:
 
 def _assert_database_has_no_sidecars_or_outputs(tmp_path: Path, db_path: Path) -> None:
     assert set(tmp_path.iterdir()) == {db_path}
+
+
+def _assert_no_sqlite_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not Path(f"{db_path}{suffix}").exists()
+
+
+def _enable_persistent_wal_mode(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        result = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+    _assert_no_sqlite_sidecars(db_path)
 
 
 def _write_details(tmp_path: Path, transform) -> Path:
@@ -840,3 +853,61 @@ def test_read_only_repository_rejects_initialization(
         repository_type(db_path, read_only=True, initialize=True)
 
     assert not db_path.exists()
+
+
+def test_immutable_read_only_repositories_do_not_create_wal_sidecars(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    _enable_persistent_wal_mode(db_path)
+    before = _database_snapshot(db_path)
+
+    customers = SQLiteCustomerRepository(db_path, initialize=False, read_only=True)
+    jobs = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+    customer = customers.get_customer("customer-abby-hill")
+    job = jobs.get_job("job-abby-hill")
+
+    assert customer is not None
+    assert customer.display_name == "Abby Hill"
+    assert job is not None
+    assert job.customer_id == customer.customer_id
+    assert _database_snapshot(db_path) == before
+    _assert_no_sqlite_sidecars(db_path)
+    _assert_database_has_no_sidecars_or_outputs(tmp_path, db_path)
+
+
+def test_proposal_build_leaves_closed_wal_database_and_sidecars_unchanged(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    _enable_persistent_wal_mode(db_path)
+    before = _database_snapshot(db_path)
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
+    captured = capsys.readouterr()
+
+    proposal = ProposalInput.model_validate_json(output_json.read_text(encoding="utf-8"))
+    assert proposal.customer_name == "Abby Hill"
+    assert proposal.street_address == "123 Main St."
+    assert proposal.pricing.amount == Decimal("3000.00")
+    assert proposal.pricing.is_starting_at is True
+    assert proposal.notes == []
+    assert output_docx.stat().st_size > 0
+    docx_text = _docx_text(output_docx)
+    assert "Abby Hill" in docx_text
+    assert "123 Main St." in docx_text
+    assert "Starting at $3,000.00" in docx_text
+    assert f"ProposalInput JSON: {output_json}" in captured.out
+    assert f"Proposal DOCX: {output_docx}" in captured.out
+
+    assert _database_snapshot(db_path) == before
+    _assert_no_sqlite_sidecars(db_path)
+    assert set(tmp_path.iterdir()) == {db_path, output_json, output_docx}

@@ -115,7 +115,10 @@ class SQLiteCustomerRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
-            database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+            database_uri = (
+                f"{self.db_path.resolve().as_uri()}"
+                "?mode=ro&immutable=1"
+            )
             connection = sqlite3.connect(database_uri, uri=True)
         else:
             connection = sqlite3.connect(self.db_path)
@@ -214,7 +217,10 @@ class SQLiteJobRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
-            database_uri = f"{self.db_path.resolve().as_uri()}?mode=ro"
+            database_uri = (
+                f"{self.db_path.resolve().as_uri()}"
+                "?mode=ro&immutable=1"
+            )
             connection = sqlite3.connect(database_uri, uri=True)
         else:
             connection = sqlite3.connect(self.db_path)
