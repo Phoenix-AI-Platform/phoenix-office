@@ -49,6 +49,34 @@ Additional sanitized sample proposal details are available at `examples/records/
 
 ## Command Checklist
 
+After the customer and job records already exist in SQLite, operators may use the
+deterministic one-command build path:
+
+```bash
+python -m phoenix_office.cli records proposal-build \
+  customer-abby-hill \
+  job-abby-hill \
+  examples/records/proposal_details_abby_hill.json \
+  output/abby_hill_proposal_input.json \
+  output/abby_hill_proposal.docx \
+  --db output/records.sqlite \
+  --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+The command requires explicit customer ID, job ID, `RecordProposalDetails` JSON,
+SQLite database, DOCX template, normalized `ProposalInput` JSON output, and DOCX
+output. It produces both requested artifacts from the same composed in-memory
+`ProposalInput`, prints the existing proposal-inspection summary, and prints both
+final paths.
+
+The build refuses to overwrite either output and exposes no force or placeholder
+bypass. It does not import or mutate records, infer pricing, scope, notes, dates,
+descriptions, identities, or templates, or send, upload, file, or otherwise deliver
+the generated artifacts. The operator must still inspect the JSON, open and review
+the generated DOCX, and send it manually only after completing the review checklist.
+
+The existing multi-command path remains supported.
+
 Run the current manual command chain in order:
 
 ```bash
@@ -83,11 +111,15 @@ python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.j
 
 - This checklist does not describe automation or orchestration.
 - The workflow is manual CLI operation only.
+- `records proposal-build` is an optional deterministic convenience over existing
+  components after records are already stored; it is not record intake, automation,
+  orchestration, approval, or delivery.
 - `proposal inspect` validates and summarizes `ProposalInput` JSON only.
 - Pricing is not inferred from records.
 - Scope is not inferred from records.
 - Proposal notes are not inferred from records.
-- DOCX rendering remains the existing `proposal generate` command.
+- DOCX rendering continues to use the existing renderer through either the preserved
+  `proposal generate` command or the optional `records proposal-build` convenience.
 - `RecordProposalDetails` is the operator-authored business detail source.
 - `ProposalInput` is the deterministic renderer input.
 
