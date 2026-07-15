@@ -37,7 +37,7 @@ python -m phoenix_office.cli records proposal-build \
 
 This command requires explicit customer and job IDs, explicit operator-authored `RecordProposalDetails`, an existing SQLite database, an explicit DOCX template, and explicit JSON and DOCX output paths.
 
-It reads existing records, composes exactly one in-memory `ProposalInput`, rejects unresolved placeholders, writes normalized reviewable JSON, renders a matching DOCX from the same proposal, prints the established proposal-inspection summary and both paths, and succeeds only after both final artifacts exist.
+It reads existing records, composes exactly one in-memory `ProposalInput`, rejects values containing the validator's currently configured placeholder markers, writes normalized reviewable JSON, renders a matching DOCX from the same proposal, prints the established proposal-inspection summary and both paths, and succeeds only after both final artifacts exist.
 
 It does not import or mutate records, infer business inputs, or send or deliver artifacts. The operator must review the JSON and DOCX and decide manually whether to send the proposal.
 
@@ -143,7 +143,9 @@ Additional sanitized sample:
 examples/records/proposal_details_sample_north_prairie.json
 ```
 
-Replace every placeholder before a proposal build. Phoenix Office does not infer pricing, scope, notes, proposal date, customer, job, item description, company data, or template.
+`examples/records/proposal_details_template.json` is only a starter file. Replace every instructional or starter value manually before building or sending. The placeholder validator currently recognizes strings containing `todo:` or `replace with explicit`, case-insensitively; it is not a comprehensive detector of every draft phrase. Passing validation or completing a build does not prove that the business wording is complete. Phoenix Office does not infer pricing, scope, notes, proposal date, customer, job, item description, company data, or template.
+
+Operators must manually review proposal date, item description, scope, pricing, notes, company information, normalized JSON, and DOCX. Human review remains the final safety boundary.
 
 ## Importing Records Into SQLite
 
@@ -181,7 +183,7 @@ python -m phoenix_office.cli records proposal-build \
   --template TEMPLATE_DOCX
 ```
 
-The command uses the same composed `ProposalInput` object for placeholder checks, normalized JSON serialization, summary output, and DOCX rendering. It prints:
+The command uses the same composed `ProposalInput` object for the configured placeholder-marker check, normalized JSON serialization, summary output, and DOCX rendering. It prints:
 
 ```text
 Customer: ...
@@ -212,7 +214,7 @@ The command does not initialize missing tables, save records, delete sidecars, r
 
 ## Proposal-Build Output Safety
 
-Before creating output directories or artifacts, the command validates the explicit paths, database, details, template, records, composition, and placeholders.
+Before creating output directories or artifacts, the command validates the explicit paths, database, details, template, records, composition, and currently recognized placeholder markers.
 
 It then:
 
@@ -329,13 +331,15 @@ Error: invalid RecordProposalDetails JSON: <path>
 
 Confirm the file is valid JSON matching the `RecordProposalDetails` shape. Use `records proposal-details validate` as an optional independent preflight.
 
-### Unresolved Placeholders
+### Recognized Placeholder Markers And Other Draft Text
 
 ```text
 Error: unresolved placeholder text in composed proposal; refusing proposal build.
 ```
 
-Replace every reported field in the explicit details. `records proposal-build` exposes no placeholder bypass.
+Values containing the validator's currently configured markers fail closed. The recognized markers are `todo:` and `replace with explicit`, matched case-insensitively, and `records proposal-build` exposes no build-command bypass.
+
+Other instructional or starter text may be structurally valid and may not be recognized. Replace every starter value manually, then review proposal date, item description, scope, pricing, notes, company information, normalized JSON, and DOCX before sending. Successful validation or build is not proof that all draft business wording has been replaced; human review remains the final safety boundary.
 
 ### Missing Or Corrupt Template
 

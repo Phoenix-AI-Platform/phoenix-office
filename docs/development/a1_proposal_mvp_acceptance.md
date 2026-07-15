@@ -100,6 +100,8 @@ The repository includes these sanitized proposal-details examples:
 
 The Abby Hill and Sample North Prairie workflows are covered by the record-backed proposal workflow tests.
 
+`examples/records/proposal_details_template.json` is only a starter file. Operators must replace every instructional or starter value manually before building or sending. The placeholder validator currently recognizes strings containing the configured markers `todo:` or `replace with explicit`, case-insensitively; it is not a comprehensive detector of every draft or instructional phrase. Passing validation or completing a build does not prove the business wording is complete. Manual review of proposal date, item description, scope, pricing, notes, company information, normalized JSON, and DOCX remains the final safety boundary.
+
 ## Implemented And Verified Capabilities
 
 - [x] Customer and job record import into SQLite.
@@ -110,7 +112,7 @@ The Abby Hill and Sample North Prairie workflows are covered by the record-backe
 - [x] Independent DOCX generation from `ProposalInput` and a template.
 - [x] Optional `records proposal-build` after records already exist.
 - [x] Normalized `ProposalInput` JSON and a matching DOCX from the same in-memory proposal.
-- [x] Unresolved-placeholder rejection with no build-command bypass.
+- [x] Recognized configured placeholder-marker rejection with no build-command bypass.
 - [x] Identical-path and existing-output collision refusal.
 - [x] Staged output publication, partial-publication rollback, and temporary-sibling cleanup.
 - [x] Non-initializing immutable database reads and record non-mutation.

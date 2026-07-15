@@ -43,7 +43,9 @@ Export commands write JSON through the existing file-export helpers and may crea
 python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 ```
 
-For new jobs, operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file. Replace every placeholder before use. Proposal date, description, scope, pricing, notes, and company configuration remain explicit operator-authored inputs.
+For new jobs, operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file. It is only a starter: replace every instructional or starter value manually before building or sending. Passing validation does not prove that every instructional phrase has been removed or that the business wording is complete. Proposal date, description, scope, pricing, notes, and company configuration remain explicit operator-authored inputs.
+
+The placeholder validator currently recognizes strings containing the configured markers `todo:` or `replace with explicit`, case-insensitively. It is not a comprehensive detector of every draft or instructional phrase. Operators must manually review proposal date, item description, scope, pricing, notes, company information, normalized JSON, and DOCX; human review remains the final safety boundary.
 
 Current sanitized details fixtures include:
 
@@ -122,7 +124,7 @@ The read-only repositories resolve the database target, reject existing `-wal`, 
 
 The command:
 
-- rejects unresolved placeholders and exposes no placeholder bypass;
+- rejects values containing the validator's currently configured placeholder markers and exposes no build-command bypass;
 - refuses identical output paths;
 - refuses to overwrite either existing output;
 - checks both collisions before creating either artifact;
