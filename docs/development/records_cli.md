@@ -1,12 +1,12 @@
 # Records CLI Workflow
 
-The records CLI is a developer/internal tool for working with SQLite-backed customer and job records in Phoenix Office. It is intended for local inspection, fixture loading, smoke testing, and early data workflow development.
+The records CLI is a developer/internal tool for working with SQLite-backed customer and job records in Phoenix Office. It is intended for local inspection, fixture loading, smoke testing, and deterministic record-backed proposal work.
 
-Records are stored in a local SQLite database file. Missing database files are initialized automatically when a command opens the store.
+Normal writable record-store commands may initialize a missing database and its tables. `records proposal-build` is the bounded exception: it requires an existing initialized database and opens it through non-initializing immutable read-only repositories.
 
 ## Supported Commands
 
-Current import commands:
+### Record Import
 
 ```bash
 python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
@@ -15,7 +15,9 @@ python -m phoenix_office.cli records import customers path/to/customers.json --d
 python -m phoenix_office.cli records import jobs path/to/jobs.json --db output/records.sqlite
 ```
 
-Current read-only inspection commands:
+These are writable commands. They may initialize a missing database and save records.
+
+### Record Inspection
 
 ```bash
 python -m phoenix_office.cli records list customers --db output/records.sqlite
@@ -24,64 +26,136 @@ python -m phoenix_office.cli records show customer customer-abby-hill --db outpu
 python -m phoenix_office.cli records show job job-abby-hill --db output/records.sqlite
 ```
 
-Current export commands:
+`list` and `show` do not modify existing record rows. They use the normal record-store construction path, which may initialize a missing database. This differs from the stricter `proposal-build` database boundary described below.
+
+### Record Export
 
 ```bash
 python -m phoenix_office.cli records export customers output/customers.json --db output/records.sqlite
 python -m phoenix_office.cli records export jobs output/jobs.json --db output/records.sqlite
 ```
 
-Current proposal details validation command:
+Export commands write JSON through the existing file-export helpers and may create output parent directories.
+
+### Proposal Details Validation
 
 ```bash
 python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
 ```
 
-For new jobs, operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file. Replace all placeholder values before sending a proposal; scope, pricing, and notes remain operator-authored and are not inferred from records.
+For new jobs, operators may copy `examples/records/proposal_details_template.json` as a starter `RecordProposalDetails` file. Replace every placeholder before use. Proposal date, description, scope, pricing, notes, and company configuration remain explicit operator-authored inputs.
 
-Current proposal details fixtures include `examples/records/proposal_details_template.json`, `examples/records/proposal_details_abby_hill.json`, and `examples/records/proposal_details_sample_north_prairie.json`.
+Current sanitized details fixtures include:
 
-Current proposal input composition command:
+- `examples/records/proposal_details_template.json`
+- `examples/records/proposal_details_abby_hill.json`
+- `examples/records/proposal_details_sample_north_prairie.json`
+
+### ProposalInput Composition
 
 ```bash
 python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
 ```
 
-Current proposal input validation command:
+`records proposal-input` combines an existing `CustomerRecord`, an existing `JobRecord`, and explicit `RecordProposalDetails`, then writes `ProposalInput` JSON only. It does not render DOCX.
+
+### Record-Backed Proposal Build
+
+After the selected customer and job records already exist in SQLite, the bounded convenience command can produce both reviewable artifacts:
+
+```bash
+python -m phoenix_office.cli records proposal-build \
+  CUSTOMER_ID \
+  JOB_ID \
+  DETAILS_JSON \
+  OUTPUT_PROPOSAL_INPUT_JSON \
+  OUTPUT_DOCX \
+  --db RECORDS_SQLITE \
+  --template TEMPLATE_DOCX
+```
+
+Abby Hill example:
+
+```bash
+python -m phoenix_office.cli records proposal-build \
+  customer-abby-hill \
+  job-abby-hill \
+  examples/records/proposal_details_abby_hill.json \
+  output/abby_hill_proposal_input.json \
+  output/abby_hill_proposal.docx \
+  --db output/records.sqlite \
+  --template tests/fixtures/templates/a1_proposal_template.docx
+```
+
+#### Inputs
+
+- `CUSTOMER_ID`: exact existing `CustomerRecord` identifier.
+- `JOB_ID`: exact existing `JobRecord` identifier.
+- `DETAILS_JSON`: explicit operator-authored `RecordProposalDetails` JSON.
+- `OUTPUT_PROPOSAL_INPUT_JSON`: explicit path for normalized reviewable `ProposalInput` JSON.
+- `OUTPUT_DOCX`: explicit path for the matching proposal DOCX.
+- `--db RECORDS_SQLITE`: existing initialized SQLite records database.
+- `--template TEMPLATE_DOCX`: explicit openable DOCX template.
+
+The command infers no pricing, scope, notes, date, customer, job, description, company data, or template.
+
+#### Outputs
+
+On success, the command produces:
+
+- normalized reviewable `ProposalInput` JSON;
+- a matching DOCX rendered from the same in-memory `ProposalInput`;
+- the existing human-readable proposal-inspection summary; and
+- both final output paths.
+
+It returns success only after both final artifacts exist. It does not send, upload, file, approve, or otherwise deliver either artifact. Human review and manual sending remain required.
+
+#### Database Safety
+
+`proposal-build` requires the database file and selected records to exist already. It does not call record import, initialize missing tables, update records, or mutate records.
+
+The read-only repositories resolve the database target, reject existing `-wal`, `-shm`, or `-journal` sidecars beside that target, and then connect with SQLite URI `mode=ro&immutable=1`. The command never deletes, repairs, or alters existing sidecars. If active sidecar state exists, stop and make the database closed and consistent through its owning application or process before retrying.
+
+`immutable=1` assumes no other process modifies the database during the build. Concurrent modification during an immutable read is unsupported. The command provides no locking, snapshotting, recovery, repair, or database service.
+
+#### Output Safety
+
+The command:
+
+- rejects unresolved placeholders and exposes no placeholder bypass;
+- refuses identical output paths;
+- refuses to overwrite either existing output;
+- checks both collisions before creating either artifact;
+- stages normalized JSON and rendered DOCX as temporary sibling files;
+- publishes final artifacts with exclusive creation;
+- rolls back a final artifact created by the current attempt if publication is incomplete; and
+- removes temporary siblings on success and failure.
+
+## Independent Proposal Commands
+
+Validate existing `ProposalInput` JSON:
 
 ```bash
 python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
 ```
 
-Current proposal input inspection command:
+Inspect it without mutation or rendering:
 
 ```bash
 python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
 ```
 
-The `list` and `show` commands are read-only. They open the SQLite-backed record store and print existing records without modifying them.
-
-The `export` commands write JSON files. They export all customer or job records from the SQLite store and create parent directories through the existing file export helpers.
-
-The `proposal-details validate` command validates `RecordProposalDetails` JSON only. It does not compose `ProposalInput`, read customer or job records, open SQLite, generate DOCX, or infer pricing or scope.
-
-The `proposal-input` command writes a `ProposalInput` JSON file only. It combines an existing `CustomerRecord`, an existing `JobRecord`, and explicit `RecordProposalDetails` JSON. It does not generate a DOCX and does not infer pricing, scope, item description, or notes.
-
-The `proposal validate` command validates `ProposalInput` JSON only. It does not generate DOCX, load a DOCX template, read records, open SQLite, or infer pricing or scope.
-
-The `proposal inspect` command validates and loads `ProposalInput` JSON, then prints a short human-readable summary. It does not generate DOCX, load a DOCX template, read records, open SQLite, or infer pricing or scope.
-
-DOCX generation remains the existing separate proposal command, using the generated proposal input JSON:
+Render an existing `ProposalInput` JSON independently:
 
 ```bash
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-## Record-backed Proposal Workflow
+`proposal validate` validates JSON only. `proposal inspect` validates, loads, and summarizes JSON without rendering or mutation. `proposal generate` remains independently available and retains its separate legacy placeholder-bypass option; `records proposal-build` exposes no such bypass.
 
-The current record-backed proposal workflow is an explicit-details-driven command chain. Records provide customer and job site fields, while `RecordProposalDetails` provides proposal date, item description, scope, pricing, notes, and company configuration.
+## Preserved Transparent Record-Backed Workflow
 
-For the full operator/developer walkthrough, see the [proposal workflow runbook](proposal_workflow_runbook.md). For a condensed before-generation checklist, see the [proposal workflow operator checklist](proposal_workflow_operator_checklist.md). For generated local file handling, see [output artifact conventions](output_artifact_conventions.md).
+The explicit multi-command path remains supported:
 
 ```bash
 python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
@@ -93,66 +167,22 @@ python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.js
 python -m phoenix_office.cli proposal generate output/abby_hill_proposal_input.json output/abby_hill_proposal.docx --template tests/fixtures/templates/a1_proposal_template.docx
 ```
 
-`records proposal-details validate` is an optional preflight check for explicit proposal details JSON. `records proposal-input` writes `ProposalInput` JSON only. `proposal validate` is an optional preflight check for composed `ProposalInput` JSON. `proposal inspect` is an optional review step that prints a human-readable summary without rendering a DOCX. `proposal generate` remains the command that renders the DOCX artifact. This workflow is not natural-language intake, and pricing or scope are not inferred from records.
+Record import remains separate from proposal build. `RecordProposalDetails` remains the explicit business-detail source, and `ProposalInput` remains the deterministic renderer input.
 
-## Abby Hill Example
-
-The repository includes example records that can be imported into a local development database:
-
-```bash
-python -m phoenix_office.cli records import customer examples/records/customer_abby_hill.json --db output/records.sqlite
-python -m phoenix_office.cli records import job examples/records/job_abby_hill.json --db output/records.sqlite
-```
-
-After import, inspect the records:
-
-```bash
-python -m phoenix_office.cli records list customers --db output/records.sqlite
-python -m phoenix_office.cli records list jobs --db output/records.sqlite
-python -m phoenix_office.cli records show customer customer-abby-hill --db output/records.sqlite
-python -m phoenix_office.cli records show job job-abby-hill --db output/records.sqlite
-```
-
-Optionally validate the explicit proposal details before composing proposal input JSON:
-
-```bash
-python -m phoenix_office.cli records proposal-details validate examples/records/proposal_details_abby_hill.json
-```
-
-Compose a proposal input JSON file from the imported records plus explicit proposal details:
-
-```bash
-python -m phoenix_office.cli records proposal-input customer-abby-hill job-abby-hill examples/records/proposal_details_abby_hill.json output/abby_hill_proposal_input.json --db output/records.sqlite
-```
-
-Optionally validate the composed proposal input before generating a DOCX:
-
-```bash
-python -m phoenix_office.cli proposal validate output/abby_hill_proposal_input.json
-```
-
-Optionally inspect the composed proposal input summary before generating a DOCX:
-
-```bash
-python -m phoenix_office.cli proposal inspect output/abby_hill_proposal_input.json
-```
-
-Export the records back to JSON:
-
-```bash
-python -m phoenix_office.cli records export customers output/records_customers.json --db output/records.sqlite
-python -m phoenix_office.cli records export jobs output/records_jobs.json --db output/records.sqlite
-```
+For the full walkthrough, see the [proposal workflow runbook](proposal_workflow_runbook.md). For a condensed operator aid, see the [proposal workflow operator checklist](proposal_workflow_operator_checklist.md). For generated local file handling, see [output artifact conventions](output_artifact_conventions.md).
 
 ## Current Non-Goals
 
-The records CLI does not currently provide:
+The records CLI does not provide:
 
-- edit, delete, or update commands
-- web UI
-- natural language intake
-- orchestrator behavior
-- worker execution
-- proposal generation from records
+- record edit, update, or delete commands;
+- a web UI;
+- natural-language intake or AI inference;
+- automatic pricing, scope, notes, date, customer, job, description, company-data, or template decisions;
+- an orchestrator or workflow execution framework;
+- worker or plugin runtime execution;
+- PDF generation through the record-backed proposal build;
+- automatic review, approval, sending, email, upload, filing, or delivery; or
+- unattended customer-facing operation.
 
-Proposal generation still uses the existing proposal input and DOCX rendering flow. Records can compose proposal input JSON, but records commands do not render DOCX files.
+`records proposal-build` is one deterministic local convenience over existing composition and rendering components. It is not record intake, automation, orchestration, approval, or delivery. Existing record import, list, show, and export behavior remains unchanged.
