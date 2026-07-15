@@ -47,12 +47,30 @@ def initialize_records_database(db_path: Path) -> None:
         connection.commit()
 
 
+def _require_sidecar_free_immutable_read(db_path: Path) -> None:
+    sidecar_paths = [Path(f"{db_path}{suffix}") for suffix in ("-wal", "-shm", "-journal")]
+    if any(path.exists() for path in sidecar_paths):
+        raise sqlite3.OperationalError(
+            "immutable reads require a closed SQLite database without sidecar files"
+        )
+
+
 class SQLiteCustomerRepository:
     """SQLite CustomerRepository implementation for local customer records."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        initialize: bool = True,
+        read_only: bool = False,
+    ) -> None:
+        if read_only and initialize:
+            raise ValueError("read-only customer repositories cannot initialize tables")
         self.db_path = Path(db_path)
-        initialize_records_database(self.db_path)
+        self.read_only = read_only
+        if initialize:
+            initialize_records_database(self.db_path)
 
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
         with self._connect() as connection:
@@ -104,7 +122,16 @@ class SQLiteCustomerRepository:
         return [_customer_from_row(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        if self.read_only:
+            resolved_db_path = self.db_path.resolve()
+            _require_sidecar_free_immutable_read(resolved_db_path)
+            database_uri = (
+                f"{resolved_db_path.as_uri()}"
+                "?mode=ro&immutable=1"
+            )
+            connection = sqlite3.connect(database_uri, uri=True)
+        else:
+            connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -112,9 +139,19 @@ class SQLiteCustomerRepository:
 class SQLiteJobRepository:
     """SQLite JobRepository implementation for local job records."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        initialize: bool = True,
+        read_only: bool = False,
+    ) -> None:
+        if read_only and initialize:
+            raise ValueError("read-only job repositories cannot initialize tables")
         self.db_path = Path(db_path)
-        initialize_records_database(self.db_path)
+        self.read_only = read_only
+        if initialize:
+            initialize_records_database(self.db_path)
 
     def save_job(self, record: JobRecord) -> JobRecord:
         with self._connect() as connection:
@@ -189,7 +226,16 @@ class SQLiteJobRepository:
         return [_job_from_row(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        if self.read_only:
+            resolved_db_path = self.db_path.resolve()
+            _require_sidecar_free_immutable_read(resolved_db_path)
+            database_uri = (
+                f"{resolved_db_path.as_uri()}"
+                "?mode=ro&immutable=1"
+            )
+            connection = sqlite3.connect(database_uri, uri=True)
+        else:
+            connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
         return connection
 

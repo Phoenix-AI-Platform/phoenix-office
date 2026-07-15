@@ -38,6 +38,9 @@ from phoenix_office.proposal_placeholder_validation import (
     proposal_input_placeholder_paths,
 )
 from phoenix_office.records import (
+    RecordStore,
+    SQLiteCustomerRepository,
+    SQLiteJobRepository,
     create_proposal_input_from_record_details,
     create_sqlite_record_store,
     customer_record_from_json_file,
@@ -2228,7 +2231,18 @@ def build_record_proposal(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        store = create_sqlite_record_store(db_path)
+        store = RecordStore(
+            customers=SQLiteCustomerRepository(
+                db_path,
+                initialize=False,
+                read_only=True,
+            ),
+            jobs=SQLiteJobRepository(
+                db_path,
+                initialize=False,
+                read_only=True,
+            ),
+        )
         customer = store.customers.get_customer(args.customer_id)
     except Exception:  # noqa: BLE001 - sanitize database errors at CLI boundary.
         print(f"Error: failed to read records database: {db_path}", file=sys.stderr)

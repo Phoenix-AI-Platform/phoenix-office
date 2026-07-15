@@ -1,6 +1,8 @@
 """Smoke test for the record-backed proposal CLI workflow."""
 
+import hashlib
 import json
+import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -8,9 +10,14 @@ import pytest
 from docx import Document
 
 import phoenix_office.cli as cli
+import phoenix_office.records.sqlite as sqlite_records
 from phoenix_office.cli import build_parser, main
 from phoenix_office.models.proposal import ProposalInput
-from phoenix_office.records import create_sqlite_record_store
+from phoenix_office.records import (
+    SQLiteCustomerRepository,
+    SQLiteJobRepository,
+    create_sqlite_record_store,
+)
 
 ROOT = Path(__file__).parents[1]
 CUSTOMER_EXAMPLE = ROOT / "examples" / "records" / "customer_abby_hill.json"
@@ -71,6 +78,59 @@ def _docx_text(path: Path) -> str:
 def _assert_no_outputs(output_json: Path, output_docx: Path) -> None:
     assert not output_json.exists()
     assert not output_docx.exists()
+
+
+def _database_snapshot(db_path: Path) -> tuple[object, ...]:
+    database_uri = f"{db_path.resolve().as_uri()}?mode=ro&immutable=1"
+    with sqlite3.connect(database_uri, uri=True) as connection:
+        sqlite_master = tuple(
+            connection.execute(
+                """
+                SELECT type, name, tbl_name, sql
+                FROM sqlite_master
+                ORDER BY type, name, tbl_name
+                """
+            ).fetchall()
+        )
+        table_names = {
+            row[1] for row in sqlite_master if row[0] == "table" and row[1] != "sqlite_sequence"
+        }
+        table_contents = tuple(
+            (table_name, tuple(connection.execute(f"SELECT * FROM {table_name} ORDER BY rowid")))
+            for table_name in sorted(table_names)
+        )
+    database_bytes = db_path.read_bytes()
+    return (
+        hashlib.sha256(database_bytes).hexdigest(),
+        len(database_bytes),
+        sqlite_master,
+        table_contents,
+    )
+
+
+def _assert_database_has_no_sidecars_or_outputs(tmp_path: Path, db_path: Path) -> None:
+    assert set(tmp_path.iterdir()) == {db_path}
+
+
+def _assert_no_sqlite_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not Path(f"{db_path}{suffix}").exists()
+
+
+def _sqlite_sidecar_snapshot(db_path: Path) -> dict[str, bytes | None]:
+    return {
+        suffix: path.read_bytes() if path.exists() else None
+        for suffix in ("-wal", "-shm", "-journal")
+        for path in (Path(f"{db_path}{suffix}"),)
+    }
+
+
+def _enable_persistent_wal_mode(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        result = connection.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+    _assert_no_sqlite_sidecars(db_path)
 
 
 def _write_details(tmp_path: Path, transform) -> Path:
@@ -661,3 +721,316 @@ def test_proposal_build_second_publication_failure_removes_first_output(
     assert "failed to publish final proposal outputs" in capsys.readouterr().err
     _assert_no_outputs(output_json, output_docx)
     assert list(output_dir.iterdir()) == []
+
+
+def test_proposal_build_uses_noninitializing_read_only_repositories(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    def unexpected_initializer(*_args, **_kwargs):
+        raise AssertionError("proposal-build must not initialize the records database")
+
+    monkeypatch.setattr(cli, "create_sqlite_record_store", unexpected_initializer)
+    monkeypatch.setattr(
+        sqlite_records,
+        "initialize_records_database",
+        unexpected_initializer,
+    )
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
+    assert output_json.exists()
+    assert output_docx.exists()
+
+
+def test_existing_record_import_still_initializes_new_database(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+
+    assert main(
+        ["records", "import", "customer", str(CUSTOMER_EXAMPLE), "--db", str(db_path)]
+    ) == 0
+    capsys.readouterr()
+
+    snapshot = _database_snapshot(db_path)
+    sqlite_master = snapshot[2]
+    table_names = {row[1] for row in sqlite_master if row[0] == "table"}
+    assert {"customers", "jobs"}.issubset(table_names)
+
+
+def test_proposal_build_leaves_zero_byte_database_unchanged(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    db_path.write_bytes(b"")
+    before = _database_snapshot(db_path)
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "failed to read records database" in capsys.readouterr().err
+
+    assert _database_snapshot(db_path) == before
+    assert before[1] == 0
+    assert before[2] == ()
+    _assert_no_outputs(output_json, output_docx)
+    _assert_database_has_no_sidecars_or_outputs(tmp_path, db_path)
+
+
+@pytest.mark.parametrize(
+    ("missing_table", "preserved_table"),
+    [("jobs", "customers"), ("customers", "jobs")],
+)
+def test_proposal_build_leaves_partial_database_unchanged(
+    tmp_path: Path,
+    capsys,
+    missing_table: str,
+    preserved_table: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(f"DROP TABLE {missing_table}")
+        connection.commit()
+    before = _database_snapshot(db_path)
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+    assert "failed to read records database" in capsys.readouterr().err
+
+    after = _database_snapshot(db_path)
+    assert after == before
+    table_names = {row[1] for row in after[2] if row[0] == "table"}
+    assert missing_table not in table_names
+    assert preserved_table in table_names
+    preserved_contents = dict(after[3])[preserved_table]
+    assert len(preserved_contents) == 1
+    _assert_no_outputs(output_json, output_docx)
+    _assert_database_has_no_sidecars_or_outputs(tmp_path, db_path)
+
+
+def test_read_only_repositories_read_records_and_sqlite_blocks_saves(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    before = _database_snapshot(db_path)
+    customers = SQLiteCustomerRepository(db_path, initialize=False, read_only=True)
+    jobs = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+
+    customer = customers.get_customer("customer-abby-hill")
+    job = jobs.get_job("job-abby-hill")
+    assert customer is not None
+    assert job is not None
+    assert customers.read_only is True
+    assert jobs.read_only is True
+
+    with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+        customers.save_customer(customer)
+    with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+        jobs.save_job(job)
+
+    assert _database_snapshot(db_path) == before
+    _assert_database_has_no_sidecars_or_outputs(tmp_path, db_path)
+
+
+@pytest.mark.parametrize(
+    "repository_type",
+    [SQLiteCustomerRepository, SQLiteJobRepository],
+)
+def test_read_only_repository_rejects_initialization(
+    tmp_path: Path,
+    repository_type,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+
+    with pytest.raises(ValueError, match="read-only.*cannot initialize"):
+        repository_type(db_path, read_only=True, initialize=True)
+
+    assert not db_path.exists()
+
+
+def test_immutable_read_only_repositories_do_not_create_wal_sidecars(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    _enable_persistent_wal_mode(db_path)
+    before = _database_snapshot(db_path)
+
+    customers = SQLiteCustomerRepository(db_path, initialize=False, read_only=True)
+    jobs = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+    customer = customers.get_customer("customer-abby-hill")
+    job = jobs.get_job("job-abby-hill")
+
+    assert customer is not None
+    assert customer.display_name == "Abby Hill"
+    assert job is not None
+    assert job.customer_id == customer.customer_id
+    assert _database_snapshot(db_path) == before
+    _assert_no_sqlite_sidecars(db_path)
+    _assert_database_has_no_sidecars_or_outputs(tmp_path, db_path)
+
+
+def test_proposal_build_leaves_closed_wal_database_and_sidecars_unchanged(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    _enable_persistent_wal_mode(db_path)
+    before = _database_snapshot(db_path)
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
+    captured = capsys.readouterr()
+
+    proposal = ProposalInput.model_validate_json(output_json.read_text(encoding="utf-8"))
+    assert proposal.customer_name == "Abby Hill"
+    assert proposal.street_address == "123 Main St."
+    assert proposal.pricing.amount == Decimal("3000.00")
+    assert proposal.pricing.is_starting_at is True
+    assert proposal.notes == []
+    assert output_docx.stat().st_size > 0
+    docx_text = _docx_text(output_docx)
+    assert "Abby Hill" in docx_text
+    assert "123 Main St." in docx_text
+    assert "Starting at $3,000.00" in docx_text
+    assert f"ProposalInput JSON: {output_json}" in captured.out
+    assert f"Proposal DOCX: {output_docx}" in captured.out
+
+    assert _database_snapshot(db_path) == before
+    _assert_no_sqlite_sidecars(db_path)
+    assert set(tmp_path.iterdir()) == {db_path, output_json, output_docx}
+
+
+def test_immutable_reads_reject_existing_wal_state_without_mutation(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    writer = sqlite3.connect(db_path)
+    try:
+        result = writer.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE customers SET display_name = ? WHERE customer_id = ?",
+            ("Committed only in WAL", "customer-abby-hill"),
+        )
+        writer.commit()
+
+        before_database = db_path.read_bytes()
+        before_sidecars = _sqlite_sidecar_snapshot(db_path)
+        assert before_sidecars["-wal"] is not None
+        assert before_sidecars["-shm"] is not None
+        assert before_sidecars["-journal"] is None
+
+        customers = SQLiteCustomerRepository(db_path, initialize=False, read_only=True)
+        jobs = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            customers.get_customer("customer-abby-hill")
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            jobs.get_job("job-abby-hill")
+
+        output_json = tmp_path / "proposal.json"
+        output_docx = tmp_path / "proposal.docx"
+        assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
+        assert "failed to read records database" in capsys.readouterr().err
+        _assert_no_outputs(output_json, output_docx)
+
+        assert db_path.read_bytes() == before_database
+        assert _sqlite_sidecar_snapshot(db_path) == before_sidecars
+    finally:
+        writer.close()
+
+
+def test_immutable_reads_check_sidecars_beside_resolved_database(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    database_dir = tmp_path / "database"
+    database_dir.mkdir()
+    db_path = database_dir / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    link_dir = tmp_path / "link"
+    link_dir.mkdir()
+    linked_db_path = link_dir / "records.sqlite"
+    simulated_symlink = False
+    try:
+        linked_db_path.symlink_to(db_path)
+    except OSError:
+        simulated_symlink = True
+        linked_db_path.write_bytes(b"simulated-symlink")
+        original_resolve = Path.resolve
+
+        def resolve_simulated_symlink(path: Path, *args, **kwargs) -> Path:
+            if path == linked_db_path:
+                return db_path
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_simulated_symlink)
+
+    writer = sqlite3.connect(db_path)
+    try:
+        result = writer.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE customers SET display_name = ? WHERE customer_id = ?",
+            ("Committed only in target WAL", "customer-abby-hill"),
+        )
+        writer.commit()
+        before_database = db_path.read_bytes()
+        before_sidecars = _sqlite_sidecar_snapshot(db_path)
+        before_link = linked_db_path.read_bytes() if simulated_symlink else None
+        assert before_sidecars["-wal"] is not None
+        assert before_sidecars["-shm"] is not None
+
+        customers = SQLiteCustomerRepository(
+            linked_db_path,
+            initialize=False,
+            read_only=True,
+        )
+        jobs = SQLiteJobRepository(linked_db_path, initialize=False, read_only=True)
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            customers.get_customer("customer-abby-hill")
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            jobs.get_job("job-abby-hill")
+
+        output_json = tmp_path / "proposal.json"
+        output_docx = tmp_path / "proposal.docx"
+        assert main(_proposal_build_args(linked_db_path, output_json, output_docx)) == 1
+        assert "failed to read records database" in capsys.readouterr().err
+        _assert_no_outputs(output_json, output_docx)
+
+        assert db_path.read_bytes() == before_database
+        assert _sqlite_sidecar_snapshot(db_path) == before_sidecars
+        if simulated_symlink:
+            assert linked_db_path.read_bytes() == before_link
+        _assert_no_sqlite_sidecars(linked_db_path)
+    finally:
+        writer.close()
