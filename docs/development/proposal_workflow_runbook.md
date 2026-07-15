@@ -198,7 +198,7 @@ ProposalInput JSON: <path>
 Proposal DOCX: <path>
 ```
 
-No private record payload is printed.
+The command does not dump the full customer or job record JSON. The reviewed summary intentionally prints selected business fields, including customer and site address, so treat terminal output as containing private customer data.
 
 ## Proposal-Build Database Safety
 
