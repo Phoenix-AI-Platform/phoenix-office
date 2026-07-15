@@ -123,9 +123,10 @@ class SQLiteCustomerRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
-            _require_sidecar_free_immutable_read(self.db_path)
+            resolved_db_path = self.db_path.resolve()
+            _require_sidecar_free_immutable_read(resolved_db_path)
             database_uri = (
-                f"{self.db_path.resolve().as_uri()}"
+                f"{resolved_db_path.as_uri()}"
                 "?mode=ro&immutable=1"
             )
             connection = sqlite3.connect(database_uri, uri=True)
@@ -226,9 +227,10 @@ class SQLiteJobRepository:
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
-            _require_sidecar_free_immutable_read(self.db_path)
+            resolved_db_path = self.db_path.resolve()
+            _require_sidecar_free_immutable_read(resolved_db_path)
             database_uri = (
-                f"{self.db_path.resolve().as_uri()}"
+                f"{resolved_db_path.as_uri()}"
                 "?mode=ro&immutable=1"
             )
             connection = sqlite3.connect(database_uri, uri=True)

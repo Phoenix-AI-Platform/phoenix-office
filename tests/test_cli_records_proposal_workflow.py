@@ -963,3 +963,74 @@ def test_immutable_reads_reject_existing_wal_state_without_mutation(
         assert _sqlite_sidecar_snapshot(db_path) == before_sidecars
     finally:
         writer.close()
+
+
+def test_immutable_reads_check_sidecars_beside_resolved_database(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    database_dir = tmp_path / "database"
+    database_dir.mkdir()
+    db_path = database_dir / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    link_dir = tmp_path / "link"
+    link_dir.mkdir()
+    linked_db_path = link_dir / "records.sqlite"
+    simulated_symlink = False
+    try:
+        linked_db_path.symlink_to(db_path)
+    except OSError:
+        simulated_symlink = True
+        linked_db_path.write_bytes(b"simulated-symlink")
+        original_resolve = Path.resolve
+
+        def resolve_simulated_symlink(path: Path, *args, **kwargs) -> Path:
+            if path == linked_db_path:
+                return db_path
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_simulated_symlink)
+
+    writer = sqlite3.connect(db_path)
+    try:
+        result = writer.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert result is not None
+        assert result[0].lower() == "wal"
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "UPDATE customers SET display_name = ? WHERE customer_id = ?",
+            ("Committed only in target WAL", "customer-abby-hill"),
+        )
+        writer.commit()
+        before_database = db_path.read_bytes()
+        before_sidecars = _sqlite_sidecar_snapshot(db_path)
+        before_link = linked_db_path.read_bytes() if simulated_symlink else None
+        assert before_sidecars["-wal"] is not None
+        assert before_sidecars["-shm"] is not None
+
+        customers = SQLiteCustomerRepository(
+            linked_db_path,
+            initialize=False,
+            read_only=True,
+        )
+        jobs = SQLiteJobRepository(linked_db_path, initialize=False, read_only=True)
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            customers.get_customer("customer-abby-hill")
+        with pytest.raises(sqlite3.OperationalError, match="without sidecar files"):
+            jobs.get_job("job-abby-hill")
+
+        output_json = tmp_path / "proposal.json"
+        output_docx = tmp_path / "proposal.docx"
+        assert main(_proposal_build_args(linked_db_path, output_json, output_docx)) == 1
+        assert "failed to read records database" in capsys.readouterr().err
+        _assert_no_outputs(output_json, output_docx)
+
+        assert db_path.read_bytes() == before_database
+        assert _sqlite_sidecar_snapshot(db_path) == before_sidecars
+        if simulated_symlink:
+            assert linked_db_path.read_bytes() == before_link
+        _assert_no_sqlite_sidecars(linked_db_path)
+    finally:
+        writer.close()
