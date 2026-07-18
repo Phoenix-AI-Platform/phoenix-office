@@ -9,6 +9,7 @@ from pathlib import Path
 from docx import Document
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
 
 from phoenix_office.models.proposal import PricingLine, ProposalInput, ScopeItem
@@ -232,8 +233,8 @@ def test_a1_template_preserves_page_setup_content_order_and_placeholders():
     assert section.orientation == WD_ORIENT.PORTRAIT
     assert section.page_width == Inches(8.5)
     assert section.page_height == Inches(11)
-    assert section.left_margin == Inches(1)
-    assert section.right_margin == Inches(1)
+    assert section.left_margin == Inches(1.25)
+    assert section.right_margin == Inches(1.25)
     assert section.top_margin == Inches(1)
     assert section.bottom_margin == Inches(1)
 
@@ -269,7 +270,6 @@ def test_a1_template_has_explicit_typography_spacing_and_pagination_controls():
     document = Document(A1_TEMPLATE_PATH)
 
     for paragraph in document.paragraphs:
-        assert paragraph.alignment == WD_ALIGN_PARAGRAPH.LEFT
         assert paragraph.paragraph_format.space_before == Pt(0)
         assert paragraph.paragraph_format.space_after is not None
         assert paragraph.paragraph_format.line_spacing == 1.0
@@ -278,10 +278,45 @@ def test_a1_template_has_explicit_typography_spacing_and_pagination_controls():
             assert run.font.name == "Times New Roman"
             assert run.font.size is not None
 
-    assert find_paragraph(document, "Prepared For:").paragraph_format.keep_with_next is True
+    company_block = [
+        "A-1 Tank Removal LLC",
+        "W178 N6006 Prairie Sky Court",
+        "Menomonee Falls, Wisconsin 53051",
+        "(262) 252-4030",
+    ]
+    for text in company_block:
+        paragraph = find_paragraph(document, text)
+        assert paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER
+        assert all(run.font.size == Pt(18) for run in paragraph.runs if run.text)
+
+    title = find_paragraph(document, "A-1 Tank Removal Proposal")
+    assert title.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert all(run.font.size == Pt(18) for run in title.runs if run.text)
+
+    proposal_date = find_paragraph(document, "Date: {{proposal_date}}")
+    assert proposal_date.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+
+    prepared_for = find_paragraph(document, "Prepared For:")
+    assert prepared_for.paragraph_format.left_indent == Inches(0.5)
+    assert prepared_for.paragraph_format.keep_with_next is True
+    for placeholder in ("{{customer_name}}", "{{street_address}}", "{{city_state_zip}}"):
+        assert find_paragraph(document, placeholder).paragraph_format.left_indent == Inches(1)
+
+    item = find_paragraph(document, "{{item_description}}")
+    borders = item._p.pPr.find(qn("w:pBdr"))
+    assert borders is not None
+    assert borders.find(qn("w:top")) is not None
+    assert borders.find(qn("w:bottom")) is not None
+
     assert find_paragraph(document, "Scope of Work").paragraph_format.keep_with_next is True
-    assert find_paragraph(document, "{{scope_block}}").paragraph_format.keep_together is False
-    assert find_paragraph(document, "{{total_line}}").paragraph_format.keep_with_next is True
+    scope = find_paragraph(document, "{{scope_block}}")
+    assert scope.alignment == WD_ALIGN_PARAGRAPH.LEFT
+    assert scope.paragraph_format.left_indent == Inches(0)
+    assert scope.paragraph_format.keep_together is False
+
+    total = find_paragraph(document, "{{total_line}}")
+    assert total.alignment == WD_ALIGN_PARAGRAPH.RIGHT
+    assert total.paragraph_format.keep_with_next is True
     acceptance = find_paragraph(document, "Proposal Accepted By:")
     assert acceptance.paragraph_format.keep_with_next is True
 
@@ -300,6 +335,7 @@ def test_a1_template_and_rendered_total_line_are_completely_bold(tmp_path):
         paragraph for paragraph in rendered.paragraphs if paragraph.text.startswith("TOTAL:")
     )
     assert rendered_total.text == "TOTAL: $1,500.00"
+    assert rendered_total.alignment == WD_ALIGN_PARAGRAPH.RIGHT
     assert all(run.bold is True for run in rendered_total.runs if run.text)
     for placeholder in PROPOSAL_PLACEHOLDERS:
         assert placeholder not in read_docx_text(output_path)
