@@ -312,11 +312,22 @@ def test_proposal_build_cli_delegates_to_in_process_service(
         summary_lines=("Delegated summary",),
     )
     received_requests: list[proposal_build.ProposalDraftBuildRequest] = []
+    record_preflights: list[tuple[Path, str, str]] = []
+
+    def preflight_records(
+        *,
+        database_path: Path,
+        customer_id: str,
+        job_id: str,
+    ):
+        record_preflights.append((database_path, customer_id, job_id))
+        return object(), object()
 
     def delegate(request: proposal_build.ProposalDraftBuildRequest):
         received_requests.append(request)
         return expected_result
 
+    monkeypatch.setattr(cli, "_select_existing_proposal_records", preflight_records)
     monkeypatch.setattr(cli, "build_proposal_draft", delegate)
 
     assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
@@ -332,6 +343,9 @@ def test_proposal_build_cli_delegates_to_in_process_service(
             proposal_input_json_output_path=output_json,
             proposal_docx_output_path=output_docx,
         )
+    ]
+    assert record_preflights == [
+        (db_path, "customer-abby-hill", "job-abby-hill")
     ]
     assert captured.out.splitlines() == [
         "Delegated summary",
@@ -649,6 +663,60 @@ def test_proposal_build_invalid_details_leave_no_outputs(
             details_path=details_path,
         )
     ) == 1
+    _assert_no_outputs(output_json, output_docx)
+
+
+@pytest.mark.parametrize(
+    ("details_kind", "details_payload"),
+    [("malformed", "{"), ("invalid", "{}")],
+)
+@pytest.mark.parametrize(
+    "earlier_failure",
+    ["unreadable-database", "missing-customer", "missing-job"],
+)
+def test_proposal_build_preserves_record_failure_order_before_details_validation(
+    tmp_path: Path,
+    capsys,
+    details_kind: str,
+    details_payload: str,
+    earlier_failure: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_id = "customer-abby-hill"
+    job_id = "job-abby-hill"
+    if earlier_failure == "unreadable-database":
+        db_path.write_bytes(b"not a sqlite database")
+        expected_error = f"Error: failed to read records database: {db_path}"
+    else:
+        _import_abby_records(db_path)
+        capsys.readouterr()
+        if earlier_failure == "missing-customer":
+            customer_id = "missing-customer"
+            expected_error = "Customer not found: missing-customer"
+        else:
+            job_id = "missing-job"
+            expected_error = "Job not found: missing-job"
+
+    details_path = tmp_path / f"{details_kind}-details.json"
+    details_path.write_text(details_payload, encoding="utf-8")
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            customer_id=customer_id,
+            job_id=job_id,
+            details_path=details_path,
+        )
+    ) == 1
+    captured = capsys.readouterr()
+
+    assert captured.err.strip() == expected_error
+    assert "RecordProposalDetails" not in captured.err
+    assert captured.out == ""
     _assert_no_outputs(output_json, output_docx)
 
 

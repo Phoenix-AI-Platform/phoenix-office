@@ -30,6 +30,7 @@ from phoenix_office.plugins.registry import get_registered_plugin_capabilities
 from phoenix_office.proposal_build import (
     ProposalDraftBuildRequest,
     _ProposalDraftBuildFailure,
+    _select_existing_proposal_records,
     _validate_database_path,
     _validate_output_paths,
     _validate_template_path,
@@ -2206,6 +2207,17 @@ def build_record_proposal(args: argparse.Namespace) -> int:
 
     try:
         _validate_template_path(args.template)
+    except _ProposalDraftBuildFailure as exc:
+        for line in exc.stderr_lines:
+            print(line, file=sys.stderr)
+        return 1
+
+    try:
+        _select_existing_proposal_records(
+            database_path=args.db,
+            customer_id=args.customer_id,
+            job_id=args.job_id,
+        )
     except _ProposalDraftBuildFailure as exc:
         for line in exc.stderr_lines:
             print(line, file=sys.stderr)

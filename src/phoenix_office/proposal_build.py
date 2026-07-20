@@ -12,6 +12,7 @@ from docx import Document
 from pydantic import ValidationError
 
 from phoenix_office.models.proposal import ProposalInput
+from phoenix_office.models.records import CustomerRecord, JobRecord
 from phoenix_office.proposal_placeholder_validation import (
     proposal_input_placeholder_paths,
 )
@@ -73,37 +74,11 @@ def build_proposal_draft(request: ProposalDraftBuildRequest) -> ProposalDraftBui
     _validate_database_path(database_path)
     _validate_template_path(template_path)
 
-    try:
-        store = RecordStore(
-            customers=SQLiteCustomerRepository(
-                database_path,
-                initialize=False,
-                read_only=True,
-            ),
-            jobs=SQLiteJobRepository(
-                database_path,
-                initialize=False,
-                read_only=True,
-            ),
-        )
-        customer = store.customers.get_customer(request.customer_id)
-    except Exception as exc:  # noqa: BLE001 - sanitize database errors.
-        raise _ProposalDraftBuildFailure(
-            f"Error: failed to read records database: {database_path}"
-        ) from exc
-    if customer is None:
-        raise _ProposalDraftBuildFailure(
-            f"Customer not found: {request.customer_id}"
-        )
-
-    try:
-        job = store.jobs.get_job(request.job_id)
-    except Exception as exc:  # noqa: BLE001 - sanitize database errors.
-        raise _ProposalDraftBuildFailure(
-            f"Error: failed to read records database: {database_path}"
-        ) from exc
-    if job is None:
-        raise _ProposalDraftBuildFailure(f"Job not found: {request.job_id}")
+    customer, job = _select_existing_proposal_records(
+        database_path=database_path,
+        customer_id=request.customer_id,
+        job_id=request.job_id,
+    )
 
     try:
         proposal = create_proposal_input_from_record_details(
@@ -253,6 +228,47 @@ def _validate_template_path(template_path: Path) -> None:
         raise _ProposalDraftBuildFailure(
             f"Error: DOCX template is not usable: {template_path}"
         ) from exc
+
+
+def _select_existing_proposal_records(
+    *,
+    database_path: Path,
+    customer_id: str,
+    job_id: str,
+) -> tuple[CustomerRecord, JobRecord]:
+    """Select existing records through the immutable, non-initializing boundary."""
+
+    try:
+        store = RecordStore(
+            customers=SQLiteCustomerRepository(
+                database_path,
+                initialize=False,
+                read_only=True,
+            ),
+            jobs=SQLiteJobRepository(
+                database_path,
+                initialize=False,
+                read_only=True,
+            ),
+        )
+        customer = store.customers.get_customer(customer_id)
+    except Exception as exc:  # noqa: BLE001 - sanitize database errors.
+        raise _ProposalDraftBuildFailure(
+            f"Error: failed to read records database: {database_path}"
+        ) from exc
+    if customer is None:
+        raise _ProposalDraftBuildFailure(f"Customer not found: {customer_id}")
+
+    try:
+        job = store.jobs.get_job(job_id)
+    except Exception as exc:  # noqa: BLE001 - sanitize database errors.
+        raise _ProposalDraftBuildFailure(
+            f"Error: failed to read records database: {database_path}"
+        ) from exc
+    if job is None:
+        raise _ProposalDraftBuildFailure(f"Job not found: {job_id}")
+
+    return customer, job
 
 
 def _proposal_summary_lines(proposal: ProposalInput) -> tuple[str, ...]:

@@ -164,6 +164,27 @@ def test_build_proposal_draft_returns_published_reviewable_artifacts_without_mut
         monkeypatch.setattr(proposal_build, name, unexpected_call, raising=False)
     monkeypatch.setattr(subprocess, "run", unexpected_call)
     monkeypatch.setattr(subprocess, "Popen", unexpected_call)
+    original_select = proposal_build._select_existing_proposal_records
+    record_preflights: list[tuple[Path, str, str]] = []
+
+    def select_records(
+        *,
+        database_path: Path,
+        customer_id: str,
+        job_id: str,
+    ):
+        record_preflights.append((database_path, customer_id, job_id))
+        return original_select(
+            database_path=database_path,
+            customer_id=customer_id,
+            job_id=job_id,
+        )
+
+    monkeypatch.setattr(
+        proposal_build,
+        "_select_existing_proposal_records",
+        select_records,
+    )
 
     result = proposal_build.build_proposal_draft(request)
     captured = capsys.readouterr()
@@ -190,6 +211,9 @@ def test_build_proposal_draft_returns_published_reviewable_artifacts_without_mut
         "Company: A-1 Tank Removal LLC",
     )
     assert _database_snapshot(database_path) == before
+    assert record_preflights == [
+        (database_path, "customer-abby-hill", "job-abby-hill")
+    ]
     for suffix in ("-wal", "-shm", "-journal"):
         assert not Path(f"{database_path}{suffix}").exists()
     assert captured.out == ""
