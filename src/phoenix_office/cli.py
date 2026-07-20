@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 from docx import Document
@@ -28,6 +27,14 @@ from phoenix_office.dev_status import (
 from phoenix_office.models.proposal import ProposalInput
 from phoenix_office.orchestration import WorkflowPlan, WorkflowPlanReview
 from phoenix_office.plugins.registry import get_registered_plugin_capabilities
+from phoenix_office.proposal_build import (
+    ProposalDraftBuildRequest,
+    _ProposalDraftBuildFailure,
+    _validate_database_path,
+    _validate_output_paths,
+    _validate_template_path,
+    build_proposal_draft,
+)
 from phoenix_office.proposal_intake import collect_proposal_input
 from phoenix_office.proposal_intake_normalization import (
     A1ProposalPricingLine,
@@ -38,9 +45,6 @@ from phoenix_office.proposal_placeholder_validation import (
     proposal_input_placeholder_paths,
 )
 from phoenix_office.records import (
-    RecordStore,
-    SQLiteCustomerRepository,
-    SQLiteJobRepository,
     create_proposal_input_from_record_details,
     create_sqlite_record_store,
     customer_record_from_json_file,
@@ -2178,37 +2182,18 @@ def compose_record_proposal_input(args: argparse.Namespace) -> int:
 
 
 def build_record_proposal(args: argparse.Namespace) -> int:
-    output_json_path = args.output_proposal_input_json
-    output_docx_path = args.output_docx
-    db_path = args.db
     details_path = args.details_json
-    template_path = args.template
-
-    if output_json_path.resolve() == output_docx_path.resolve():
-        print("Error: proposal output paths must be different", file=sys.stderr)
-        return 1
-
-    output_json_exists = output_json_path.exists()
-    output_docx_exists = output_docx_path.exists()
-    if output_json_exists:
-        print(
-            f"Error: proposal input JSON output already exists: {output_json_path}",
-            file=sys.stderr,
+    try:
+        _validate_output_paths(
+            args.output_proposal_input_json,
+            args.output_docx,
         )
-    if output_docx_exists:
-        print(
-            f"Error: proposal DOCX output already exists: {output_docx_path}",
-            file=sys.stderr,
-        )
-    if output_json_exists or output_docx_exists:
+        _validate_database_path(args.db)
+    except _ProposalDraftBuildFailure as exc:
+        for line in exc.stderr_lines:
+            print(line, file=sys.stderr)
         return 1
 
-    if not db_path.exists():
-        print(f"Error: records database does not exist: {db_path}", file=sys.stderr)
-        return 1
-    if not db_path.is_file():
-        print(f"Error: records database path is not a file: {db_path}", file=sys.stderr)
-        return 1
     if not details_path.exists():
         print(f"Error: RecordProposalDetails JSON does not exist: {details_path}", file=sys.stderr)
         return 1
@@ -2218,46 +2203,12 @@ def build_record_proposal(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if not template_path.exists():
-        print(f"Error: DOCX template file does not exist: {template_path}", file=sys.stderr)
-        return 1
-    if not template_path.is_file():
-        print(f"Error: DOCX template path is not a file: {template_path}", file=sys.stderr)
-        return 1
-    try:
-        Document(str(template_path))
-    except Exception:  # noqa: BLE001 - sanitize untrusted template errors at CLI boundary.
-        print(f"Error: DOCX template is not usable: {template_path}", file=sys.stderr)
-        return 1
 
     try:
-        store = RecordStore(
-            customers=SQLiteCustomerRepository(
-                db_path,
-                initialize=False,
-                read_only=True,
-            ),
-            jobs=SQLiteJobRepository(
-                db_path,
-                initialize=False,
-                read_only=True,
-            ),
-        )
-        customer = store.customers.get_customer(args.customer_id)
-    except Exception:  # noqa: BLE001 - sanitize database errors at CLI boundary.
-        print(f"Error: failed to read records database: {db_path}", file=sys.stderr)
-        return 1
-    if customer is None:
-        print(f"Customer not found: {args.customer_id}", file=sys.stderr)
-        return 1
-
-    try:
-        job = store.jobs.get_job(args.job_id)
-    except Exception:  # noqa: BLE001 - sanitize database errors at CLI boundary.
-        print(f"Error: failed to read records database: {db_path}", file=sys.stderr)
-        return 1
-    if job is None:
-        print(f"Job not found: {args.job_id}", file=sys.stderr)
+        _validate_template_path(args.template)
+    except _ProposalDraftBuildFailure as exc:
+        for line in exc.stderr_lines:
+            print(line, file=sys.stderr)
         return 1
 
     try:
@@ -2270,112 +2221,26 @@ def build_record_proposal(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        proposal = create_proposal_input_from_record_details(
-            customer=customer,
-            job=job,
-            details=details,
+        result = build_proposal_draft(
+            ProposalDraftBuildRequest(
+                customer_id=args.customer_id,
+                job_id=args.job_id,
+                details=details,
+                database_path=args.db,
+                template_path=args.template,
+                proposal_input_json_output_path=args.output_proposal_input_json,
+                proposal_docx_output_path=args.output_docx,
+            )
         )
-    except (ValueError, ValidationError):
-        print(
-            "Error: failed to compose proposal input for "
-            f"customer {args.customer_id} and job {args.job_id}",
-            file=sys.stderr,
-        )
-        return 1
-    except Exception:  # noqa: BLE001 - sanitize composition errors at CLI boundary.
-        print(
-            "Error: unexpected proposal composition failure for "
-            f"customer {args.customer_id} and job {args.job_id}",
-            file=sys.stderr,
-        )
+    except _ProposalDraftBuildFailure as exc:
+        for line in exc.stderr_lines:
+            print(line, file=sys.stderr)
         return 1
 
-    placeholder_paths = proposal_input_placeholder_paths(proposal)
-    if placeholder_paths:
-        print(
-            "Error: unresolved placeholder text in composed proposal; "
-            "refusing proposal build.",
-            file=sys.stderr,
-        )
-        print(
-            "Placeholder fields: " + ", ".join(placeholder_paths),
-            file=sys.stderr,
-        )
-        return 1
-
-    staged_paths: list[Path] = []
-    created_final_paths: list[Path] = []
-    completed = False
-    try:
-        try:
-            output_json_path.parent.mkdir(parents=True, exist_ok=True)
-            output_docx_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:  # noqa: BLE001 - sanitize output-directory errors.
-            print("Error: failed to prepare proposal output directories", file=sys.stderr)
-            return 1
-
-        try:
-            staged_json_path = _create_temporary_sibling(output_json_path)
-            staged_paths.append(staged_json_path)
-            _write_proposal_input_json(proposal, staged_json_path)
-        except Exception:  # noqa: BLE001 - sanitize serialization errors.
-            print(
-                f"Error: failed to stage proposal input JSON: {output_json_path}",
-                file=sys.stderr,
-            )
-            return 1
-
-        try:
-            staged_docx_path = _create_temporary_sibling(output_docx_path)
-            staged_paths.append(staged_docx_path)
-            DocxProposalRenderer().render(proposal, template_path, staged_docx_path)
-            if not staged_docx_path.exists() or staged_docx_path.stat().st_size == 0:
-                raise ValueError("staged DOCX is missing or empty")
-        except Exception:  # noqa: BLE001 - sanitize rendering errors.
-            print(
-                f"Error: failed to render proposal DOCX: {output_docx_path}",
-                file=sys.stderr,
-            )
-            return 1
-
-        if not staged_json_path.exists() or not staged_docx_path.exists():
-            print("Error: proposal output staging did not produce both artifacts", file=sys.stderr)
-            return 1
-
-        try:
-            _publish_staged_artifact(
-                staged_json_path,
-                output_json_path,
-                created_final_paths,
-            )
-            _publish_staged_artifact(
-                staged_docx_path,
-                output_docx_path,
-                created_final_paths,
-            )
-        except Exception:  # noqa: BLE001 - exclusive publication is a CLI boundary.
-            print("Error: failed to publish final proposal outputs", file=sys.stderr)
-            return 1
-
-        if (
-            not output_json_path.exists()
-            or not output_docx_path.exists()
-            or output_docx_path.stat().st_size == 0
-        ):
-            print("Error: final proposal output verification failed", file=sys.stderr)
-            return 1
-
-        completed = True
-    finally:
-        for staged_path in staged_paths:
-            staged_path.unlink(missing_ok=True)
-        if not completed:
-            for final_path in reversed(created_final_paths):
-                final_path.unlink(missing_ok=True)
-
-    _print_proposal_summary(proposal)
-    print(f"ProposalInput JSON: {output_json_path}")
-    print(f"Proposal DOCX: {output_docx_path}")
+    for line in result.summary_lines:
+        print(line)
+    print(f"ProposalInput JSON: {result.proposal_input_json_path}")
+    print(f"Proposal DOCX: {result.proposal_docx_path}")
     return 0
 
 
@@ -4617,28 +4482,6 @@ def _write_proposal_input_json(proposal: ProposalInput, output_path: Path) -> No
         f"{json.dumps(payload, indent=2, sort_keys=True)}\n",
         encoding="utf-8",
     )
-
-
-def _create_temporary_sibling(final_path: Path) -> Path:
-    with NamedTemporaryFile(
-        mode="wb",
-        prefix=f".{final_path.name}.",
-        suffix=".tmp",
-        dir=final_path.parent,
-        delete=False,
-    ) as temporary_file:
-        return Path(temporary_file.name)
-
-
-def _publish_staged_artifact(
-    staged_path: Path,
-    final_path: Path,
-    created_final_paths: list[Path],
-) -> None:
-    with staged_path.open("rb") as source:
-        with final_path.open("xb") as destination:
-            created_final_paths.append(final_path)
-            shutil.copyfileobj(source, destination)
 
 
 _ORIGINAL_BUILD_PARSER = build_parser
