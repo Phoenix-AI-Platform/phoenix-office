@@ -10,6 +10,7 @@ import pytest
 from docx import Document
 
 import phoenix_office.cli as cli
+import phoenix_office.proposal_build as proposal_build
 import phoenix_office.records.sqlite as sqlite_records
 from phoenix_office.cli import build_parser, main
 from phoenix_office.models.proposal import ProposalInput
@@ -17,6 +18,7 @@ from phoenix_office.records import (
     SQLiteCustomerRepository,
     SQLiteJobRepository,
     create_sqlite_record_store,
+    record_proposal_details_from_file,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -282,6 +284,77 @@ def test_proposal_build_parser_exposes_exact_command_contract(tmp_path: Path) ->
     assert args.template == TEMPLATE
 
 
+def test_proposal_build_cli_delegates_to_in_process_service(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    db_path.write_bytes(b"delegation-only database placeholder")
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+    details = record_proposal_details_from_file(DETAILS_EXAMPLE)
+    proposal = ProposalInput(
+        customer_name="Delegated Customer",
+        street_address="1 Example Way",
+        city_state_zip="Example, WI 00000",
+        proposal_date=details.proposal_date,
+        item_description=details.item_description,
+        scope_items=details.scope_items,
+        pricing=details.pricing,
+        notes=details.notes,
+        company_config=details.company_config,
+    )
+    expected_result = proposal_build.ProposalDraftBuildResult(
+        proposal_input=proposal,
+        proposal_input_json_path=output_json,
+        proposal_docx_path=output_docx,
+        summary_lines=("Delegated summary",),
+    )
+    received_requests: list[proposal_build.ProposalDraftBuildRequest] = []
+    record_preflights: list[tuple[Path, str, str]] = []
+
+    def preflight_records(
+        *,
+        database_path: Path,
+        customer_id: str,
+        job_id: str,
+    ):
+        record_preflights.append((database_path, customer_id, job_id))
+        return object(), object()
+
+    def delegate(request: proposal_build.ProposalDraftBuildRequest):
+        received_requests.append(request)
+        return expected_result
+
+    monkeypatch.setattr(cli, "_select_existing_proposal_records", preflight_records)
+    monkeypatch.setattr(cli, "build_proposal_draft", delegate)
+
+    assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
+    captured = capsys.readouterr()
+
+    assert received_requests == [
+        proposal_build.ProposalDraftBuildRequest(
+            customer_id="customer-abby-hill",
+            job_id="job-abby-hill",
+            details=details,
+            database_path=db_path,
+            template_path=TEMPLATE,
+            proposal_input_json_output_path=output_json,
+            proposal_docx_output_path=output_docx,
+        )
+    ]
+    assert record_preflights == [
+        (db_path, "customer-abby-hill", "job-abby-hill")
+    ]
+    assert captured.out.splitlines() == [
+        "Delegated summary",
+        f"ProposalInput JSON: {output_json}",
+        f"Proposal DOCX: {output_docx}",
+    ]
+    assert captured.err == ""
+
+
 @pytest.mark.parametrize("positional_count", range(5))
 def test_proposal_build_parser_requires_all_positionals(
     tmp_path: Path,
@@ -444,6 +517,41 @@ def test_proposal_build_repeated_fresh_outputs_are_equivalent(
     assert _docx_text(first_docx) == _docx_text(second_docx)
 
 
+def test_proposal_build_service_and_cli_outputs_are_equivalent(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    _import_abby_records(db_path)
+    capsys.readouterr()
+    service_json = tmp_path / "service" / "proposal.json"
+    service_docx = tmp_path / "service" / "proposal.docx"
+    cli_json = tmp_path / "cli" / "proposal.json"
+    cli_docx = tmp_path / "cli" / "proposal.docx"
+
+    result = proposal_build.build_proposal_draft(
+        proposal_build.ProposalDraftBuildRequest(
+            customer_id="customer-abby-hill",
+            job_id="job-abby-hill",
+            details=record_proposal_details_from_file(DETAILS_EXAMPLE),
+            database_path=db_path,
+            template_path=TEMPLATE,
+            proposal_input_json_output_path=service_json,
+            proposal_docx_output_path=service_docx,
+        )
+    )
+    assert main(_proposal_build_args(db_path, cli_json, cli_docx)) == 0
+    capsys.readouterr()
+
+    assert result.proposal_input == ProposalInput.model_validate_json(
+        cli_json.read_text(encoding="utf-8")
+    )
+    assert service_json.read_text(encoding="utf-8") == cli_json.read_text(
+        encoding="utf-8"
+    )
+    assert _docx_text(service_docx) == _docx_text(cli_docx)
+
+
 def test_proposal_build_missing_database_does_not_create_it(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "missing.sqlite"
     output_json = tmp_path / "proposal.json"
@@ -558,6 +666,60 @@ def test_proposal_build_invalid_details_leave_no_outputs(
     _assert_no_outputs(output_json, output_docx)
 
 
+@pytest.mark.parametrize(
+    ("details_kind", "details_payload"),
+    [("malformed", "{"), ("invalid", "{}")],
+)
+@pytest.mark.parametrize(
+    "earlier_failure",
+    ["unreadable-database", "missing-customer", "missing-job"],
+)
+def test_proposal_build_preserves_record_failure_order_before_details_validation(
+    tmp_path: Path,
+    capsys,
+    details_kind: str,
+    details_payload: str,
+    earlier_failure: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_id = "customer-abby-hill"
+    job_id = "job-abby-hill"
+    if earlier_failure == "unreadable-database":
+        db_path.write_bytes(b"not a sqlite database")
+        expected_error = f"Error: failed to read records database: {db_path}"
+    else:
+        _import_abby_records(db_path)
+        capsys.readouterr()
+        if earlier_failure == "missing-customer":
+            customer_id = "missing-customer"
+            expected_error = "Customer not found: missing-customer"
+        else:
+            job_id = "missing-job"
+            expected_error = "Job not found: missing-job"
+
+    details_path = tmp_path / f"{details_kind}-details.json"
+    details_path.write_text(details_payload, encoding="utf-8")
+    output_json = tmp_path / "proposal.json"
+    output_docx = tmp_path / "proposal.docx"
+
+    assert main(
+        _proposal_build_args(
+            db_path,
+            output_json,
+            output_docx,
+            customer_id=customer_id,
+            job_id=job_id,
+            details_path=details_path,
+        )
+    ) == 1
+    captured = capsys.readouterr()
+
+    assert captured.err.strip() == expected_error
+    assert "RecordProposalDetails" not in captured.err
+    assert captured.out == ""
+    _assert_no_outputs(output_json, output_docx)
+
+
 def test_proposal_build_unresolved_placeholders_leave_no_outputs(
     tmp_path: Path,
     capsys,
@@ -666,7 +828,11 @@ def test_proposal_build_json_staging_failure_cleans_outputs_and_temporaries(
     def fail_json_staging(*_args, **_kwargs):
         raise OSError("forced JSON staging failure")
 
-    monkeypatch.setattr(cli, "_write_proposal_input_json", fail_json_staging)
+    monkeypatch.setattr(
+        proposal_build,
+        "_write_proposal_input_json",
+        fail_json_staging,
+    )
     assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
     assert "failed to stage proposal input JSON" in capsys.readouterr().err
     _assert_no_outputs(output_json, output_docx)
@@ -688,7 +854,7 @@ def test_proposal_build_renderer_failure_cleans_outputs_and_temporaries(
     def fail_render(*_args, **_kwargs):
         raise OSError("forced renderer failure")
 
-    monkeypatch.setattr(cli.DocxProposalRenderer, "render", fail_render)
+    monkeypatch.setattr(proposal_build.DocxProposalRenderer, "render", fail_render)
     assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
     assert "failed to render proposal DOCX" in capsys.readouterr().err
     _assert_no_outputs(output_json, output_docx)
@@ -706,7 +872,7 @@ def test_proposal_build_second_publication_failure_removes_first_output(
     output_dir = tmp_path / "proposal"
     output_json = output_dir / "proposal.json"
     output_docx = output_dir / "proposal.docx"
-    original_publish = cli._publish_staged_artifact
+    original_publish = proposal_build._publish_staged_artifact
     call_count = 0
 
     def fail_second_publish(staged_path, final_path, created_final_paths):
@@ -716,7 +882,11 @@ def test_proposal_build_second_publication_failure_removes_first_output(
             raise OSError("forced second publication failure")
         original_publish(staged_path, final_path, created_final_paths)
 
-    monkeypatch.setattr(cli, "_publish_staged_artifact", fail_second_publish)
+    monkeypatch.setattr(
+        proposal_build,
+        "_publish_staged_artifact",
+        fail_second_publish,
+    )
     assert main(_proposal_build_args(db_path, output_json, output_docx)) == 1
     assert "failed to publish final proposal outputs" in capsys.readouterr().err
     _assert_no_outputs(output_json, output_docx)
