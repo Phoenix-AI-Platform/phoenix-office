@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import subprocess
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,136 @@ def _failure_lines(
     return captured.value.stderr_lines
 
 
+def _validation_failure_lines(
+    request: proposal_build.ProposalDraftBuildRequest,
+) -> tuple[str, ...]:
+    with pytest.raises(proposal_build._ProposalDraftBuildFailure) as captured:
+        proposal_build.validate_proposal_draft(request)
+    return captured.value.stderr_lines
+
+
+def test_validate_proposal_draft_returns_only_proposal_and_private_summary_without_writing(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "records.sqlite"
+    _save_records(database_path)
+    before = _database_snapshot(database_path)
+    output_json = tmp_path / "json-output" / "proposal.json"
+    output_docx = tmp_path / "docx-output" / "proposal.docx"
+    request = _request(
+        tmp_path,
+        database_path,
+        output_json=output_json,
+        output_docx=output_docx,
+    )
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("validation must not invoke a writing operation")
+
+    monkeypatch.setattr(
+        sqlite_records,
+        "initialize_records_database",
+        unexpected_call,
+    )
+    monkeypatch.setattr(
+        proposal_build.SQLiteCustomerRepository,
+        "save_customer",
+        unexpected_call,
+    )
+    monkeypatch.setattr(
+        proposal_build.SQLiteJobRepository,
+        "save_job",
+        unexpected_call,
+    )
+    monkeypatch.setattr(proposal_build, "DocxProposalRenderer", unexpected_call)
+    monkeypatch.setattr(
+        proposal_build,
+        "_create_temporary_sibling",
+        unexpected_call,
+    )
+    monkeypatch.setattr(
+        proposal_build,
+        "_write_proposal_input_json",
+        unexpected_call,
+    )
+    monkeypatch.setattr(
+        proposal_build,
+        "_publish_staged_artifact",
+        unexpected_call,
+    )
+
+    result = proposal_build.validate_proposal_draft(request)
+    captured = capsys.readouterr()
+
+    assert isinstance(result, proposal_build.ProposalDraftValidationResult)
+    assert tuple(field.name for field in fields(result)) == ("proposal", "summary_lines")
+    assert isinstance(result.proposal, ProposalInput)
+    assert result.proposal.customer_name == "Abby Hill"
+    assert result.summary_lines == (
+        "Customer: Abby Hill",
+        "Site Address: 123 Main St., Menomonee Falls, WI 53051",
+        "Item Description: Removal of 1,000 Gallon Aboveground Storage Tank",
+        "Scope Items: 4",
+        "Pricing Lines: 1",
+        "Total: Starting at $3,000.00",
+        "Notes: none",
+        "Company: A-1 Tank Removal LLC",
+    )
+    assert not output_json.parent.exists()
+    assert not output_docx.parent.exists()
+    _assert_no_outputs_or_temporaries(tmp_path, output_json, output_docx)
+    assert _database_snapshot(database_path) == before
+    for suffix in ("-wal", "-shm", "-journal"):
+        assert not Path(f"{database_path}{suffix}").exists()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_build_proposal_draft_delegates_all_non_writing_work_to_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "records.sqlite"
+    _save_records(database_path)
+    request = _request(tmp_path, database_path)
+    validation = proposal_build.validate_proposal_draft(request)
+    validation_calls: list[proposal_build.ProposalDraftBuildRequest] = []
+
+    def delegate(
+        received_request: proposal_build.ProposalDraftBuildRequest,
+    ) -> proposal_build.ProposalDraftValidationResult:
+        validation_calls.append(received_request)
+        return validation
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("build duplicated non-writing validation work")
+
+    monkeypatch.setattr(proposal_build, "validate_proposal_draft", delegate)
+    for name in (
+        "_validate_output_paths",
+        "_validate_database_path",
+        "_validate_template_path",
+        "_select_existing_proposal_records",
+        "create_proposal_input_from_record_details",
+        "proposal_input_placeholder_paths",
+        "_proposal_summary_lines",
+    ):
+        monkeypatch.setattr(proposal_build, name, unexpected_call)
+
+    result = proposal_build.build_proposal_draft(request)
+
+    assert validation_calls == [request]
+    assert result.proposal_input == validation.proposal
+    assert result.summary_lines == validation.summary_lines
+    assert ProposalInput.model_validate_json(
+        result.proposal_input_json_path.read_text(encoding="utf-8")
+    ) == validation.proposal
+    assert result.proposal_docx_path.exists()
+    assert result.proposal_docx_path.stat().st_size > 0
+
+
 def test_build_proposal_draft_returns_published_reviewable_artifacts_without_mutation(
     tmp_path: Path,
     capsys,
@@ -220,12 +351,12 @@ def test_build_proposal_draft_returns_published_reviewable_artifacts_without_mut
     assert captured.err == ""
 
 
-def test_build_proposal_draft_rejects_identical_output_paths(tmp_path: Path) -> None:
+def test_validate_proposal_draft_rejects_identical_output_paths(tmp_path: Path) -> None:
     database_path = tmp_path / "records.sqlite"
     _save_records(database_path)
     output_path = tmp_path / "proposal.output"
 
-    assert _failure_lines(
+    assert _validation_failure_lines(
         _request(
             tmp_path,
             database_path,
@@ -237,7 +368,7 @@ def test_build_proposal_draft_rejects_identical_output_paths(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("existing_output", ["json", "docx", "both"])
-def test_build_proposal_draft_refuses_existing_outputs_without_modification(
+def test_validate_proposal_draft_refuses_existing_outputs_without_modification(
     tmp_path: Path,
     existing_output: str,
 ) -> None:
@@ -253,7 +384,7 @@ def test_build_proposal_draft_refuses_existing_outputs_without_modification(
     for path in existing_paths:
         path.write_bytes(b"existing-output")
 
-    lines = _failure_lines(
+    lines = _validation_failure_lines(
         _request(
             tmp_path,
             database_path,
@@ -272,7 +403,7 @@ def test_build_proposal_draft_refuses_existing_outputs_without_modification(
 
 
 @pytest.mark.parametrize("database_kind", ["missing", "directory"])
-def test_build_proposal_draft_rejects_missing_or_non_file_database(
+def test_validate_proposal_draft_rejects_missing_or_non_file_database(
     tmp_path: Path,
     database_kind: str,
 ) -> None:
@@ -281,7 +412,7 @@ def test_build_proposal_draft_rejects_missing_or_non_file_database(
         database_path.mkdir()
     request = _request(tmp_path, database_path)
 
-    lines = _failure_lines(request)
+    lines = _validation_failure_lines(request)
 
     expected = "does not exist" if database_kind == "missing" else "path is not a file"
     assert expected in lines[0]
@@ -293,7 +424,7 @@ def test_build_proposal_draft_rejects_missing_or_non_file_database(
 
 
 @pytest.mark.parametrize("database_kind", ["zero-byte", "invalid", "partial"])
-def test_build_proposal_draft_rejects_unusable_database_without_mutation(
+def test_validate_proposal_draft_rejects_unusable_database_without_mutation(
     tmp_path: Path,
     database_kind: str,
 ) -> None:
@@ -310,7 +441,7 @@ def test_build_proposal_draft_rejects_unusable_database_without_mutation(
     before = database_path.read_bytes()
     request = _request(tmp_path, database_path)
 
-    assert "failed to read records database" in _failure_lines(request)[0]
+    assert "failed to read records database" in _validation_failure_lines(request)[0]
     assert database_path.read_bytes() == before
     _assert_no_outputs_or_temporaries(
         tmp_path,
@@ -319,7 +450,7 @@ def test_build_proposal_draft_rejects_unusable_database_without_mutation(
     )
 
 
-def test_build_proposal_draft_rejects_existing_sqlite_sidecar_without_mutation(
+def test_validate_proposal_draft_rejects_existing_sqlite_sidecar_without_mutation(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "records.sqlite"
@@ -329,7 +460,7 @@ def test_build_proposal_draft_rejects_existing_sqlite_sidecar_without_mutation(
     sidecar_path.write_bytes(b"existing-sidecar")
     request = _request(tmp_path, database_path)
 
-    assert "failed to read records database" in _failure_lines(request)[0]
+    assert "failed to read records database" in _validation_failure_lines(request)[0]
     assert database_path.read_bytes() == database_before
     assert sidecar_path.read_bytes() == b"existing-sidecar"
     _assert_no_outputs_or_temporaries(
@@ -346,7 +477,7 @@ def test_build_proposal_draft_rejects_existing_sqlite_sidecar_without_mutation(
         (True, False, "customer-abby-hill", "missing-job", "Job not found"),
     ],
 )
-def test_build_proposal_draft_rejects_missing_saved_record(
+def test_validate_proposal_draft_rejects_missing_saved_record(
     tmp_path: Path,
     save_customer: bool,
     save_job: bool,
@@ -367,7 +498,7 @@ def test_build_proposal_draft_rejects_missing_saved_record(
         job_id=job_id,
     )
 
-    assert expected in _failure_lines(request)[0]
+    assert expected in _validation_failure_lines(request)[0]
     _assert_no_outputs_or_temporaries(
         tmp_path,
         request.proposal_input_json_output_path,
@@ -375,7 +506,7 @@ def test_build_proposal_draft_rejects_missing_saved_record(
     )
 
 
-def test_build_proposal_draft_rejects_customer_job_mismatch(tmp_path: Path) -> None:
+def test_validate_proposal_draft_rejects_customer_job_mismatch(tmp_path: Path) -> None:
     database_path = tmp_path / "records.sqlite"
     _save_records(database_path, job_path=SAMPLE_JOB_EXAMPLE)
     request = _request(
@@ -384,7 +515,7 @@ def test_build_proposal_draft_rejects_customer_job_mismatch(tmp_path: Path) -> N
         job_id="job-sample-north-prairie",
     )
 
-    assert "failed to compose proposal input" in _failure_lines(request)[0]
+    assert "failed to compose proposal input" in _validation_failure_lines(request)[0]
     _assert_no_outputs_or_temporaries(
         tmp_path,
         request.proposal_input_json_output_path,
@@ -393,7 +524,7 @@ def test_build_proposal_draft_rejects_customer_job_mismatch(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("template_kind", ["missing", "directory", "corrupt"])
-def test_build_proposal_draft_rejects_unusable_template(
+def test_validate_proposal_draft_rejects_unusable_template(
     tmp_path: Path,
     template_kind: str,
 ) -> None:
@@ -406,7 +537,7 @@ def test_build_proposal_draft_rejects_unusable_template(
         template_path.write_bytes(b"not a docx")
     request = _request(tmp_path, database_path, template_path=template_path)
 
-    lines = _failure_lines(request)
+    lines = _validation_failure_lines(request)
 
     assert "DOCX template" in lines[0]
     _assert_no_outputs_or_temporaries(
@@ -416,7 +547,7 @@ def test_build_proposal_draft_rejects_unusable_template(
     )
 
 
-def test_build_proposal_draft_rejects_unresolved_placeholders(tmp_path: Path) -> None:
+def test_validate_proposal_draft_rejects_unresolved_placeholders(tmp_path: Path) -> None:
     database_path = tmp_path / "records.sqlite"
     _save_records(database_path)
     details = record_proposal_details_from_file(DETAILS_EXAMPLE).model_copy(
@@ -424,7 +555,7 @@ def test_build_proposal_draft_rejects_unresolved_placeholders(tmp_path: Path) ->
     )
     request = _request(tmp_path, database_path, details=details)
 
-    lines = _failure_lines(request)
+    lines = _validation_failure_lines(request)
 
     assert lines[0] == (
         "Error: unresolved placeholder text in composed proposal; "

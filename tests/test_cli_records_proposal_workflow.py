@@ -330,6 +330,7 @@ def test_proposal_build_cli_delegates_to_in_process_service(
     monkeypatch.setattr(cli, "_select_existing_proposal_records", preflight_records)
     monkeypatch.setattr(cli, "build_proposal_draft", delegate)
 
+    assert not hasattr(cli, "validate_proposal_draft")
     assert main(_proposal_build_args(db_path, output_json, output_docx)) == 0
     captured = capsys.readouterr()
 
@@ -529,20 +530,25 @@ def test_proposal_build_service_and_cli_outputs_are_equivalent(
     cli_json = tmp_path / "cli" / "proposal.json"
     cli_docx = tmp_path / "cli" / "proposal.docx"
 
-    result = proposal_build.build_proposal_draft(
-        proposal_build.ProposalDraftBuildRequest(
-            customer_id="customer-abby-hill",
-            job_id="job-abby-hill",
-            details=record_proposal_details_from_file(DETAILS_EXAMPLE),
-            database_path=db_path,
-            template_path=TEMPLATE,
-            proposal_input_json_output_path=service_json,
-            proposal_docx_output_path=service_docx,
-        )
+    request = proposal_build.ProposalDraftBuildRequest(
+        customer_id="customer-abby-hill",
+        job_id="job-abby-hill",
+        details=record_proposal_details_from_file(DETAILS_EXAMPLE),
+        database_path=db_path,
+        template_path=TEMPLATE,
+        proposal_input_json_output_path=service_json,
+        proposal_docx_output_path=service_docx,
     )
+    validation = proposal_build.validate_proposal_draft(request)
+    assert not service_json.exists()
+    assert not service_docx.exists()
+
+    result = proposal_build.build_proposal_draft(request)
     assert main(_proposal_build_args(db_path, cli_json, cli_docx)) == 0
     capsys.readouterr()
 
+    assert result.proposal_input == validation.proposal
+    assert result.summary_lines == validation.summary_lines
     assert result.proposal_input == ProposalInput.model_validate_json(
         cli_json.read_text(encoding="utf-8")
     )

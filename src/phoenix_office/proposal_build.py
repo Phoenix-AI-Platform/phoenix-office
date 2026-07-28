@@ -49,6 +49,14 @@ class ProposalDraftBuildResult:
     summary_lines: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ProposalDraftValidationResult:
+    """Composed proposal and private summary data from successful validation."""
+
+    proposal: ProposalInput
+    summary_lines: tuple[str, ...]
+
+
 class _ProposalDraftBuildFailure(Exception):
     """Sanitized service failure intended for an operator-facing adapter."""
 
@@ -57,13 +65,10 @@ class _ProposalDraftBuildFailure(Exception):
         self.stderr_lines = tuple(stderr_lines)
 
 
-def build_proposal_draft(request: ProposalDraftBuildRequest) -> ProposalDraftBuildResult:
-    """Build and publish one proposal from existing records and explicit details.
-
-    The service never initializes or mutates the records database. Both output
-    artifacts are staged as temporary siblings and exclusively published as one
-    logical operation; any partial publication is rolled back on failure.
-    """
+def validate_proposal_draft(
+    request: ProposalDraftBuildRequest,
+) -> ProposalDraftValidationResult:
+    """Compose and validate one proposal without writing or publishing artifacts."""
 
     output_json_path = request.proposal_input_json_output_path
     output_docx_path = request.proposal_docx_output_path
@@ -104,6 +109,26 @@ def build_proposal_draft(request: ProposalDraftBuildRequest) -> ProposalDraftBui
             "refusing proposal build.",
             "Placeholder fields: " + ", ".join(placeholder_paths),
         )
+
+    return ProposalDraftValidationResult(
+        proposal=proposal,
+        summary_lines=_proposal_summary_lines(proposal),
+    )
+
+
+def build_proposal_draft(request: ProposalDraftBuildRequest) -> ProposalDraftBuildResult:
+    """Build and publish one proposal from existing records and explicit details.
+
+    The service never initializes or mutates the records database. Both output
+    artifacts are staged as temporary siblings and exclusively published as one
+    logical operation; any partial publication is rolled back on failure.
+    """
+
+    validation = validate_proposal_draft(request)
+    proposal = validation.proposal
+    output_json_path = request.proposal_input_json_output_path
+    output_docx_path = request.proposal_docx_output_path
+    template_path = request.template_path
 
     staged_paths: list[Path] = []
     created_final_paths: list[Path] = []
@@ -179,7 +204,7 @@ def build_proposal_draft(request: ProposalDraftBuildRequest) -> ProposalDraftBui
         proposal_input=proposal,
         proposal_input_json_path=output_json_path,
         proposal_docx_path=output_docx_path,
-        summary_lines=_proposal_summary_lines(proposal),
+        summary_lines=validation.summary_lines,
     )
 
 
