@@ -63,6 +63,120 @@ class ControllerHarness:
     opened_paths: list[Path]
 
 
+class FakeVariable:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class FakeCombo:
+    def __init__(self, *, values: tuple[str, ...] = (), current: int = -1) -> None:
+        self.values = values
+        self.current_index = current
+
+    def configure(self, **kwargs: object) -> None:
+        if "values" in kwargs:
+            self.values = tuple(kwargs["values"])  # type: ignore[arg-type]
+
+    def current(self, index: int | None = None) -> int:
+        if index is not None:
+            self.current_index = index
+        return self.current_index
+
+
+class FakeText:
+    def __init__(self, content: str = "") -> None:
+        self.content = content
+        self.state = "disabled"
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = str(kwargs["state"])
+
+    def delete(self, _start: str, _end: str) -> None:
+        self.content = ""
+
+    def insert(self, _start: str, value: str) -> None:
+        self.content = value
+
+
+class FakeButton:
+    def __init__(self) -> None:
+        self.state = "disabled"
+
+    def configure(self, **kwargs: object) -> None:
+        if "state" in kwargs:
+            self.state = str(kwargs["state"])
+
+
+class FakeMessagebox:
+    def __init__(self) -> None:
+        self.errors: list[tuple[str, str, object]] = []
+
+    def showerror(self, title: str, message: str, *, parent: object) -> None:
+        self.errors.append((title, message, parent))
+
+
+@dataclass(slots=True)
+class AppHarness:
+    app: proposal_desktop.ProposalDesktopApp
+    customer_combo: FakeCombo
+    job_combo: FakeCombo
+    customer_variable: FakeVariable
+    job_variable: FakeVariable
+    summary_text: FakeText
+    status_variable: FakeVariable
+    generate_button: FakeButton
+    open_buttons: tuple[FakeButton, FakeButton, FakeButton]
+    messagebox: FakeMessagebox
+
+
+def _headless_app(
+    controller: proposal_desktop.ProposalDesktopController,
+) -> AppHarness:
+    app = object.__new__(proposal_desktop.ProposalDesktopApp)
+    customer_combo = FakeCombo(values=controller.customer_display_labels)
+    job_combo = FakeCombo(values=controller.job_display_labels)
+    customer_variable = FakeVariable()
+    job_variable = FakeVariable()
+    summary_text = FakeText("\n".join(controller.validation_summary_lines))
+    status_variable = FakeVariable("Previous successful state")
+    generate_button = FakeButton()
+    open_buttons = (FakeButton(), FakeButton(), FakeButton())
+    messagebox = FakeMessagebox()
+    app.controller = controller
+    app._root = object()
+    app._messagebox = messagebox
+    app._customer_combo = customer_combo
+    app._job_combo = job_combo
+    app._customer_variable = customer_variable
+    app._job_variable = job_variable
+    app._summary_text = summary_text
+    app._status_variable = status_variable
+    app._generate_button = generate_button
+    app._open_json_button, app._open_docx_button, app._open_folder_button = (
+        open_buttons
+    )
+    app._refresh_action_states()
+    return AppHarness(
+        app=app,
+        customer_combo=customer_combo,
+        job_combo=job_combo,
+        customer_variable=customer_variable,
+        job_variable=job_variable,
+        summary_text=summary_text,
+        status_variable=status_variable,
+        generate_button=generate_button,
+        open_buttons=open_buttons,
+        messagebox=messagebox,
+    )
+
+
 def _configured_controller(
     tmp_path: Path,
     *,
@@ -781,6 +895,338 @@ def test_open_actions_are_disabled_before_build_and_open_only_generated_paths(
         result.proposal_docx_path,
         result.proposal_input_json_path.parent,
     ]
+
+
+def test_failed_revalidation_clears_prior_request_summary_and_generation_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    failed_attempts: list[ProposalDraftBuildRequest] = []
+
+    def fail_validation(request: ProposalDraftBuildRequest) -> ProposalDraftValidationResult:
+        failed_attempts.append(request)
+        raise proposal_desktop.DesktopFormError("Synthetic validation failure")
+
+    controller._validation_function = fail_validation
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Synthetic validation"):
+        controller.validate_draft()
+
+    assert len(failed_attempts) == 1
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert controller.validation_summary_lines == ()
+    assert len(harness.build_calls) == 1
+    assert harness.opened_paths == []
+
+
+def test_failed_request_construction_clears_prior_validation_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    controller.state.amount = "not-a-decimal"
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="valid ISO"):
+        controller.validate_draft()
+
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert controller.validation_summary_lines == ()
+    assert len(harness.validation_calls) == 1
+    assert len(harness.build_calls) == 1
+    assert harness.opened_paths == []
+
+
+def test_failed_customer_reload_clears_loaded_records_selections_and_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+
+    def fail_customer_repository(*_args: object, **_kwargs: object) -> Any:
+        raise OSError("Synthetic immutable customer read failure")
+
+    controller._customer_repository_factory = fail_customer_repository
+
+    with pytest.raises(OSError, match="Synthetic immutable"):
+        controller.load_customers()
+
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.validation_summary_lines == ()
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert len(harness.build_calls) == 1
+    assert harness.opened_paths == []
+
+
+def test_failed_customer_transition_clears_selections_jobs_and_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+
+    class FailingJobRepository:
+        def list_jobs_for_customer(self, _customer_id: str) -> list[JobRecord]:
+            raise OSError("Synthetic immutable job read failure")
+
+    controller._job_repository_factory = (
+        lambda *_args, **_kwargs: FailingJobRepository()
+    )
+
+    with pytest.raises(OSError, match="Synthetic immutable"):
+        controller.select_customer("customer-synthetic-002")
+
+    assert len(controller.customers) == 2
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.validation_summary_lines == ()
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert len(harness.build_calls) == 1
+    assert harness.opened_paths == []
+
+
+def test_failed_job_selection_leaves_job_blank_and_generation_disabled(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="loaded for the customer"):
+        controller.select_job("job-stale")
+
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert len(harness.build_calls) == 1
+    assert harness.opened_paths == []
+
+
+def test_failed_rebuild_clears_prior_result_but_preserves_unchanged_validation(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    validated_request = controller.validated_request
+    failed_attempts: list[ProposalDraftBuildRequest] = []
+
+    def fail_build(request: ProposalDraftBuildRequest) -> ProposalDraftBuildResult:
+        failed_attempts.append(request)
+        raise proposal_desktop.DesktopFormError("Synthetic build failure")
+
+    controller._build_function = fail_build
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Synthetic build"):
+        controller.generate_draft()
+
+    assert failed_attempts == [validated_request]
+    assert failed_attempts[0] is validated_request
+    assert controller.validated_request is validated_request
+    assert controller.generation_enabled is True
+    assert controller.build_result is None
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+
+
+def test_sidecar_customer_reload_failure_revokes_validation_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _configure_real_validation_controller(tmp_path, monkeypatch)
+    controller.validate_draft()
+    database_path = Path(controller.state.database_path)
+    database_before = _database_hash(database_path)
+    sidecar = Path(f"{database_path}-wal")
+    sidecar.write_bytes(b"synthetic-existing-sidecar")
+
+    with pytest.raises(Exception):
+        controller.load_customers()
+
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert _database_hash(database_path) == database_before
+    assert sidecar.read_bytes() == b"synthetic-existing-sidecar"
+    assert not Path(controller.state.output_folder).exists()
+
+
+def test_gui_validation_failure_clears_summary_and_disables_all_actions(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    app_harness = _headless_app(controller)
+
+    def fail_validation(
+        _request: ProposalDraftBuildRequest,
+    ) -> ProposalDraftValidationResult:
+        raise proposal_desktop.DesktopFormError("Synthetic validation failure")
+
+    controller._validation_function = fail_validation
+
+    app_harness.app._validate()
+
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.value.startswith("Validation failed")
+    assert app_harness.generate_button.state == "disabled"
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert len(app_harness.messagebox.errors) == 1
+    assert controller.validated_request is None
+    assert harness.opened_paths == []
+    assert len(harness.build_calls) == 1
+
+
+def test_gui_customer_reload_failure_clears_customer_and_job_combos(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(0)
+    app_harness.job_combo.current(0)
+    app_harness.customer_variable.set("Synthetic Customer")
+    app_harness.job_variable.set("Synthetic Tank Project")
+
+    def fail_customer_repository(*_args: object, **_kwargs: object) -> Any:
+        raise OSError("Synthetic immutable customer read failure")
+
+    controller._customer_repository_factory = fail_customer_repository
+
+    app_harness.app._load_customers()
+
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.customer_combo.current() == -1
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert app_harness.summary_text.content == ""
+    assert app_harness.generate_button.state == "disabled"
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+
+
+def test_gui_customer_selection_failure_clears_customer_and_job_combos(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(1)
+    app_harness.job_combo.current(0)
+    app_harness.customer_variable.set("Synthetic Customer")
+    app_harness.job_variable.set("Synthetic Tank Project")
+
+    class FailingJobRepository:
+        def list_jobs_for_customer(self, _customer_id: str) -> list[JobRecord]:
+            raise OSError("Synthetic immutable job read failure")
+
+    controller._job_repository_factory = (
+        lambda *_args, **_kwargs: FailingJobRepository()
+    )
+
+    app_harness.app._on_customer_selected()
+
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.customer_combo.current() == -1
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert app_harness.generate_button.state == "disabled"
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+
+
+def test_gui_job_selection_failure_clears_job_combo_and_generation_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.job_combo.current(99)
+    app_harness.job_variable.set("Stale Synthetic Job")
+
+    app_harness.app._on_job_selected()
+
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert app_harness.generate_button.state == "disabled"
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+
+
+def test_gui_failed_rebuild_clears_prior_paths_and_disables_open_actions(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    result = controller.generate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.status_variable.set(str(result.proposal_docx_path))
+
+    def fail_build(_request: ProposalDraftBuildRequest) -> ProposalDraftBuildResult:
+        raise proposal_desktop.DesktopFormError("Synthetic build failure")
+
+    controller._build_function = fail_build
+
+    app_harness.app._generate()
+
+    assert controller.build_result is None
+    assert controller.generation_enabled is True
+    assert app_harness.status_variable.value.startswith("Generation failed")
+    assert str(result.proposal_docx_path) not in app_harness.status_variable.value
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.opened_paths == []
 
 
 def test_controller_construction_and_state_editing_have_no_side_effects(

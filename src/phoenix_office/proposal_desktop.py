@@ -331,6 +331,11 @@ class ProposalDesktopController:
         return output_folder, output_json, output_docx
 
     def load_customers(self) -> tuple[CustomerRecord, ...]:
+        self._customers = ()
+        self._jobs = ()
+        self.state.selected_customer_id = ""
+        self.state.selected_job_id = ""
+        self._invalidate_validation()
         database_path = self._required_path("Records Database", self.state.database_path)
         self._reject_git_worktree_path("Records Database", database_path)
         repository = self._customer_repository_factory(
@@ -340,18 +345,14 @@ class ProposalDesktopController:
         )
         customers = tuple(repository.list_customers())
         self._customers = customers
-        self._jobs = ()
-        self.state.selected_customer_id = ""
-        self.state.selected_job_id = ""
-        self._invalidate_validation()
         return customers
 
     def select_customer(self, customer_id: str) -> tuple[JobRecord, ...]:
+        self.state.selected_customer_id = ""
+        self.state.selected_job_id = ""
+        self._jobs = ()
+        self._invalidate_validation()
         if not customer_id:
-            self.state.selected_customer_id = ""
-            self.state.selected_job_id = ""
-            self._jobs = ()
-            self._invalidate_validation()
             return ()
         if not any(customer.customer_id == customer_id for customer in self._customers):
             raise DesktopFormError("Select an existing customer loaded from the database.")
@@ -368,15 +369,13 @@ class ProposalDesktopController:
             raise DesktopFormError("Loaded job does not belong to the selected customer.")
 
         self.state.selected_customer_id = customer_id
-        self.state.selected_job_id = ""
         self._jobs = jobs
-        self._invalidate_validation()
         return jobs
 
     def select_job(self, job_id: str) -> None:
+        self.state.selected_job_id = ""
+        self._invalidate_validation()
         if not job_id:
-            self.state.selected_job_id = ""
-            self._invalidate_validation()
             return
         selected_job = next((job for job in self._jobs if job.job_id == job_id), None)
         if selected_job is None:
@@ -384,7 +383,6 @@ class ProposalDesktopController:
         if selected_job.customer_id != self.state.selected_customer_id:
             raise DesktopFormError("Selected job does not belong to the selected customer.")
         self.state.selected_job_id = job_id
-        self._invalidate_validation()
 
     def set_scope_description(self, index: int, description: str) -> None:
         self._require_scope_index(index)
@@ -512,16 +510,17 @@ class ProposalDesktopController:
         )
 
     def validate_draft(self) -> ProposalDraftValidationResult:
+        self._invalidate_validation()
         snapshot = self.snapshot()
         request = self.create_request()
         result = self._validation_function(request)
         self._validated_request = request
         self._validated_snapshot = snapshot
         self._validation_result = result
-        self._build_result = None
         return result
 
     def generate_draft(self) -> ProposalDraftBuildResult:
+        self._build_result = None
         request = self._validated_request
         snapshot = self._validated_snapshot
         if request is None or snapshot is None:
@@ -1086,6 +1085,8 @@ class ProposalDesktopApp:
             self._job_combo.current(-1)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._clear_customer_and_job_widgets()
+            self._show_invalidated_state()
             self._show_error(exc)
 
     def _on_customer_selected(self, _event: object = None) -> None:
@@ -1093,6 +1094,9 @@ class ProposalDesktopApp:
             index = self._customer_combo.current()
             if index < 0:
                 self.controller.select_customer("")
+            elif index >= len(self.controller.customers):
+                self.controller.select_customer("")
+                raise DesktopFormError("Select an existing loaded customer.")
             else:
                 customer_id = self.controller.customers[index].customer_id
                 self.controller.select_customer(customer_id)
@@ -1101,15 +1105,26 @@ class ProposalDesktopApp:
             self._job_combo.current(-1)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._clear_customer_and_job_widgets()
+            self._show_invalidated_state()
             self._show_error(exc)
 
     def _on_job_selected(self, _event: object = None) -> None:
         try:
             index = self._job_combo.current()
-            job_id = self.controller.jobs[index].job_id if index >= 0 else ""
+            if index < 0:
+                job_id = ""
+            elif index >= len(self.controller.jobs):
+                self.controller.select_job("")
+                raise DesktopFormError("Select an existing loaded job.")
+            else:
+                job_id = self.controller.jobs[index].job_id
             self.controller.select_job(job_id)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._job_variable.set("")
+            self._job_combo.current(-1)
+            self._show_invalidated_state()
             self._show_error(exc)
 
     def _validate(self) -> None:
@@ -1119,6 +1134,9 @@ class ProposalDesktopApp:
             self._status_variable.set("Validation passed. Generation is enabled.")
             self._refresh_action_states()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._set_summary(())
+            self._status_variable.set("Validation failed; review the error and revalidate.")
+            self._refresh_action_states()
             self._show_error(exc)
 
     def _generate(self) -> None:
@@ -1130,6 +1148,10 @@ class ProposalDesktopApp:
             )
             self._refresh_action_states()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._status_variable.set(
+                "Generation failed; the unchanged validated draft may be retried."
+            )
+            self._refresh_action_states()
             self._show_error(exc)
 
     def _open_json(self) -> None:
@@ -1151,6 +1173,14 @@ class ProposalDesktopApp:
         self._set_summary(())
         self._status_variable.set("Draft changed; validation required.")
         self._refresh_action_states()
+
+    def _clear_customer_and_job_widgets(self) -> None:
+        self._customer_combo.configure(values=())
+        self._customer_variable.set("")
+        self._customer_combo.current(-1)
+        self._job_combo.configure(values=())
+        self._job_variable.set("")
+        self._job_combo.current(-1)
 
     def _set_summary(self, lines: tuple[str, ...]) -> None:
         self._summary_text.configure(state="normal")
