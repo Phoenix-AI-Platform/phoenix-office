@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 import phoenix_office.proposal_build as proposal_build
 import phoenix_office.proposal_desktop as proposal_desktop
@@ -1058,6 +1060,241 @@ def test_failed_rebuild_clears_prior_result_but_preserves_unchanged_validation(
     assert harness.opened_paths == []
 
 
+@pytest.mark.parametrize(
+    ("label", "state_field"),
+    [
+        ("Records Database", "database_path"),
+        ("DOCX Template", "template_path"),
+        ("Output Root", "output_root"),
+        ("Output Folder", "output_folder"),
+        ("Proposal Input JSON", "proposal_input_json_output_path"),
+        ("Proposal DOCX", "proposal_docx_output_path"),
+    ],
+)
+def test_pre_build_worktree_recheck_covers_every_selected_path_and_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    state_field: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    blocked_path = Path(getattr(controller.state, state_field)).resolve(strict=False)
+    checked_paths: list[Path] = []
+
+    def detect_selected_worktree(path: Path) -> bool:
+        resolved = path.resolve(strict=False)
+        checked_paths.append(resolved)
+        return resolved == blocked_path
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "is_path_inside_git_worktree",
+        detect_selected_worktree,
+    )
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match=label):
+        controller.generate_draft()
+
+    assert blocked_path in checked_paths
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+    assert not Path(controller.state.proposal_input_json_output_path).exists()
+    assert not Path(controller.state.proposal_docx_output_path).exists()
+
+
+def test_stable_private_paths_are_all_rechecked_before_exact_request_is_built(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    validated_request = controller.validated_request
+    checked_paths: list[Path] = []
+
+    def record_private_path(path: Path) -> bool:
+        checked_paths.append(path)
+        return False
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "is_path_inside_git_worktree",
+        record_private_path,
+    )
+
+    controller.generate_draft()
+
+    assert checked_paths == [
+        Path(controller.state.database_path),
+        Path(controller.state.template_path),
+        Path(controller.state.output_root),
+        Path(controller.state.output_folder),
+        Path(controller.state.proposal_input_json_output_path),
+        Path(controller.state.proposal_docx_output_path),
+    ]
+    assert harness.build_calls == [validated_request]
+    assert harness.build_calls[0] is validated_request
+
+
+def test_dot_git_directory_appearing_after_validation_blocks_generation(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    output_root = Path(controller.state.output_root)
+    (output_root / ".git").mkdir(parents=True)
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Output Root"):
+        controller.generate_draft()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert not Path(controller.state.output_folder).exists()
+    assert not Path(controller.state.proposal_input_json_output_path).exists()
+    assert not Path(controller.state.proposal_docx_output_path).exists()
+    assert harness.opened_paths == []
+
+
+def test_dot_git_file_appearing_after_validation_blocks_generation(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    output_root = Path(controller.state.output_root)
+    output_root.mkdir(parents=True)
+    (output_root / ".git").write_text("gitdir: ../synthetic-metadata", encoding="utf-8")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Output Root"):
+        controller.generate_draft()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert not Path(controller.state.output_folder).exists()
+    assert not Path(controller.state.proposal_input_json_output_path).exists()
+    assert not Path(controller.state.proposal_docx_output_path).exists()
+    assert harness.opened_paths == []
+
+
+def test_symlink_ancestry_retarget_after_validation_blocks_generation(
+    tmp_path: Path,
+) -> None:
+    private_target = tmp_path / "private-target"
+    worktree_target = tmp_path / "worktree-target"
+    private_target.mkdir()
+    (worktree_target / ".git").mkdir(parents=True)
+    selected_root = tmp_path / "selected-root"
+    try:
+        os.symlink(private_target, selected_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.propose_output_paths(selected_root)
+    controller.validate_draft()
+    selected_root.unlink()
+    try:
+        os.symlink(worktree_target, selected_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Directory symlink retargeting is unavailable: {exc}")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Output Root"):
+        controller.generate_draft()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert not Path(controller.state.output_folder).exists()
+    assert harness.opened_paths == []
+
+
+@pytest.mark.parametrize(
+    "amount_text",
+    ["Infinity", "+Infinity", "-Infinity", "NaN", "-NaN", "sNaN"],
+)
+def test_non_finite_amounts_fail_before_validation_or_build(
+    tmp_path: Path,
+    amount_text: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_text_field("amount", amount_text)
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="finite decimal"):
+        controller.validate_draft()
+
+    assert harness.validation_calls == []
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+
+
+@pytest.mark.parametrize("amount_text", ["125", "125.00", "0.01", "417.25"])
+def test_finite_positive_amounts_reach_validation_unchanged(
+    tmp_path: Path,
+    amount_text: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_text_field("amount", amount_text)
+
+    controller.validate_draft()
+
+    assert len(harness.validation_calls) == 1
+    assert harness.validation_calls[0].details.pricing.amount == Decimal(amount_text)
+    assert harness.build_calls == []
+    assert controller.generation_enabled is True
+
+
+@pytest.mark.parametrize("amount_text", ["0", "-0.01"])
+def test_finite_non_positive_amounts_remain_model_validation_failures(
+    tmp_path: Path,
+    amount_text: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    harness.controller.set_text_field("amount", amount_text)
+
+    with pytest.raises(ValidationError):
+        harness.controller.validate_draft()
+
+    assert harness.validation_calls == []
+    assert harness.build_calls == []
+    assert harness.controller.generation_enabled is False
+
+
+def test_malformed_amount_remains_an_explicit_decimal_parse_failure(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    harness.controller.set_text_field("amount", "not-a-decimal")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="valid ISO"):
+        harness.controller.validate_draft()
+
+    assert harness.validation_calls == []
+    assert harness.build_calls == []
+    assert harness.controller.generation_enabled is False
+
+
 def test_sidecar_customer_reload_failure_revokes_validation_without_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1224,6 +1461,35 @@ def test_gui_failed_rebuild_clears_prior_paths_and_disables_open_actions(
     assert controller.generation_enabled is True
     assert app_harness.status_variable.value.startswith("Generation failed")
     assert str(result.proposal_docx_path) not in app_harness.status_variable.value
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.opened_paths == []
+
+
+def test_gui_worktree_change_failure_requires_revalidation_and_clears_summary(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    previous_path_text = str(Path(controller.state.proposal_docx_output_path))
+    app_harness.status_variable.set(previous_path_text)
+    output_root = Path(controller.state.output_root)
+    (output_root / ".git").mkdir(parents=True)
+
+    app_harness.app._generate()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.value == (
+        "Generation blocked; revalidation is required."
+    )
+    assert previous_path_text not in app_harness.status_variable.value
+    assert app_harness.generate_button.state == "disabled"
     assert all(button.state == "disabled" for button in app_harness.open_buttons)
     assert len(app_harness.messagebox.errors) == 1
     assert harness.opened_paths == []

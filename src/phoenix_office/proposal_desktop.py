@@ -447,6 +447,8 @@ class ProposalDesktopController:
             amount = Decimal(amount_text)
         except (ValueError, ArithmeticError) as exc:
             raise DesktopFormError("Enter a valid ISO proposal date and decimal amount.") from exc
+        if not amount.is_finite():
+            raise DesktopFormError("Pricing Amount must be a finite decimal value.")
 
         return RecordProposalDetails(
             proposal_date=proposal_date,
@@ -528,6 +530,7 @@ class ProposalDesktopController:
         if snapshot != self.snapshot():
             self._invalidate_validation()
             raise DesktopFormError("Draft inputs changed; revalidate before generation.")
+        self._recheck_selected_paths_before_build()
         result = self._build_function(request)
         self._build_result = result
         return result
@@ -589,6 +592,19 @@ class ProposalDesktopController:
         if self._build_result is None:
             raise DesktopFormError("Generate the proposal draft before opening artifacts.")
         return self._build_result
+
+    def _recheck_selected_paths_before_build(self) -> None:
+        for label, path in self._selected_paths().items():
+            try:
+                self._reject_git_worktree_path(label, path)
+            except DesktopFormError:
+                self._invalidate_validation()
+                raise
+            except (OSError, RuntimeError) as exc:
+                self._invalidate_validation()
+                raise DesktopFormError(
+                    f"{label} ancestry could not be verified; revalidation is required."
+                ) from exc
 
     def _invalidate_validation(self) -> None:
         self._validated_request = None
@@ -1148,9 +1164,15 @@ class ProposalDesktopApp:
             )
             self._refresh_action_states()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            self._status_variable.set(
-                "Generation failed; the unchanged validated draft may be retried."
-            )
+            if self.controller.validated_request is None:
+                self._set_summary(())
+                self._status_variable.set(
+                    "Generation blocked; revalidation is required."
+                )
+            else:
+                self._status_variable.set(
+                    "Generation failed; the unchanged validated draft may be retried."
+                )
             self._refresh_action_states()
             self._show_error(exc)
 
