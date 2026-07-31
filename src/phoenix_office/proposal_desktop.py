@@ -8,6 +8,7 @@ filesystem, database, process, or window side effects.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -89,6 +90,38 @@ class DesktopFormSnapshot:
     total_label: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedResolvedPaths:
+    """Private resolved locations associated with one successful validation."""
+
+    records_database: Path
+    docx_template: Path
+    output_root: Path
+    output_folder: Path
+    proposal_input_json: Path
+    proposal_docx: Path
+
+    def labeled_paths(self) -> tuple[tuple[str, Path], ...]:
+        return (
+            ("Records Database", self.records_database),
+            ("DOCX Template", self.docx_template),
+            ("Output Root", self.output_root),
+            ("Output Folder", self.output_folder),
+            ("Proposal Input JSON", self.proposal_input_json),
+            ("Proposal DOCX", self.proposal_docx),
+        )
+
+    def first_mismatch(self, other: _ValidatedResolvedPaths) -> str | None:
+        for (label, expected), (_, current) in zip(
+            self.labeled_paths(),
+            other.labeled_paths(),
+            strict=True,
+        ):
+            if current != expected:
+                return label
+        return None
+
+
 @dataclass(slots=True)
 class DesktopFormState:
     """Mutable controller state containing only explicit local form values."""
@@ -165,22 +198,32 @@ def _open_local_path(path: Path) -> None:
     )
 
 
-def _path_search_start(path: Path) -> Path:
+def _inspect_git_worktree_ancestry(path: Path) -> tuple[Path, bool]:
+    """Resolve one selected path and inspect only its ancestor chain."""
+
     resolved = path.expanduser().resolve(strict=False)
-    if resolved.exists() and resolved.is_dir():
-        return resolved
-    return resolved.parent
+    try:
+        selected_metadata = resolved.stat()
+    except FileNotFoundError:
+        start = resolved.parent
+    else:
+        start = resolved if stat.S_ISDIR(selected_metadata.st_mode) else resolved.parent
+
+    for directory in (start, *start.parents):
+        marker = directory / ".git"
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            continue
+        return resolved, True
+    return resolved, False
 
 
 def is_path_inside_git_worktree(path: Path) -> bool:
     """Check only the selected path's directory and ancestor chain for ``.git``."""
 
-    start = _path_search_start(path)
-    for directory in (start, *start.parents):
-        marker = directory / ".git"
-        if marker.is_dir() or marker.is_file():
-            return True
-    return False
+    _, inside_worktree = _inspect_git_worktree_ancestry(path)
+    return inside_worktree
 
 
 def propose_identity_free_output_paths(
@@ -225,6 +268,7 @@ class ProposalDesktopController:
         self._jobs: tuple[JobRecord, ...] = ()
         self._validated_request: ProposalDraftBuildRequest | None = None
         self._validated_snapshot: DesktopFormSnapshot | None = None
+        self._validated_resolved_paths: _ValidatedResolvedPaths | None = None
         self._validation_result: ProposalDraftValidationResult | None = None
         self._build_result: ProposalDraftBuildResult | None = None
 
@@ -266,6 +310,7 @@ class ProposalDesktopController:
         return (
             self._validated_request is not None
             and self._validated_snapshot is not None
+            and self._validated_resolved_paths is not None
             and self._validated_snapshot == self.snapshot()
         )
 
@@ -492,14 +537,6 @@ class ProposalDesktopController:
             raise DesktopFormError("Selected job does not belong to the selected customer.")
 
         paths = self._selected_paths()
-        for label, path in paths.items():
-            self._reject_git_worktree_path(label, path)
-
-        output_folder = paths["Output Folder"].resolve(strict=False)
-        if paths["Proposal Input JSON"].resolve(strict=False).parent != output_folder:
-            raise DesktopFormError("Proposal Input JSON must be inside the output folder.")
-        if paths["Proposal DOCX"].resolve(strict=False).parent != output_folder:
-            raise DesktopFormError("Proposal DOCX must be inside the output folder.")
 
         return ProposalDraftBuildRequest(
             customer_id=selected_customer.customer_id,
@@ -515,9 +552,18 @@ class ProposalDesktopController:
         self._invalidate_validation()
         snapshot = self.snapshot()
         request = self.create_request()
+        resolved_paths_before = self._resolve_and_check_selected_paths()
+        self._require_outputs_inside_resolved_folder(resolved_paths_before)
         result = self._validation_function(request)
+        resolved_paths_after = self._resolve_and_check_selected_paths()
+        mismatch = resolved_paths_before.first_mismatch(resolved_paths_after)
+        if mismatch is not None:
+            raise DesktopFormError(
+                f"{mismatch} resolved location changed; revalidation is required."
+            )
         self._validated_request = request
         self._validated_snapshot = snapshot
+        self._validated_resolved_paths = resolved_paths_after
         self._validation_result = result
         return result
 
@@ -525,12 +571,23 @@ class ProposalDesktopController:
         self._build_result = None
         request = self._validated_request
         snapshot = self._validated_snapshot
-        if request is None or snapshot is None:
+        resolved_paths = self._validated_resolved_paths
+        if request is None or snapshot is None or resolved_paths is None:
             raise DesktopFormError("Validate the current draft before generation.")
         if snapshot != self.snapshot():
             self._invalidate_validation()
             raise DesktopFormError("Draft inputs changed; revalidate before generation.")
-        self._recheck_selected_paths_before_build()
+        try:
+            current_resolved_paths = self._resolve_and_check_selected_paths()
+        except DesktopFormError:
+            self._invalidate_validation()
+            raise
+        mismatch = resolved_paths.first_mismatch(current_resolved_paths)
+        if mismatch is not None:
+            self._invalidate_validation()
+            raise DesktopFormError(
+                f"{mismatch} resolved location changed; revalidation is required."
+            )
         result = self._build_function(request)
         self._build_result = result
         return result
@@ -581,8 +638,44 @@ class ProposalDesktopController:
 
     @staticmethod
     def _reject_git_worktree_path(label: str, path: Path) -> None:
-        if is_path_inside_git_worktree(path):
+        try:
+            _, inside_worktree = _inspect_git_worktree_ancestry(path)
+        except (OSError, RuntimeError) as exc:
+            raise DesktopFormError(
+                f"{label} ancestry could not be verified; revalidation is required."
+            ) from exc
+        if inside_worktree:
             raise DesktopFormError(f"{label} must be outside every Git worktree.")
+
+    def _resolve_and_check_selected_paths(self) -> _ValidatedResolvedPaths:
+        resolved: dict[str, Path] = {}
+        for label, path in self._selected_paths().items():
+            try:
+                resolved_path, inside_worktree = _inspect_git_worktree_ancestry(path)
+            except (OSError, RuntimeError) as exc:
+                raise DesktopFormError(
+                    f"{label} ancestry could not be verified; revalidation is required."
+                ) from exc
+            if inside_worktree:
+                raise DesktopFormError(f"{label} must be outside every Git worktree.")
+            resolved[label] = resolved_path
+        return _ValidatedResolvedPaths(
+            records_database=resolved["Records Database"],
+            docx_template=resolved["DOCX Template"],
+            output_root=resolved["Output Root"],
+            output_folder=resolved["Output Folder"],
+            proposal_input_json=resolved["Proposal Input JSON"],
+            proposal_docx=resolved["Proposal DOCX"],
+        )
+
+    @staticmethod
+    def _require_outputs_inside_resolved_folder(
+        resolved_paths: _ValidatedResolvedPaths,
+    ) -> None:
+        if resolved_paths.proposal_input_json.parent != resolved_paths.output_folder:
+            raise DesktopFormError("Proposal Input JSON must be inside the output folder.")
+        if resolved_paths.proposal_docx.parent != resolved_paths.output_folder:
+            raise DesktopFormError("Proposal DOCX must be inside the output folder.")
 
     def _require_scope_index(self, index: int) -> None:
         if index < 0 or index >= len(self.state.scope_descriptions):
@@ -593,22 +686,10 @@ class ProposalDesktopController:
             raise DesktopFormError("Generate the proposal draft before opening artifacts.")
         return self._build_result
 
-    def _recheck_selected_paths_before_build(self) -> None:
-        for label, path in self._selected_paths().items():
-            try:
-                self._reject_git_worktree_path(label, path)
-            except DesktopFormError:
-                self._invalidate_validation()
-                raise
-            except (OSError, RuntimeError) as exc:
-                self._invalidate_validation()
-                raise DesktopFormError(
-                    f"{label} ancestry could not be verified; revalidation is required."
-                ) from exc
-
     def _invalidate_validation(self) -> None:
         self._validated_request = None
         self._validated_snapshot = None
+        self._validated_resolved_paths = None
         self._validation_result = None
         self._build_result = None
 

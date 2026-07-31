@@ -464,7 +464,7 @@ def test_selected_template_and_output_targets_inside_git_worktree_are_rejected(
         proposal_desktop.DesktopFormError,
         match="outside every Git worktree",
     ):
-        harness.controller.create_request()
+        harness.controller.validate_draft()
 
 
 def test_customer_repository_is_non_initializing_read_only_and_selects_nothing(
@@ -837,6 +837,7 @@ def test_every_relevant_change_immediately_invalidates_successful_validation(
 
     assert controller.generation_enabled is False
     assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
     assert controller.validation_summary_lines == ()
     assert controller.open_actions_enabled is False
 
@@ -920,6 +921,7 @@ def test_failed_revalidation_clears_prior_request_summary_and_generation_authori
     assert len(failed_attempts) == 1
     assert controller.validated_request is None
     assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
     assert controller._validation_result is None
     assert controller.build_result is None
     assert controller.generation_enabled is False
@@ -943,6 +945,7 @@ def test_failed_request_construction_clears_prior_validation_authority(
 
     assert controller.validated_request is None
     assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
     assert controller._validation_result is None
     assert controller.build_result is None
     assert controller.generation_enabled is False
@@ -974,6 +977,7 @@ def test_failed_customer_reload_clears_loaded_records_selections_and_authority(
     assert controller.state.selected_customer_id == ""
     assert controller.state.selected_job_id == ""
     assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
     assert controller.validation_summary_lines == ()
     assert controller.generation_enabled is False
     assert controller.open_actions_enabled is False
@@ -1005,6 +1009,7 @@ def test_failed_customer_transition_clears_selections_jobs_and_authority(
     assert controller.state.selected_customer_id == ""
     assert controller.state.selected_job_id == ""
     assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
     assert controller.validation_summary_lines == ()
     assert controller.generation_enabled is False
     assert controller.open_actions_enabled is False
@@ -1026,6 +1031,7 @@ def test_failed_job_selection_leaves_job_blank_and_generation_disabled(
     assert controller.state.selected_customer_id == "customer-synthetic-001"
     assert controller.state.selected_job_id == ""
     assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
     assert controller.generation_enabled is False
     assert controller.open_actions_enabled is False
     assert len(harness.build_calls) == 1
@@ -1040,6 +1046,7 @@ def test_failed_rebuild_clears_prior_result_but_preserves_unchanged_validation(
     controller.validate_draft()
     controller.generate_draft()
     validated_request = controller.validated_request
+    validated_resolved_paths = controller._validated_resolved_paths
     failed_attempts: list[ProposalDraftBuildRequest] = []
 
     def fail_build(request: ProposalDraftBuildRequest) -> ProposalDraftBuildResult:
@@ -1054,6 +1061,7 @@ def test_failed_rebuild_clears_prior_result_but_preserves_unchanged_validation(
     assert failed_attempts == [validated_request]
     assert failed_attempts[0] is validated_request
     assert controller.validated_request is validated_request
+    assert controller._validated_resolved_paths is validated_resolved_paths
     assert controller.generation_enabled is True
     assert controller.build_result is None
     assert controller.open_actions_enabled is False
@@ -1083,14 +1091,14 @@ def test_pre_build_worktree_recheck_covers_every_selected_path_and_fails_closed(
     blocked_path = Path(getattr(controller.state, state_field)).resolve(strict=False)
     checked_paths: list[Path] = []
 
-    def detect_selected_worktree(path: Path) -> bool:
+    def detect_selected_worktree(path: Path) -> tuple[Path, bool]:
         resolved = path.resolve(strict=False)
         checked_paths.append(resolved)
-        return resolved == blocked_path
+        return resolved, resolved == blocked_path
 
     monkeypatch.setattr(
         proposal_desktop,
-        "is_path_inside_git_worktree",
+        "_inspect_git_worktree_ancestry",
         detect_selected_worktree,
     )
 
@@ -1121,13 +1129,13 @@ def test_stable_private_paths_are_all_rechecked_before_exact_request_is_built(
     validated_request = controller.validated_request
     checked_paths: list[Path] = []
 
-    def record_private_path(path: Path) -> bool:
+    def record_private_path(path: Path) -> tuple[Path, bool]:
         checked_paths.append(path)
-        return False
+        return path.resolve(strict=False), False
 
     monkeypatch.setattr(
         proposal_desktop,
-        "is_path_inside_git_worktree",
+        "_inspect_git_worktree_ancestry",
         record_private_path,
     )
 
@@ -1143,6 +1151,456 @@ def test_stable_private_paths_are_all_rechecked_before_exact_request_is_built(
     ]
     assert harness.build_calls == [validated_request]
     assert harness.build_calls[0] is validated_request
+
+
+def test_validation_captures_all_resolved_paths_before_and_after_one_service_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+    original_validation = controller._validation_function
+    events: list[str] = []
+    inspected_paths: list[Path] = []
+
+    def inspect_path(path: Path) -> tuple[Path, bool]:
+        events.append("path")
+        inspected_paths.append(path)
+        return original_inspect(path)
+
+    def validate_once(
+        request: ProposalDraftBuildRequest,
+    ) -> ProposalDraftValidationResult:
+        events.append("validation")
+        return original_validation(request)
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        inspect_path,
+    )
+    controller._validation_function = validate_once
+
+    controller.validate_draft()
+
+    selected_paths = list(controller._selected_paths().values())
+    assert events == ["path"] * 6 + ["validation"] + ["path"] * 6
+    assert inspected_paths == selected_paths + selected_paths
+    assert len(harness.validation_calls) == 1
+    resolved_paths = controller._validated_resolved_paths
+    assert resolved_paths is not None
+    assert tuple(label for label, _ in resolved_paths.labeled_paths()) == (
+        "Records Database",
+        "DOCX Template",
+        "Output Root",
+        "Output Folder",
+        "Proposal Input JSON",
+        "Proposal DOCX",
+    )
+    assert tuple(path for _, path in resolved_paths.labeled_paths()) == tuple(
+        path.resolve(strict=False) for path in selected_paths
+    )
+
+
+def test_resolved_path_change_during_validation_discards_result_and_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+    template_path = Path(controller.state.template_path)
+    template_inspections = 0
+
+    def retarget_during_validation(path: Path) -> tuple[Path, bool]:
+        nonlocal template_inspections
+        resolved, inside_worktree = original_inspect(path)
+        if path == template_path:
+            template_inspections += 1
+            if template_inspections == 2:
+                return resolved.with_name("retargeted-template.docx"), False
+        return resolved, inside_worktree
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        retarget_during_validation,
+    )
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="DOCX Template resolved location changed",
+    ):
+        controller.validate_draft()
+
+    assert len(harness.validation_calls) == 1
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+
+
+def test_metadata_failure_after_validation_service_discards_returned_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+    original_validation = controller._validation_function
+    validation_returned = False
+    template_path = Path(controller.state.template_path)
+
+    def validate_once(
+        request: ProposalDraftBuildRequest,
+    ) -> ProposalDraftValidationResult:
+        nonlocal validation_returned
+        result = original_validation(request)
+        validation_returned = True
+        return result
+
+    def fail_after_validation(path: Path) -> tuple[Path, bool]:
+        if validation_returned and path == template_path:
+            raise OSError("synthetic post-validation metadata failure")
+        return original_inspect(path)
+
+    controller._validation_function = validate_once
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        fail_after_validation,
+    )
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="DOCX Template ancestry could not be verified",
+    ):
+        controller.validate_draft()
+
+    assert validation_returned is True
+    assert len(harness.validation_calls) == 1
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+
+
+@pytest.mark.parametrize(
+    ("label", "state_field"),
+    [
+        ("Records Database", "database_path"),
+        ("DOCX Template", "template_path"),
+        ("Output Root", "output_root"),
+        ("Output Folder", "output_folder"),
+        ("Proposal Input JSON", "proposal_input_json_output_path"),
+        ("Proposal DOCX", "proposal_docx_output_path"),
+    ],
+)
+def test_cross_platform_resolved_path_mismatch_revokes_all_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    state_field: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+    selected_path = Path(getattr(controller.state, state_field))
+
+    def retarget_selected_path(path: Path) -> tuple[Path, bool]:
+        resolved, inside_worktree = original_inspect(path)
+        if path == selected_path:
+            return resolved.with_name(f"retargeted-{resolved.name}"), False
+        return resolved, inside_worktree
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        retarget_selected_path,
+    )
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match=rf"{label} resolved location changed",
+    ):
+        controller.generate_draft()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+    assert not Path(controller.state.proposal_input_json_output_path).exists()
+    assert not Path(controller.state.proposal_docx_output_path).exists()
+
+
+def test_selected_path_metadata_errors_propagate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_path = tmp_path / "selected-private-file"
+    selected_path.write_text("synthetic", encoding="utf-8")
+    resolved_path = selected_path.resolve(strict=False)
+    original_stat = Path.stat
+
+    def fail_selected_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        if path == resolved_path:
+            raise PermissionError("synthetic private metadata denial")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_selected_stat)
+
+    with pytest.raises(PermissionError, match="synthetic private metadata"):
+        proposal_desktop._inspect_git_worktree_ancestry(selected_path)
+
+
+def test_selected_path_transient_metadata_errors_propagate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_path = tmp_path / "selected-private-file"
+    selected_path.write_text("synthetic", encoding="utf-8")
+    resolved_path = selected_path.resolve(strict=False)
+    original_stat = Path.stat
+
+    def fail_selected_stat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        if path == resolved_path:
+            raise OSError("synthetic transient metadata failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_selected_stat)
+
+    with pytest.raises(OSError, match="synthetic transient metadata"):
+        proposal_desktop._inspect_git_worktree_ancestry(selected_path)
+
+
+def test_resolution_runtime_error_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_path = tmp_path / "selected-private-file"
+    original_resolve = Path.resolve
+
+    def fail_selected_resolution(path: Path, strict: bool = False) -> Path:
+        if path == selected_path:
+            raise RuntimeError("synthetic symlink loop")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fail_selected_resolution)
+
+    with pytest.raises(RuntimeError, match="synthetic symlink loop"):
+        proposal_desktop._inspect_git_worktree_ancestry(selected_path)
+
+
+@pytest.mark.parametrize(
+    "metadata_error",
+    [
+        PermissionError("synthetic marker permission failure"),
+        OSError("synthetic marker transient failure"),
+    ],
+)
+def test_dot_git_metadata_errors_propagate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_error: OSError,
+) -> None:
+    selected_path = tmp_path / "selected-private-file"
+    selected_path.write_text("synthetic", encoding="utf-8")
+    marker = selected_path.parent.resolve(strict=False) / ".git"
+    original_lstat = Path.lstat
+
+    def fail_marker_lstat(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        if path == marker:
+            raise metadata_error
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", fail_marker_lstat)
+
+    with pytest.raises(type(metadata_error), match="synthetic marker"):
+        proposal_desktop._inspect_git_worktree_ancestry(selected_path)
+
+
+def test_any_existing_dot_git_entry_is_conservatively_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_path = tmp_path / "selected-private-file"
+    selected_path.write_text("synthetic", encoding="utf-8")
+    marker = selected_path.parent.resolve(strict=False) / ".git"
+    original_lstat = Path.lstat
+
+    def report_other_marker(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        if path == marker:
+            return SimpleNamespace(st_mode=0)  # type: ignore[return-value]
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", report_other_marker)
+
+    assert proposal_desktop.is_path_inside_git_worktree(selected_path) is True
+
+
+def test_missing_dot_git_marker_continues_only_up_the_ancestor_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_path = tmp_path / "child" / "selected-private-file"
+    selected_path.parent.mkdir()
+    selected_path.write_text("synthetic", encoding="utf-8")
+    first_marker = selected_path.parent.resolve(strict=False) / ".git"
+    second_marker = selected_path.parent.parent.resolve(strict=False) / ".git"
+    inspected_markers: list[Path] = []
+    original_lstat = Path.lstat
+
+    def inspect_markers(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> os.stat_result:
+        inspected_markers.append(path)
+        if path == first_marker:
+            raise FileNotFoundError
+        if path == second_marker:
+            return SimpleNamespace(st_mode=0)  # type: ignore[return-value]
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", inspect_markers)
+
+    assert proposal_desktop.is_path_inside_git_worktree(selected_path) is True
+    assert inspected_markers == [first_marker, second_marker]
+
+
+@pytest.mark.parametrize(
+    "metadata_error",
+    [
+        PermissionError("synthetic private permission failure"),
+        OSError("synthetic private transient failure"),
+        RuntimeError("synthetic private resolution failure"),
+    ],
+)
+def test_initial_ancestry_failure_is_sanitized_and_blocks_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    metadata_error: Exception,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    private_database_path = Path(controller.state.database_path)
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+
+    def fail_database_inspection(path: Path) -> tuple[Path, bool]:
+        if path == private_database_path:
+            raise metadata_error
+        return original_inspect(path)
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        fail_database_inspection,
+    )
+
+    with pytest.raises(proposal_desktop.DesktopFormError) as error:
+        controller.validate_draft()
+
+    assert str(error.value) == (
+        "Records Database ancestry could not be verified; revalidation is required."
+    )
+    assert str(private_database_path) not in str(error.value)
+    assert harness.validation_calls == []
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+    assert capsys.readouterr() == ("", "")
+
+
+def test_metadata_failure_after_validation_revokes_authority_before_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    private_template_path = Path(controller.state.template_path)
+    original_inspect = proposal_desktop._inspect_git_worktree_ancestry
+
+    def fail_template_inspection(path: Path) -> tuple[Path, bool]:
+        if path == private_template_path:
+            raise PermissionError(str(private_template_path))
+        return original_inspect(path)
+
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        fail_template_inspection,
+    )
+
+    with pytest.raises(proposal_desktop.DesktopFormError) as error:
+        controller.generate_draft()
+
+    assert str(error.value) == (
+        "DOCX Template ancestry could not be verified; revalidation is required."
+    )
+    assert str(private_template_path) not in str(error.value)
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_snapshot is None
+    assert controller._validated_resolved_paths is None
+    assert controller._validation_result is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+    assert not Path(controller.state.proposal_input_json_output_path).exists()
+    assert not Path(controller.state.proposal_docx_output_path).exists()
+    assert capsys.readouterr() == ("", "")
+
+
+def test_worktree_probe_avoids_error_suppressing_metadata_shortcuts() -> None:
+    source = inspect.getsource(proposal_desktop._inspect_git_worktree_ancestry)
+
+    assert ".exists(" not in source
+    assert ".is_dir(" not in source
+    assert ".is_file(" not in source
+    assert ".stat(" in source
+    assert ".lstat(" in source
 
 
 def test_dot_git_directory_appearing_after_validation_blocks_generation(
@@ -1218,6 +1676,44 @@ def test_symlink_ancestry_retarget_after_validation_blocks_generation(
 
     assert harness.build_calls == []
     assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert not Path(controller.state.output_folder).exists()
+    assert harness.opened_paths == []
+
+
+def test_private_symlink_retarget_after_validation_requires_revalidation(
+    tmp_path: Path,
+) -> None:
+    first_private_target = tmp_path / "first-private-target"
+    second_private_target = tmp_path / "second-private-target"
+    first_private_target.mkdir()
+    second_private_target.mkdir()
+    selected_root = tmp_path / "selected-private-root"
+    try:
+        os.symlink(first_private_target, selected_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Directory symlinks are unavailable: {exc}")
+
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.propose_output_paths(selected_root)
+    controller.validate_draft()
+    selected_root.unlink()
+    try:
+        os.symlink(second_private_target, selected_root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"Directory symlink retargeting is unavailable: {exc}")
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="Output Root resolved location changed",
+    ):
+        controller.generate_draft()
+
+    assert harness.build_calls == []
+    assert controller.validated_request is None
+    assert controller._validated_resolved_paths is None
     assert controller.generation_enabled is False
     assert controller.open_actions_enabled is False
     assert not Path(controller.state.output_folder).exists()
