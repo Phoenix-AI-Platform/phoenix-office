@@ -65,6 +65,10 @@ class DesktopFormError(ValueError):
     """A local operator-facing form state error."""
 
 
+class ExistingOutputPathError(DesktopFormError):
+    """The operator selected an output path that must not be overwritten."""
+
+
 @dataclass(frozen=True, slots=True)
 class DesktopFormSnapshot:
     """Immutable representation of every input that affects a draft request."""
@@ -375,6 +379,35 @@ class ProposalDesktopController:
         self._invalidate_validation()
         return output_folder, output_json, output_docx
 
+    def select_docx_output_path(
+        self,
+        selected_path: str | Path,
+    ) -> tuple[Path, Path, Path]:
+        """Select one explicit DOCX target without creating or replacing files."""
+
+        selected_text = str(selected_path)
+        if not selected_text.strip():
+            raise DesktopFormError("Select a proposal DOCX output path.")
+        output_docx = Path(selected_text).expanduser()
+        if not output_docx.suffix:
+            output_docx = output_docx.with_suffix(".docx")
+        elif output_docx.suffix.lower() != ".docx":
+            raise DesktopFormError("Proposal DOCX output must use the .docx extension.")
+
+        output_folder = output_docx.parent
+        output_json = output_folder / "proposal_input.json"
+        self._reject_git_worktree_path("Proposal DOCX", output_docx)
+        self._reject_git_worktree_path("Proposal Input JSON", output_json)
+        self._reject_existing_output_path("Proposal DOCX", output_docx)
+        self._reject_existing_output_path("Proposal Input JSON", output_json)
+
+        self.state.output_root = str(output_folder)
+        self.state.output_folder = str(output_folder)
+        self.state.proposal_input_json_output_path = str(output_json)
+        self.state.proposal_docx_output_path = str(output_docx)
+        self._invalidate_validation()
+        return output_folder, output_json, output_docx
+
     def load_customers(self) -> tuple[CustomerRecord, ...]:
         self._customers = ()
         self._jobs = ()
@@ -647,6 +680,18 @@ class ProposalDesktopController:
         if inside_worktree:
             raise DesktopFormError(f"{label} must be outside every Git worktree.")
 
+    @staticmethod
+    def _reject_existing_output_path(label: str, path: Path) -> None:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise DesktopFormError(f"{label} could not be inspected safely.") from exc
+        raise ExistingOutputPathError(
+            f"{label} already exists; overwrite was rejected. Choose a new filename."
+        )
+
     def _resolve_and_check_selected_paths(self) -> _ValidatedResolvedPaths:
         resolved: dict[str, Path] = {}
         for label, path in self._selected_paths().items():
@@ -857,24 +902,31 @@ class ProposalDesktopApp:
         state = self.controller.state
         frame = self._section("Step 3 — Explicit Proposal Details", 2)
         row = 0
-        for label, name, value in (
-            ("Proposal Date", "proposal_date", state.proposal_date),
-            ("Item Description", "item_description", state.item_description),
-            ("Pricing Amount", "amount", state.amount),
-            ("Pricing Note", "pricing_note", state.pricing_note),
-            ("Company Name", "company_name", state.company_name),
-            ("Starting At Label", "starting_at_label", state.starting_at_label),
-            ("Total Label", "total_label", state.total_label),
-            ("Output Folder", "output_folder", state.output_folder),
+        for label, name, value, browse_command in (
+            ("Proposal Date", "proposal_date", state.proposal_date, None),
+            ("Item Description", "item_description", state.item_description, None),
+            ("Pricing Amount", "amount", state.amount, None),
+            ("Pricing Note", "pricing_note", state.pricing_note, None),
+            ("Company Name", "company_name", state.company_name, None),
+            (
+                "Starting At Label",
+                "starting_at_label",
+                state.starting_at_label,
+                None,
+            ),
+            ("Total Label", "total_label", state.total_label, None),
+            ("Output Folder", "output_folder", state.output_folder, None),
             (
                 "Proposal Input JSON",
                 "proposal_input_json_output_path",
                 state.proposal_input_json_output_path,
+                None,
             ),
             (
                 "Proposal DOCX",
                 "proposal_docx_output_path",
                 state.proposal_docx_output_path,
+                self._browse_docx_output,
             ),
         ):
             self._labeled_entry(
@@ -883,6 +935,7 @@ class ProposalDesktopApp:
                 label=label,
                 name=name,
                 value=value,
+                browse_command=browse_command,
             )
             row += 1
 
@@ -1168,6 +1221,55 @@ class ProposalDesktopApp:
         finally:
             self._updating_widgets = False
         self._show_invalidated_state()
+
+    def _browse_docx_output(self) -> None:
+        current = Path(self.controller.state.proposal_docx_output_path)
+        selected = self._filedialog.asksaveasfilename(
+            title="Select proposal DOCX output",
+            defaultextension=".docx",
+            filetypes=(("Word document", "*.docx"),),
+            initialdir=self.controller.state.output_folder or None,
+            initialfile=current.name or "proposal.docx",
+            confirmoverwrite=True,
+        )
+        if not selected:
+            self._status_variable.set(
+                "Output selection cancelled; no file was created."
+            )
+            self._refresh_action_states()
+            return
+        try:
+            output_folder, output_json, output_docx = (
+                self.controller.select_docx_output_path(selected)
+            )
+            self._updating_widgets = True
+            try:
+                for name, value in (
+                    ("output_root", output_folder),
+                    ("output_folder", output_folder),
+                    ("proposal_input_json_output_path", output_json),
+                    ("proposal_docx_output_path", output_docx),
+                ):
+                    self._variables[name].set(str(value))
+            finally:
+                self._updating_widgets = False
+            self._set_summary(())
+            self._status_variable.set(
+                "DOCX output selected; validate the current draft before generation."
+            )
+            self._refresh_action_states()
+        except ExistingOutputPathError as exc:
+            self._status_variable.set(
+                "Overwrite rejected; the existing file was not changed."
+            )
+            self._refresh_action_states()
+            self._show_error(exc)
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._status_variable.set(
+                "Output selection failed; choose a valid private DOCX path."
+            )
+            self._refresh_action_states()
+            self._show_error(exc)
 
     def _load_customers(self) -> None:
         try:

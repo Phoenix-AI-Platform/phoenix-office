@@ -124,6 +124,16 @@ class FakeMessagebox:
         self.errors.append((title, message, parent))
 
 
+class FakeFileDialog:
+    def __init__(self, save_result: str = "") -> None:
+        self.save_result = save_result
+        self.save_calls: list[dict[str, object]] = []
+
+    def asksaveasfilename(self, **kwargs: object) -> str:
+        self.save_calls.append(kwargs)
+        return self.save_result
+
+
 @dataclass(slots=True)
 class AppHarness:
     app: proposal_desktop.ProposalDesktopApp
@@ -136,6 +146,7 @@ class AppHarness:
     generate_button: FakeButton
     open_buttons: tuple[FakeButton, FakeButton, FakeButton]
     messagebox: FakeMessagebox
+    filedialog: FakeFileDialog
 
 
 def _headless_app(
@@ -151,9 +162,21 @@ def _headless_app(
     generate_button = FakeButton()
     open_buttons = (FakeButton(), FakeButton(), FakeButton())
     messagebox = FakeMessagebox()
+    filedialog = FakeFileDialog()
     app.controller = controller
     app._root = object()
     app._messagebox = messagebox
+    app._filedialog = filedialog
+    app._updating_widgets = False
+    app._variables = {
+        name: FakeVariable(str(getattr(controller.state, name)))
+        for name in (
+            "output_root",
+            "output_folder",
+            "proposal_input_json_output_path",
+            "proposal_docx_output_path",
+        )
+    }
     app._customer_combo = customer_combo
     app._job_combo = job_combo
     app._customer_variable = customer_variable
@@ -176,6 +199,7 @@ def _headless_app(
         generate_button=generate_button,
         open_buttons=open_buttons,
         messagebox=messagebox,
+        filedialog=filedialog,
     )
 
 
@@ -384,6 +408,126 @@ def test_output_proposal_is_identity_free_and_creates_nothing(tmp_path: Path) ->
     assert not output_folder.exists()
     assert not output_json.exists()
     assert not output_docx.exists()
+
+
+def test_explicit_docx_selection_defaults_extension_and_configures_pipeline_paths(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    selected = tmp_path / "private-output" / "explicit-proposal"
+
+    output_folder, output_json, output_docx = controller.select_docx_output_path(
+        selected
+    )
+
+    assert output_folder == selected.parent
+    assert output_json == selected.parent / "proposal_input.json"
+    assert output_docx == selected.with_suffix(".docx")
+    assert controller.state.output_root == str(output_folder)
+    assert controller.state.output_folder == str(output_folder)
+    assert controller.state.proposal_input_json_output_path == str(output_json)
+    assert controller.state.proposal_docx_output_path == str(output_docx)
+    assert not output_folder.exists()
+    assert not output_json.exists()
+    assert not output_docx.exists()
+
+
+def test_explicit_docx_selection_rejects_other_extensions(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    original = controller.snapshot()
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match=r"\.docx extension"):
+        controller.select_docx_output_path(tmp_path / "proposal.pdf")
+
+    assert controller.snapshot() == original
+
+
+def test_existing_docx_overwrite_is_rejected_without_changing_file_or_state(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    existing = tmp_path / "private-output" / "proposal.docx"
+    existing.parent.mkdir()
+    original_bytes = b"existing synthetic document bytes"
+    existing.write_bytes(original_bytes)
+    original = controller.snapshot()
+
+    with pytest.raises(
+        proposal_desktop.ExistingOutputPathError,
+        match="overwrite was rejected",
+    ):
+        controller.select_docx_output_path(existing)
+
+    assert existing.read_bytes() == original_bytes
+    assert controller.snapshot() == original
+    assert controller.build_result is None
+
+
+def test_docx_save_dialog_cancellation_is_a_no_op_and_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    before = harness.controller.snapshot()
+    app_harness.filedialog.save_result = ""
+
+    app_harness.app._browse_docx_output()
+
+    assert harness.controller.snapshot() == before
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+    assert not Path(harness.controller.state.output_folder).exists()
+    assert app_harness.status_variable.value == (
+        "Output selection cancelled; no file was created."
+    )
+    assert app_harness.messagebox.errors == []
+
+
+def test_docx_save_dialog_uses_safe_defaults_and_updates_explicit_paths(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    selected = tmp_path / "chosen-output" / "controlled-proposal.docx"
+    app_harness.filedialog.save_result = str(selected)
+
+    app_harness.app._browse_docx_output()
+
+    assert len(app_harness.filedialog.save_calls) == 1
+    options = app_harness.filedialog.save_calls[0]
+    assert options["defaultextension"] == ".docx"
+    assert options["confirmoverwrite"] is True
+    assert options["filetypes"] == (("Word document", "*.docx"),)
+    assert harness.controller.state.output_root == str(selected.parent)
+    assert harness.controller.state.output_folder == str(selected.parent)
+    assert harness.controller.state.proposal_input_json_output_path == str(
+        selected.parent / "proposal_input.json"
+    )
+    assert harness.controller.state.proposal_docx_output_path == str(selected)
+    assert app_harness.generate_button.state == "disabled"
+    assert app_harness.status_variable.value.startswith("DOCX output selected")
+    assert harness.build_calls == []
+    assert not selected.parent.exists()
+
+
+def test_docx_save_dialog_reports_overwrite_rejection_without_generation(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    existing = tmp_path / "existing.docx"
+    original_bytes = b"existing synthetic document bytes"
+    existing.write_bytes(original_bytes)
+    app_harness.filedialog.save_result = str(existing)
+
+    app_harness.app._browse_docx_output()
+
+    assert existing.read_bytes() == original_bytes
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+    assert app_harness.status_variable.value.startswith("Overwrite rejected")
+    assert len(app_harness.messagebox.errors) == 1
+    assert "overwrite was rejected" in app_harness.messagebox.errors[0][1]
 
 
 def test_git_worktree_detection_recognizes_dot_git_directory(tmp_path: Path) -> None:
@@ -760,6 +904,38 @@ def test_real_validation_creates_no_outputs_or_directories_and_logs_nothing(
     assert _database_hash(database_path) == before
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_real_explicit_docx_selection_generates_through_existing_pipeline(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "records.sqlite"
+    _seed_database(database_path)
+    template_path = tmp_path / "template.docx"
+    shutil.copyfile(TEMPLATE, template_path)
+    output_docx = tmp_path / "selected-output" / "controlled-proposal.docx"
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    controller.set_text_field("database_path", str(database_path))
+    controller.set_text_field("template_path", str(template_path))
+    controller.select_docx_output_path(output_docx)
+    controller.set_text_field("item_description", "Explicit synthetic work")
+    controller.set_scope_description(0, "Perform explicit synthetic task")
+    controller.set_text_field("amount", "125.00")
+    controller.set_text_field("company_name", "Synthetic Services")
+    controller.load_customers()
+    controller.select_customer("customer-synthetic-001")
+    controller.select_job("job-synthetic-001")
+    database_before = _database_hash(database_path)
+
+    controller.validate_draft()
+    result = controller.generate_draft()
+
+    assert result.proposal_docx_path == output_docx
+    assert result.proposal_input_json_path == output_docx.parent / "proposal_input.json"
+    assert result.proposal_docx_path.is_file()
+    assert result.proposal_docx_path.stat().st_size > 0
+    assert result.proposal_input_json_path.is_file()
+    assert _database_hash(database_path) == database_before
 
 
 @pytest.mark.parametrize(
@@ -1934,6 +2110,28 @@ def test_gui_job_selection_failure_clears_job_combo_and_generation_authority(
     assert len(app_harness.messagebox.errors) == 1
     assert harness.build_calls == []
     assert harness.opened_paths == []
+
+
+def test_gui_successful_generation_reports_selected_docx_path(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    selected = tmp_path / "selected-output" / "controlled-proposal.docx"
+    controller.select_docx_output_path(selected)
+    controller.validate_draft()
+    validated_request = controller.validated_request
+    app_harness = _headless_app(controller)
+
+    app_harness.app._generate()
+
+    assert harness.build_calls == [validated_request]
+    assert harness.build_calls[0] is validated_request
+    assert str(selected) in app_harness.status_variable.value
+    assert app_harness.status_variable.value.startswith("Generated local artifacts")
+    assert all(button.state == "normal" for button in app_harness.open_buttons)
+    assert harness.opened_paths == []
+    assert app_harness.messagebox.errors == []
 
 
 def test_gui_failed_rebuild_clears_prior_paths_and_disables_open_actions(
