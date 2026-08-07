@@ -160,6 +160,13 @@ def _load_tkinter() -> tuple[object, object, object, object]:
     return tk, ttk, filedialog, messagebox
 
 
+def _clear_combobox_selection(combobox: Any, variable: Any) -> None:
+    """Clear a readonly combobox without using an invalid negative index."""
+
+    variable.set("")
+    combobox.set("")
+
+
 def _default_customer_repository_factory(
     database_path: Path,
     *,
@@ -1104,11 +1111,12 @@ class ProposalDesktopApp:
         self.controller.set_text_field(name, self._variables[name].get())
         if name == "database_path":
             self._customer_combo.configure(values=())
-            self._customer_variable.set("")
-            self._customer_combo.current(-1)
+            _clear_combobox_selection(
+                self._customer_combo,
+                self._customer_variable,
+            )
             self._job_combo.configure(values=())
-            self._job_variable.set("")
-            self._job_combo.current(-1)
+            _clear_combobox_selection(self._job_combo, self._job_variable)
         self._show_invalidated_state()
 
     def _on_starting_at_changed(self) -> None:
@@ -1277,11 +1285,12 @@ class ProposalDesktopApp:
             self._customer_combo.configure(
                 values=self.controller.customer_display_labels,
             )
-            self._customer_variable.set("")
-            self._customer_combo.current(-1)
+            _clear_combobox_selection(
+                self._customer_combo,
+                self._customer_variable,
+            )
             self._job_combo.configure(values=())
-            self._job_variable.set("")
-            self._job_combo.current(-1)
+            _clear_combobox_selection(self._job_combo, self._job_variable)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
@@ -1300,8 +1309,7 @@ class ProposalDesktopApp:
                 customer_id = self.controller.customers[index].customer_id
                 self.controller.select_customer(customer_id)
             self._job_combo.configure(values=self.controller.job_display_labels)
-            self._job_variable.set("")
-            self._job_combo.current(-1)
+            _clear_combobox_selection(self._job_combo, self._job_variable)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
@@ -1321,8 +1329,7 @@ class ProposalDesktopApp:
             self.controller.select_job(job_id)
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            self._job_variable.set("")
-            self._job_combo.current(-1)
+            _clear_combobox_selection(self._job_combo, self._job_variable)
             self._show_invalidated_state()
             self._show_error(exc)
 
@@ -1381,11 +1388,12 @@ class ProposalDesktopApp:
 
     def _clear_customer_and_job_widgets(self) -> None:
         self._customer_combo.configure(values=())
-        self._customer_variable.set("")
-        self._customer_combo.current(-1)
+        _clear_combobox_selection(
+            self._customer_combo,
+            self._customer_variable,
+        )
         self._job_combo.configure(values=())
-        self._job_variable.set("")
-        self._job_combo.current(-1)
+        _clear_combobox_selection(self._job_combo, self._job_variable)
 
     def _set_summary(self, lines: tuple[str, ...]) -> None:
         self._summary_text.configure(state="normal")

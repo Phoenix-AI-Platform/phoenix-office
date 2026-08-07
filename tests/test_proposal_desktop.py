@@ -80,6 +80,7 @@ class FakeCombo:
     def __init__(self, *, values: tuple[str, ...] = (), current: int = -1) -> None:
         self.values = values
         self.current_index = current
+        self.value = values[current] if 0 <= current < len(values) else ""
 
     def configure(self, **kwargs: object) -> None:
         if "values" in kwargs:
@@ -87,8 +88,17 @@ class FakeCombo:
 
     def current(self, index: int | None = None) -> int:
         if index is not None:
+            if index < 0:
+                raise AssertionError(
+                    "ttk.Combobox.current(index) does not accept negative indexes"
+                )
             self.current_index = index
+            self.value = self.values[index] if index < len(self.values) else ""
         return self.current_index
+
+    def set(self, value: str) -> None:
+        self.value = value
+        self.current_index = self.values.index(value) if value in self.values else -1
 
 
 class FakeText:
@@ -171,6 +181,7 @@ def _headless_app(
     app._variables = {
         name: FakeVariable(str(getattr(controller.state, name)))
         for name in (
+            "database_path",
             "output_root",
             "output_folder",
             "proposal_input_json_output_path",
@@ -361,6 +372,26 @@ def test_module_import_is_headless_safe_and_does_not_import_tkinter() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_fake_combo_matches_real_tk_negative_index_and_safe_clear_behavior() -> None:
+    combo = FakeCombo(values=("Synthetic Customer",))
+    combo.current(0)
+
+    with pytest.raises(AssertionError, match="does not accept negative indexes"):
+        combo.current(-1)
+
+    combo.set("")
+
+    assert combo.current() == -1
+    assert combo.value == ""
+
+
+def test_production_combobox_clearing_never_selects_a_negative_index() -> None:
+    source = inspect.getsource(proposal_desktop)
+
+    assert ".current(-1)" not in source
+    assert "_clear_combobox_selection" in source
 
 
 def test_initial_defaults_are_explicit_and_do_not_invent_business_values() -> None:
@@ -1990,6 +2021,98 @@ def test_sidecar_customer_reload_failure_revokes_validation_without_mutation(
     assert controller.open_actions_enabled is False
     assert _database_hash(database_path) == database_before
     assert sidecar.read_bytes() == b"synthetic-existing-sidecar"
+    assert not Path(controller.state.output_folder).exists()
+
+
+def test_database_path_change_safely_clears_both_comboboxes_and_authority(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(0)
+    app_harness.job_combo.current(0)
+    app_harness.customer_variable.set("Synthetic Customer")
+    app_harness.job_variable.set("Synthetic Tank Project")
+    app_harness.app._variables["database_path"].set(
+        str(tmp_path / "replacement-records.sqlite")
+    )
+
+    app_harness.app._on_text_field_changed("database_path")
+
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.customer_combo.current() == -1
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+
+
+def test_successful_customer_load_safely_leaves_both_selections_blank(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(0)
+    app_harness.job_combo.current(0)
+    app_harness.customer_variable.set("Synthetic Customer")
+    app_harness.job_variable.set("Synthetic Tank Project")
+
+    app_harness.app._load_customers()
+
+    assert app_harness.customer_combo.values == controller.customer_display_labels
+    assert app_harness.customer_combo.current() == -1
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
+    assert not Path(controller.state.output_folder).exists()
+
+
+def test_customer_selection_safely_clears_previous_job_selection(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(0)
+    app_harness.customer_variable.set("Synthetic Customer")
+    app_harness.job_combo.current(0)
+    app_harness.job_variable.set("Synthetic Tank Project")
+
+    app_harness.app._on_customer_selected()
+
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == ""
+    assert app_harness.job_combo.values == controller.job_display_labels
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.job_variable.get() == ""
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert harness.build_calls == []
+    assert harness.opened_paths == []
     assert not Path(controller.state.output_folder).exists()
 
 
