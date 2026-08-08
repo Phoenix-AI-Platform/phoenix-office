@@ -29,6 +29,7 @@ from phoenix_office.records.proposal_details import (
     record_proposal_details_to_json,
 )
 from phoenix_office.records.repository import (
+    CustomerAlreadyExistsError,
     CustomerRepository,
     InMemoryCustomerRepository,
     InMemoryJobRepository,
@@ -62,6 +63,7 @@ from phoenix_office.records.store_json import (
 )
 
 __all__ = [
+    "CustomerAlreadyExistsError",
     "CustomerRepository",
     "InMemoryCustomerRepository",
     "InMemoryJobRepository",

@@ -26,7 +26,11 @@ from phoenix_office.proposal_build import (
     ProposalDraftBuildResult,
     ProposalDraftValidationResult,
 )
-from phoenix_office.records import SQLiteCustomerRepository, SQLiteJobRepository
+from phoenix_office.records import (
+    CustomerAlreadyExistsError,
+    SQLiteCustomerRepository,
+    SQLiteJobRepository,
+)
 
 NOW = datetime(2026, 7, 30, 14, 5, 6)
 ROOT = Path(__file__).parents[1]
@@ -58,6 +62,8 @@ def _job(
 class ControllerHarness:
     controller: proposal_desktop.ProposalDesktopController
     customer_factory_calls: list[tuple[Path, bool, bool]]
+    customer_creation_factory_calls: list[tuple[Path, bool, bool]]
+    customer_create_calls: list[CustomerRecord]
     job_factory_calls: list[tuple[Path, bool, bool]]
     job_list_calls: list[str]
     validation_calls: list[ProposalDraftBuildRequest]
@@ -105,6 +111,7 @@ class FakeText:
     def __init__(self, content: str = "") -> None:
         self.content = content
         self.state = "disabled"
+        self.modified = False
 
     def configure(self, **kwargs: object) -> None:
         if "state" in kwargs:
@@ -115,6 +122,14 @@ class FakeText:
 
     def insert(self, _start: str, value: str) -> None:
         self.content = value
+
+    def get(self, _start: str, _end: str) -> str:
+        return self.content
+
+    def edit_modified(self, value: bool | None = None) -> bool:
+        if value is not None:
+            self.modified = value
+        return self.modified
 
 
 class FakeButton:
@@ -157,6 +172,7 @@ class AppHarness:
     open_buttons: tuple[FakeButton, FakeButton, FakeButton]
     messagebox: FakeMessagebox
     filedialog: FakeFileDialog
+    customer_creation_status_variable: FakeVariable
 
 
 def _headless_app(
@@ -173,6 +189,9 @@ def _headless_app(
     open_buttons = (FakeButton(), FakeButton(), FakeButton())
     messagebox = FakeMessagebox()
     filedialog = FakeFileDialog()
+    customer_creation_status_variable = FakeVariable(
+        "No customer creation requested."
+    )
     app.controller = controller
     app._root = object()
     app._messagebox = messagebox
@@ -188,6 +207,21 @@ def _headless_app(
             "proposal_docx_output_path",
         )
     }
+    app._customer_creation_variables = {
+        name: FakeVariable(str(getattr(controller.customer_creation_state, name)))
+        for name in (
+            "customer_id",
+            "display_name",
+            "phone",
+            "email",
+            "billing_street_address",
+            "billing_city_state_zip",
+        )
+    }
+    app._customer_creation_notes_text = FakeText(
+        controller.customer_creation_state.notes
+    )
+    app._customer_creation_status_variable = customer_creation_status_variable
     app._customer_combo = customer_combo
     app._job_combo = job_combo
     app._customer_variable = customer_variable
@@ -211,6 +245,7 @@ def _headless_app(
         open_buttons=open_buttons,
         messagebox=messagebox,
         filedialog=filedialog,
+        customer_creation_status_variable=customer_creation_status_variable,
     )
 
 
@@ -220,10 +255,10 @@ def _configured_controller(
     customers: tuple[CustomerRecord, ...] | None = None,
     jobs: tuple[JobRecord, ...] | None = None,
 ) -> ControllerHarness:
-    customer_records = customers or (
+    customer_records = list(customers or (
         _customer(),
         _customer("customer-synthetic-002", "Synthetic Customer"),
-    )
+    ))
     job_records = jobs or (
         _job(),
         _job("job-synthetic-002", job_name="Synthetic Inspection"),
@@ -234,6 +269,8 @@ def _configured_controller(
         ),
     )
     customer_factory_calls: list[tuple[Path, bool, bool]] = []
+    customer_creation_factory_calls: list[tuple[Path, bool, bool]] = []
+    customer_create_calls: list[CustomerRecord] = []
     job_factory_calls: list[tuple[Path, bool, bool]] = []
     job_list_calls: list[str] = []
     validation_calls: list[ProposalDraftBuildRequest] = []
@@ -243,6 +280,19 @@ def _configured_controller(
     class CustomerRepository:
         def list_customers(self) -> list[CustomerRecord]:
             return list(customer_records)
+
+    class CustomerCreationRepository:
+        def create_customer(self, record: CustomerRecord) -> CustomerRecord:
+            if any(
+                customer.customer_id == record.customer_id
+                for customer in customer_records
+            ):
+                raise CustomerAlreadyExistsError(
+                    "Customer ID already exists; no customer was changed."
+                )
+            customer_records.append(record)
+            customer_create_calls.append(record)
+            return record
 
     class JobRepository:
         def list_jobs_for_customer(self, customer_id: str) -> list[JobRecord]:
@@ -266,6 +316,17 @@ def _configured_controller(
     ) -> Any:
         job_factory_calls.append((database_path, initialize, read_only))
         return JobRepository()
+
+    def customer_creation_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> Any:
+        customer_creation_factory_calls.append(
+            (database_path, initialize, read_only)
+        )
+        return CustomerCreationRepository()
 
     def validate(request: ProposalDraftBuildRequest) -> ProposalDraftValidationResult:
         validation_calls.append(request)
@@ -293,6 +354,7 @@ def _configured_controller(
         validation_function=validate,
         build_function=build,
         customer_repository_factory=customer_factory,
+        customer_creation_repository_factory=customer_creation_factory,
         job_repository_factory=job_factory,
         path_opener=opened_paths.append,
         clock=lambda: NOW,
@@ -312,6 +374,8 @@ def _configured_controller(
     return ControllerHarness(
         controller=controller,
         customer_factory_calls=customer_factory_calls,
+        customer_creation_factory_calls=customer_creation_factory_calls,
+        customer_create_calls=customer_create_calls,
         job_factory_calls=job_factory_calls,
         job_list_calls=job_list_calls,
         validation_calls=validation_calls,
@@ -412,6 +476,202 @@ def test_initial_defaults_are_explicit_and_do_not_invent_business_values() -> No
     assert controller.state.terms_and_conditions == ""
     assert controller.state.selected_customer_id == ""
     assert controller.state.selected_job_id == ""
+    assert controller.customer_creation_state == proposal_desktop.CustomerCreationState()
+
+
+def test_explicit_customer_fields_construct_only_the_persisted_customer_values(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    explicit_values = {
+        "customer_id": "  customer-created-001  ",
+        "display_name": "  Created Synthetic Customer  ",
+        "phone": "  555-0100  ",
+        "email": "  created@example.invalid  ",
+        "billing_street_address": "  200 Synthetic Ave.  ",
+        "billing_city_state_zip": "  Example, WI 00000  ",
+        "notes": " First explicit note\n\n Second explicit note  ",
+    }
+    for name, value in explicit_values.items():
+        controller.set_customer_creation_field(name, value)
+
+    record = controller.create_customer_record()
+
+    assert record == CustomerRecord(
+        customer_id="customer-created-001",
+        display_name="Created Synthetic Customer",
+        phone="555-0100",
+        email="created@example.invalid",
+        billing_street_address="200 Synthetic Ave.",
+        billing_city_state_zip="Example, WI 00000",
+        notes=["First explicit note", "Second explicit note"],
+    )
+    assert record.job_street_address is None
+    assert record.job_city_state_zip is None
+    assert harness.customer_creation_factory_calls == []
+    assert harness.customer_create_calls == []
+
+
+def test_blank_optional_customer_fields_become_none_without_invented_values(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_customer_creation_field("customer_id", "customer-created-002")
+    controller.set_customer_creation_field("display_name", "Created Customer")
+    for field_name in (
+        "phone",
+        "email",
+        "billing_street_address",
+        "billing_city_state_zip",
+    ):
+        controller.set_customer_creation_field(field_name, "  ")
+    controller.set_customer_creation_field("notes", "\n   \n")
+
+    record = controller.create_customer_record()
+
+    assert record.phone is None
+    assert record.email is None
+    assert record.billing_street_address is None
+    assert record.billing_city_state_zip is None
+    assert record.notes == []
+    assert record.job_street_address is None
+    assert record.job_city_state_zip is None
+
+
+@pytest.mark.parametrize("missing_field", ["customer_id", "display_name"])
+def test_invalid_required_customer_data_performs_no_write(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_customer_creation_field("customer_id", "customer-created-003")
+    controller.set_customer_creation_field("display_name", "Created Customer")
+    controller.set_customer_creation_field(missing_field, "   ")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="required"):
+        controller.create_customer()
+
+    assert harness.customer_creation_factory_calls == []
+    assert harness.customer_create_calls == []
+
+
+def test_explicit_customer_creation_uses_write_once_then_read_only_reload(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    read_calls_before = len(harness.customer_factory_calls)
+    job_calls_before = len(harness.job_factory_calls)
+    controller.set_customer_creation_field("customer_id", "customer-created-004")
+    controller.set_customer_creation_field("display_name", "Created Customer")
+
+    created = controller.create_customer()
+
+    database_path = tmp_path / "records.sqlite"
+    assert created.customer_id == "customer-created-004"
+    assert harness.customer_creation_factory_calls == [
+        (database_path, False, False)
+    ]
+    assert harness.customer_create_calls == [created]
+    assert len(harness.customer_factory_calls) == read_calls_before + 1
+    assert harness.customer_factory_calls[-1] == (database_path, False, True)
+    assert len(harness.job_factory_calls) == job_calls_before
+    assert controller.customers[-1] == created
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.generation_enabled is False
+
+
+def test_duplicate_customer_creation_rejects_without_overwrite_or_reload(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    original = controller.customers[0]
+    read_calls_before = len(harness.customer_factory_calls)
+    controller.set_customer_creation_field("customer_id", original.customer_id)
+    controller.set_customer_creation_field("display_name", "Replacement Attempt")
+
+    with pytest.raises(CustomerAlreadyExistsError, match="already exists"):
+        controller.create_customer()
+
+    assert harness.customer_creation_factory_calls == [
+        (tmp_path / "records.sqlite", False, False)
+    ]
+    assert harness.customer_create_calls == []
+    assert len(harness.customer_factory_calls) == read_calls_before
+    assert controller.customers[0] == original
+    assert controller.customers[0].display_name == "Synthetic Customer"
+
+
+def test_customer_form_editing_does_not_open_writable_repository_until_button_action(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    app = app_harness.app
+    app._customer_creation_variables["customer_id"].set("customer-created-005")
+    app._customer_creation_variables["display_name"].set("Created Customer")
+
+    app._on_customer_creation_field_changed("customer_id")
+    app._on_customer_creation_field_changed("display_name")
+
+    assert harness.customer_creation_factory_calls == []
+    assert harness.customer_create_calls == []
+    assert app_harness.customer_creation_status_variable.value.startswith(
+        "Customer details changed"
+    )
+
+    app._create_customer()
+
+    assert harness.customer_creation_factory_calls == [
+        (tmp_path / "records.sqlite", False, False)
+    ]
+    assert len(harness.customer_create_calls) == 1
+    assert app_harness.customer_creation_status_variable.value == (
+        "Customer customer-created-005 created; customers reloaded."
+    )
+    assert app_harness.customer_combo.current() == -1
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.messagebox.errors == []
+
+
+@pytest.mark.parametrize(
+    ("customer_id", "display_name", "expected_status"),
+    [
+        (
+            "customer-synthetic-001",
+            "Replacement Attempt",
+            "Duplicate customer ID rejected",
+        ),
+        ("", "Created Customer", "Customer creation failed"),
+    ],
+)
+def test_gui_customer_creation_failures_are_controlled_and_write_nothing(
+    tmp_path: Path,
+    customer_id: str,
+    display_name: str,
+    expected_status: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    original = harness.controller.customers[0]
+    harness.controller.set_customer_creation_field("customer_id", customer_id)
+    harness.controller.set_customer_creation_field("display_name", display_name)
+    app_harness = _headless_app(harness.controller)
+
+    app_harness.app._create_customer()
+
+    assert app_harness.customer_creation_status_variable.value.startswith(
+        expected_status
+    )
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.customer_create_calls == []
+    assert harness.controller.customers[0] == original
+    assert harness.controller.customers[0].display_name == "Synthetic Customer"
 
 
 def test_output_proposal_is_identity_free_and_creates_nothing(tmp_path: Path) -> None:
