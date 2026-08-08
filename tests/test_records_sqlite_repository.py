@@ -9,6 +9,7 @@ import pytest
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    JobAlreadyExistsError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
     initialize_records_database,
@@ -252,6 +253,163 @@ def test_sqlite_job_repository_saves_and_gets_job(tmp_path: Path) -> None:
 
     assert saved is job
     assert repository.get_job("job-1") == job
+
+
+def test_sqlite_create_job_inserts_only_authorized_row_and_preserves_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    customer_a = _customer("cust-a", "Synthetic Customer A")
+    customer_b = _customer("cust-b", "Synthetic Customer B")
+    existing_a = _job("job-a", customer_a.customer_id, "Existing Job A")
+    existing_b = _job("job-b", customer_b.customer_id, "Existing Job B")
+    customer_repository.save_customer(customer_a)
+    customer_repository.save_customer(customer_b)
+    job_repository.save_job(existing_a)
+    job_repository.save_job(existing_b)
+    customers_before = customer_repository.list_customers()
+    jobs_before = job_repository.list_jobs()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    created_job = JobRecord(
+        job_id="job-created",
+        customer_id=customer_a.customer_id,
+        job_name="Created Synthetic Job",
+        site_street_address="300 Synthetic Ave",
+        site_city_state_zip="Testville, WI 53000",
+        status=JobStatus.scheduled,
+        tank_location_type=TankLocationType.underground,
+        tank_size_gallons=1000,
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes=["Explicit synthetic scope"],
+        internal_notes=["Explicit synthetic internal note"],
+    )
+
+    repository = SQLiteJobRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+    created = repository.create_job(created_job)
+
+    customers_after = customer_repository.list_customers()
+    jobs_after = job_repository.list_jobs()
+    assert created == created_job
+    assert customers_after == customers_before
+    assert len(jobs_after) == len(jobs_before) + 1
+    assert jobs_after[:-1] == jobs_before
+    assert jobs_after[-1] == created_job
+    assert job_repository.list_jobs_for_customer(customer_a.customer_id) == [
+        existing_a,
+        created_job,
+    ]
+    assert job_repository.list_jobs_for_customer(customer_b.customer_id) == [
+        existing_b
+    ]
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) != hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_job_duplicate_rejects_without_database_change(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    repository = SQLiteJobRepository(db_path, initialize=False)
+    customer_repository.save_customer(_customer("cust-a"))
+    customer_repository.save_customer(_customer("cust-b"))
+    original = _job("job-duplicate", "cust-a", "Original Job")
+    repository.save_job(original)
+    customers_before = customer_repository.list_customers()
+    jobs_before = repository.list_jobs()
+    hash_before = _file_hash(db_path)
+    schema_before = _schema_signature(db_path)
+
+    with pytest.raises(JobAlreadyExistsError):
+        repository.create_job(
+            _job("job-duplicate", "cust-b", "Replacement Attempt")
+        )
+
+    assert _file_hash(db_path) == hash_before
+    assert customer_repository.list_customers() == customers_before
+    assert repository.list_jobs() == jobs_before
+    assert repository.get_job(original.job_id) == original
+    assert _schema_signature(db_path) == schema_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_job_rejects_read_only_repository(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    SQLiteJobRepository(db_path)
+    hash_before = _file_hash(db_path)
+    repository = SQLiteJobRepository(
+        db_path,
+        initialize=False,
+        read_only=True,
+    )
+
+    with pytest.raises(PermissionError, match="read-only"):
+        repository.create_job(_job("job-created", "cust-a"))
+
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_job_does_not_create_nonexistent_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing.sqlite"
+    repository = SQLiteJobRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+
+    with pytest.raises(ValueError, match="must already exist"):
+        repository.create_job(_job("job-created", "cust-a"))
+
+    assert not db_path.exists()
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_job_rejects_missing_jobs_table_without_initialization(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "customers-only.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE customers (customer_id TEXT PRIMARY KEY)"
+        )
+        connection.commit()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    repository = SQLiteJobRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+
+    with pytest.raises(ValueError, match="not usable"):
+        repository.create_job(_job("job-created", "cust-a"))
+
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_job_repository_initialize_false_does_not_create_schema(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "empty.sqlite"
+    db_path.touch()
+
+    SQLiteJobRepository(db_path, initialize=False, read_only=False)
+
+    assert db_path.read_bytes() == b""
 
 
 def test_sqlite_job_repository_missing_job_returns_none(tmp_path: Path) -> None:

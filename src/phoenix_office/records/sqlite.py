@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
-from phoenix_office.records.repository import CustomerAlreadyExistsError
+from phoenix_office.records.repository import (
+    CustomerAlreadyExistsError,
+    JobAlreadyExistsError,
+)
 
 
 def initialize_records_database(db_path: Path) -> None:
@@ -223,6 +226,67 @@ class SQLiteJobRepository:
         if initialize:
             initialize_records_database(self.db_path)
 
+    def create_job(self, record: JobRecord) -> JobRecord:
+        """Insert one job into an existing database without overwriting."""
+
+        if self.read_only:
+            raise PermissionError("read-only job repositories cannot create jobs")
+        try:
+            with self._connect_existing_writable() as connection:
+                if not _table_exists(connection, "jobs"):
+                    raise ValueError(
+                        "selected job database is not usable for job creation"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        job_id,
+                        customer_id,
+                        job_name,
+                        site_street_address,
+                        site_city_state_zip,
+                        status,
+                        tank_location_type,
+                        tank_size_gallons,
+                        tank_contents,
+                        contents_known,
+                        scope_notes_json,
+                        internal_notes_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.job_id,
+                        record.customer_id,
+                        record.job_name,
+                        record.site_street_address,
+                        record.site_city_state_zip,
+                        record.status.value,
+                        record.tank_location_type.value,
+                        record.tank_size_gallons,
+                        record.tank_contents,
+                        int(record.contents_known),
+                        json.dumps(record.scope_notes),
+                        json.dumps(record.internal_notes),
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if exc.sqlite_errorcode not in {
+                sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
+                sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+            }:
+                raise ValueError(
+                    "selected job database rejected the job insert"
+                ) from None
+            raise JobAlreadyExistsError(
+                "Job ID already exists; no job was changed."
+            ) from None
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "selected job database is not usable for job creation"
+            ) from exc
+        return record
+
     def save_job(self, record: JobRecord) -> JobRecord:
         with self._connect() as connection:
             connection.execute(
@@ -306,6 +370,23 @@ class SQLiteJobRepository:
             connection = sqlite3.connect(database_uri, uri=True)
         else:
             connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _connect_existing_writable(self) -> sqlite3.Connection:
+        try:
+            resolved_db_path = self.db_path.resolve(strict=True)
+            metadata = resolved_db_path.stat()
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise ValueError(
+                "selected job database must already exist as a usable file"
+            ) from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                "selected job database must already exist as a usable file"
+            )
+        database_uri = f"{resolved_db_path.as_uri()}?mode=rw"
+        connection = sqlite3.connect(database_uri, uri=True)
         connection.row_factory = sqlite3.Row
         return connection
 

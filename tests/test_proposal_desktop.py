@@ -20,7 +20,12 @@ from pydantic import ValidationError
 
 import phoenix_office.proposal_build as proposal_build
 import phoenix_office.proposal_desktop as proposal_desktop
-from phoenix_office.models.records import CustomerRecord, JobRecord
+from phoenix_office.models.records import (
+    CustomerRecord,
+    JobRecord,
+    JobStatus,
+    TankLocationType,
+)
 from phoenix_office.proposal_build import (
     ProposalDraftBuildRequest,
     ProposalDraftBuildResult,
@@ -28,6 +33,7 @@ from phoenix_office.proposal_build import (
 )
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    JobAlreadyExistsError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
 )
@@ -66,19 +72,21 @@ class ControllerHarness:
     customer_create_calls: list[CustomerRecord]
     job_factory_calls: list[tuple[Path, bool, bool]]
     job_list_calls: list[str]
+    job_creation_factory_calls: list[tuple[Path, bool, bool]]
+    job_create_calls: list[JobRecord]
     validation_calls: list[ProposalDraftBuildRequest]
     build_calls: list[ProposalDraftBuildRequest]
     opened_paths: list[Path]
 
 
 class FakeVariable:
-    def __init__(self, value: str = "") -> None:
+    def __init__(self, value: Any = "") -> None:
         self.value = value
 
-    def get(self) -> str:
+    def get(self) -> Any:
         return self.value
 
-    def set(self, value: str) -> None:
+    def set(self, value: Any) -> None:
         self.value = value
 
 
@@ -173,6 +181,7 @@ class AppHarness:
     messagebox: FakeMessagebox
     filedialog: FakeFileDialog
     customer_creation_status_variable: FakeVariable
+    job_creation_status_variable: FakeVariable
 
 
 def _headless_app(
@@ -192,6 +201,7 @@ def _headless_app(
     customer_creation_status_variable = FakeVariable(
         "No customer creation requested."
     )
+    job_creation_status_variable = FakeVariable("No job creation requested.")
     app.controller = controller
     app._root = object()
     app._messagebox = messagebox
@@ -222,6 +232,29 @@ def _headless_app(
         controller.customer_creation_state.notes
     )
     app._customer_creation_status_variable = customer_creation_status_variable
+    app._job_creation_variables = {
+        name: FakeVariable(getattr(controller.job_creation_state, name))
+        for name in (
+            "job_id",
+            "job_name",
+            "site_street_address",
+            "site_city_state_zip",
+            "status",
+            "tank_location_type",
+            "tank_size_gallons",
+            "tank_contents",
+        )
+    }
+    app._job_creation_contents_known_variable = FakeVariable(
+        controller.job_creation_state.contents_known
+    )
+    app._job_creation_scope_notes_text = FakeText(
+        controller.job_creation_state.scope_notes
+    )
+    app._job_creation_internal_notes_text = FakeText(
+        controller.job_creation_state.internal_notes
+    )
+    app._job_creation_status_variable = job_creation_status_variable
     app._customer_combo = customer_combo
     app._job_combo = job_combo
     app._customer_variable = customer_variable
@@ -246,6 +279,7 @@ def _headless_app(
         messagebox=messagebox,
         filedialog=filedialog,
         customer_creation_status_variable=customer_creation_status_variable,
+        job_creation_status_variable=job_creation_status_variable,
     )
 
 
@@ -259,7 +293,7 @@ def _configured_controller(
         _customer(),
         _customer("customer-synthetic-002", "Synthetic Customer"),
     ))
-    job_records = jobs or (
+    job_records = list(jobs or (
         _job(),
         _job("job-synthetic-002", job_name="Synthetic Inspection"),
         _job(
@@ -267,12 +301,14 @@ def _configured_controller(
             customer_id="customer-synthetic-002",
             job_name="Synthetic Secondary Project",
         ),
-    )
+    ))
     customer_factory_calls: list[tuple[Path, bool, bool]] = []
     customer_creation_factory_calls: list[tuple[Path, bool, bool]] = []
     customer_create_calls: list[CustomerRecord] = []
     job_factory_calls: list[tuple[Path, bool, bool]] = []
     job_list_calls: list[str] = []
+    job_creation_factory_calls: list[tuple[Path, bool, bool]] = []
+    job_create_calls: list[JobRecord] = []
     validation_calls: list[ProposalDraftBuildRequest] = []
     build_calls: list[ProposalDraftBuildRequest] = []
     opened_paths: list[Path] = []
@@ -280,6 +316,16 @@ def _configured_controller(
     class CustomerRepository:
         def list_customers(self) -> list[CustomerRecord]:
             return list(customer_records)
+
+        def get_customer(self, customer_id: str) -> CustomerRecord | None:
+            return next(
+                (
+                    customer
+                    for customer in customer_records
+                    if customer.customer_id == customer_id
+                ),
+                None,
+            )
 
     class CustomerCreationRepository:
         def create_customer(self, record: CustomerRecord) -> CustomerRecord:
@@ -298,6 +344,16 @@ def _configured_controller(
         def list_jobs_for_customer(self, customer_id: str) -> list[JobRecord]:
             job_list_calls.append(customer_id)
             return [job for job in job_records if job.customer_id == customer_id]
+
+    class JobCreationRepository:
+        def create_job(self, record: JobRecord) -> JobRecord:
+            if any(job.job_id == record.job_id for job in job_records):
+                raise JobAlreadyExistsError(
+                    "Job ID already exists; no job was changed."
+                )
+            job_records.append(record)
+            job_create_calls.append(record)
+            return record
 
     def customer_factory(
         database_path: Path,
@@ -328,6 +384,15 @@ def _configured_controller(
         )
         return CustomerCreationRepository()
 
+    def job_creation_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> Any:
+        job_creation_factory_calls.append((database_path, initialize, read_only))
+        return JobCreationRepository()
+
     def validate(request: ProposalDraftBuildRequest) -> ProposalDraftValidationResult:
         validation_calls.append(request)
         return ProposalDraftValidationResult(
@@ -356,6 +421,7 @@ def _configured_controller(
         customer_repository_factory=customer_factory,
         customer_creation_repository_factory=customer_creation_factory,
         job_repository_factory=job_factory,
+        job_creation_repository_factory=job_creation_factory,
         path_opener=opened_paths.append,
         clock=lambda: NOW,
     )
@@ -378,6 +444,8 @@ def _configured_controller(
         customer_create_calls=customer_create_calls,
         job_factory_calls=job_factory_calls,
         job_list_calls=job_list_calls,
+        job_creation_factory_calls=job_creation_factory_calls,
+        job_create_calls=job_create_calls,
         validation_calls=validation_calls,
         build_calls=build_calls,
         opened_paths=opened_paths,
@@ -393,6 +461,20 @@ def _seed_database(database_path: Path) -> None:
 
 def _database_hash(database_path: Path) -> str:
     return hashlib.sha256(database_path.read_bytes()).hexdigest()
+
+
+def _set_valid_job_creation_fields(
+    controller: proposal_desktop.ProposalDesktopController,
+    *,
+    job_id: str = "job-created-001",
+) -> None:
+    for name, value in {
+        "job_id": job_id,
+        "job_name": "Created Synthetic Job",
+        "site_street_address": "300 Synthetic Ave.",
+        "site_city_state_zip": "Example, WI 00000",
+    }.items():
+        controller.set_job_creation_field(name, value)
 
 
 def _configure_real_validation_controller(
@@ -672,6 +754,322 @@ def test_gui_customer_creation_failures_are_controlled_and_write_nothing(
     assert harness.customer_create_calls == []
     assert harness.controller.customers[0] == original
     assert harness.controller.customers[0].display_name == "Synthetic Customer"
+
+
+def test_job_creation_defaults_are_visible_and_have_no_customer_id_field() -> None:
+    state = proposal_desktop.JobCreationState()
+
+    assert state.status == JobStatus.draft.value
+    assert state.tank_location_type == TankLocationType.unknown.value
+    assert state.contents_known is False
+    assert "customer_id" not in state.__dataclass_fields__
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
+    assert 'text="Create Job"' in source
+
+
+def test_desktop_job_creation_uses_insert_only_primitive_not_legacy_save() -> None:
+    source = inspect.getsource(proposal_desktop.ProposalDesktopController.create_job)
+
+    assert ".create_job(record)" in source
+    assert ".save_job(" not in source
+
+
+def test_explicit_job_fields_construct_record_for_selected_loaded_customer(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    for name, value in {
+        "status": JobStatus.scheduled.value,
+        "tank_location_type": TankLocationType.underground.value,
+        "tank_size_gallons": " 1000 ",
+        "tank_contents": " synthetic material ",
+        "scope_notes": " First explicit scope\n\n Second explicit scope ",
+        "internal_notes": " First internal note\n\n Second internal note ",
+    }.items():
+        controller.set_job_creation_field(name, value)
+    controller.set_job_creation_contents_known(True)
+
+    record = controller.create_job_record()
+
+    assert record == JobRecord(
+        job_id="job-created-001",
+        customer_id="customer-synthetic-001",
+        job_name="Created Synthetic Job",
+        site_street_address="300 Synthetic Ave.",
+        site_city_state_zip="Example, WI 00000",
+        status=JobStatus.scheduled,
+        tank_location_type=TankLocationType.underground,
+        tank_size_gallons=1000,
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes=["First explicit scope", "Second explicit scope"],
+        internal_notes=["First internal note", "Second internal note"],
+    )
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+def test_blank_optional_job_fields_normalize_without_invented_values(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    for name in (
+        "tank_size_gallons",
+        "tank_contents",
+        "scope_notes",
+        "internal_notes",
+    ):
+        controller.set_job_creation_field(name, "  \n ")
+
+    record = controller.create_job_record()
+
+    assert record.tank_size_gallons is None
+    assert record.tank_contents is None
+    assert record.scope_notes == []
+    assert record.internal_notes == []
+    assert record.status == JobStatus.draft
+    assert record.tank_location_type == TankLocationType.unknown
+    assert record.contents_known is False
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["job_id", "job_name", "site_street_address", "site_city_state_zip"],
+)
+def test_invalid_required_job_data_rejects_before_writable_repository(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    controller.set_job_creation_field(missing_field, "   ")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="required"):
+        controller.create_job()
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+@pytest.mark.parametrize("tank_size", ["not-an-integer", "0", "-10"])
+def test_invalid_tank_size_is_controlled_and_performs_no_write(
+    tmp_path: Path,
+    tank_size: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    controller.set_job_creation_field("tank_size_gallons", tank_size)
+
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.create_job()
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+def test_selected_loaded_customer_is_required_before_job_write(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    controller.select_customer("")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Select an existing"):
+        controller.create_job()
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+def test_stale_loaded_customer_is_rejected_before_job_write(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    controller.state.selected_customer_id = "customer-stale"
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="stale or missing"):
+        controller.create_job()
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+def test_customer_disappearing_from_database_is_rejected_before_job_write(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    _set_valid_job_creation_fields(controller)
+    customer_read_calls: list[tuple[Path, bool, bool]] = []
+
+    class MissingCustomerRepository:
+        def get_customer(self, _customer_id: str) -> None:
+            return None
+
+    def missing_customer_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> MissingCustomerRepository:
+        customer_read_calls.append((database_path, initialize, read_only))
+        return MissingCustomerRepository()
+
+    controller._customer_repository_factory = missing_customer_factory
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="stale or missing"):
+        controller.create_job()
+
+    assert customer_read_calls == [(tmp_path / "records.sqlite", False, True)]
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+
+
+def test_explicit_job_creation_writes_once_then_reloads_selected_customer_jobs(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    _set_valid_job_creation_fields(controller)
+    customer_read_calls_before = len(harness.customer_factory_calls)
+    job_read_calls_before = len(harness.job_factory_calls)
+
+    created = controller.create_job()
+
+    database_path = tmp_path / "records.sqlite"
+    assert harness.job_creation_factory_calls == [(database_path, False, False)]
+    assert harness.job_create_calls == [created]
+    assert harness.customer_create_calls == []
+    assert len(harness.customer_factory_calls) == customer_read_calls_before + 1
+    assert harness.customer_factory_calls[-1] == (database_path, False, True)
+    assert len(harness.job_factory_calls) == job_read_calls_before + 1
+    assert harness.job_factory_calls[-1] == (database_path, False, True)
+    assert harness.job_list_calls[-1] == "customer-synthetic-001"
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == ""
+    assert controller.jobs[-1] == created
+    assert controller.validated_request is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+
+
+def test_duplicate_job_id_for_other_customer_rejects_without_overwrite_or_reload(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    selected_customer_jobs_before = controller.jobs
+    _set_valid_job_creation_fields(controller, job_id="job-synthetic-003")
+    job_read_calls_before = len(harness.job_factory_calls)
+
+    with pytest.raises(JobAlreadyExistsError, match="already exists"):
+        controller.create_job()
+
+    assert harness.job_creation_factory_calls == [
+        (tmp_path / "records.sqlite", False, False)
+    ]
+    assert harness.job_create_calls == []
+    assert len(harness.job_factory_calls) == job_read_calls_before
+    assert controller.jobs == selected_customer_jobs_before
+
+
+def test_job_field_edits_and_customer_selection_do_not_open_writable_job_repo(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+
+    _set_valid_job_creation_fields(controller)
+    controller.set_job_creation_field("status", JobStatus.proposed.value)
+    controller.set_job_creation_field(
+        "tank_location_type",
+        TankLocationType.aboveground.value,
+    )
+    controller.set_job_creation_contents_known(True)
+    controller.select_customer("customer-synthetic-002")
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+    assert harness.customer_create_calls == []
+
+
+def test_job_form_editing_opens_no_repository_until_explicit_create_action(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    app = app_harness.app
+    for name, value in {
+        "job_id": "job-created-002",
+        "job_name": "Created Synthetic Job",
+        "site_street_address": "400 Synthetic Ave.",
+        "site_city_state_zip": "Example, WI 00000",
+    }.items():
+        app._job_creation_variables[name].set(value)
+        app._on_job_creation_field_changed(name)
+
+    assert harness.job_creation_factory_calls == []
+    assert harness.job_create_calls == []
+    assert app_harness.job_creation_status_variable.value.startswith(
+        "Job details changed"
+    )
+
+    app._create_job()
+
+    assert harness.job_creation_factory_calls == [
+        (tmp_path / "records.sqlite", False, False)
+    ]
+    assert len(harness.job_create_calls) == 1
+    assert app_harness.job_creation_status_variable.value == (
+        "Job job-created-002 created; selected-customer jobs reloaded."
+    )
+    assert harness.controller.state.selected_customer_id == "customer-synthetic-001"
+    assert harness.controller.state.selected_job_id == ""
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.messagebox.errors == []
+
+    created_index = len(harness.controller.jobs) - 1
+    app_harness.job_combo.current(created_index)
+    app._on_job_selected()
+    assert harness.controller.state.selected_job_id == "job-created-002"
+
+
+@pytest.mark.parametrize(
+    ("selected_customer", "job_id", "expected_status"),
+    [
+        (False, "job-created-003", "Job creation failed"),
+        (True, "", "Job creation failed"),
+        (True, "job-synthetic-001", "Duplicate job ID rejected"),
+    ],
+)
+def test_gui_job_creation_failures_are_controlled_and_write_nothing(
+    tmp_path: Path,
+    selected_customer: bool,
+    job_id: str,
+    expected_status: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    if not selected_customer:
+        controller.select_customer("")
+    _set_valid_job_creation_fields(controller, job_id=job_id)
+    app_harness = _headless_app(controller)
+
+    app_harness.app._create_job()
+
+    assert app_harness.job_creation_status_variable.value.startswith(expected_status)
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.job_create_calls == []
 
 
 def test_output_proposal_is_identity_free_and_creates_nothing(tmp_path: Path) -> None:

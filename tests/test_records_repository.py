@@ -8,6 +8,7 @@ from phoenix_office.records import (
     CustomerRepository,
     InMemoryCustomerRepository,
     InMemoryJobRepository,
+    JobAlreadyExistsError,
     JobRepository,
 )
 
@@ -117,6 +118,29 @@ def test_save_and_get_job() -> None:
 
     assert saved is job
     assert repository.get_job("job-1") is job
+
+
+def test_create_job_inserts_absent_job() -> None:
+    repository = InMemoryJobRepository()
+    job = _job("job-create", "cust-1", "Created Job")
+
+    created = repository.create_job(job)
+
+    assert created is job
+    assert repository.list_jobs() == [job]
+
+
+def test_create_job_rejects_duplicate_without_overwrite() -> None:
+    repository = InMemoryJobRepository()
+    original = _job("job-create", "cust-1", "Original Job")
+    duplicate = _job("job-create", "cust-2", "Replacement Attempt")
+    repository.save_job(original)
+
+    with pytest.raises(JobAlreadyExistsError):
+        repository.create_job(duplicate)
+
+    assert repository.get_job("job-create") is original
+    assert repository.list_jobs() == [original]
 
 
 def test_get_missing_job_returns_none() -> None:

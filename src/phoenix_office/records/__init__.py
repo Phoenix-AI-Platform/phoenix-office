@@ -33,6 +33,7 @@ from phoenix_office.records.repository import (
     CustomerRepository,
     InMemoryCustomerRepository,
     InMemoryJobRepository,
+    JobAlreadyExistsError,
     JobRepository,
 )
 from phoenix_office.records.sqlite import (
@@ -67,6 +68,7 @@ __all__ = [
     "CustomerRepository",
     "InMemoryCustomerRepository",
     "InMemoryJobRepository",
+    "JobAlreadyExistsError",
     "JobRepository",
     "RecordProposalDetails",
     "RecordStore",
