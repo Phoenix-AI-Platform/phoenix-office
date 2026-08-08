@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
 from pathlib import Path
 from typing import Any
 
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
+from phoenix_office.records.repository import CustomerAlreadyExistsError
 
 
 def initialize_records_database(db_path: Path) -> None:
@@ -72,6 +74,57 @@ class SQLiteCustomerRepository:
         if initialize:
             initialize_records_database(self.db_path)
 
+    def create_customer(self, record: CustomerRecord) -> CustomerRecord:
+        """Insert one customer into an existing database without overwriting."""
+
+        if self.read_only:
+            raise PermissionError("read-only customer repositories cannot create customers")
+        try:
+            with self._connect_existing_writable() as connection:
+                if not _table_exists(connection, "customers"):
+                    raise ValueError(
+                        "selected customer database is not usable for customer creation"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO customers (
+                        customer_id,
+                        display_name,
+                        phone,
+                        email,
+                        billing_street_address,
+                        billing_city_state_zip,
+                        notes_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.customer_id,
+                        record.display_name,
+                        record.phone,
+                        record.email,
+                        record.billing_street_address,
+                        record.billing_city_state_zip,
+                        json.dumps(record.notes),
+                    ),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError as exc:
+            if exc.sqlite_errorcode not in {
+                sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY,
+                sqlite3.SQLITE_CONSTRAINT_UNIQUE,
+            }:
+                raise ValueError(
+                    "selected customer database rejected the customer insert"
+                ) from None
+            raise CustomerAlreadyExistsError(
+                "Customer ID already exists; no customer was changed."
+            ) from None
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "selected customer database is not usable for customer creation"
+            ) from exc
+        return record
+
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
         with self._connect() as connection:
             connection.execute(
@@ -132,6 +185,23 @@ class SQLiteCustomerRepository:
             connection = sqlite3.connect(database_uri, uri=True)
         else:
             connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _connect_existing_writable(self) -> sqlite3.Connection:
+        try:
+            resolved_db_path = self.db_path.resolve(strict=True)
+            metadata = resolved_db_path.stat()
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise ValueError(
+                "selected customer database must already exist as a usable file"
+            ) from exc
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(
+                "selected customer database must already exist as a usable file"
+            )
+        database_uri = f"{resolved_db_path.as_uri()}?mode=rw"
+        connection = sqlite3.connect(database_uri, uri=True)
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -274,3 +344,11 @@ def _load_json_list(value: str) -> list[Any]:
     if isinstance(data, list):
         return data
     return []
+
+
+def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None

@@ -7,8 +7,16 @@ from typing import Protocol
 from phoenix_office.models.records import CustomerRecord, JobRecord
 
 
+class CustomerAlreadyExistsError(ValueError):
+    """A create-only customer insert found an existing customer id."""
+
+
 class CustomerRepository(Protocol):
     """Storage boundary for customer records."""
+
+    def create_customer(self, record: CustomerRecord) -> CustomerRecord:
+        """Insert a new customer without overwriting an existing id."""
+        ...
 
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
         """Save or overwrite a customer record."""
@@ -48,6 +56,14 @@ class InMemoryCustomerRepository:
 
     def __init__(self) -> None:
         self._customers: dict[str, CustomerRecord] = {}
+
+    def create_customer(self, record: CustomerRecord) -> CustomerRecord:
+        if record.customer_id in self._customers:
+            raise CustomerAlreadyExistsError(
+                "Customer ID already exists; no customer was changed."
+            )
+        self._customers[record.customer_id] = record
+        return record
 
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
         self._customers[record.customer_id] = record

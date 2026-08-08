@@ -1,7 +1,10 @@
 """Tests for in-memory customer and job repositories."""
 
+import pytest
+
 from phoenix_office.models.records import CustomerRecord, JobRecord
 from phoenix_office.records import (
+    CustomerAlreadyExistsError,
     CustomerRepository,
     InMemoryCustomerRepository,
     InMemoryJobRepository,
@@ -42,6 +45,29 @@ def test_save_and_get_customer() -> None:
 
     assert saved is customer
     assert repository.get_customer("cust-1") is customer
+
+
+def test_create_customer_inserts_absent_customer() -> None:
+    repository = InMemoryCustomerRepository()
+    customer = _customer("cust-create", "Created Customer")
+
+    created = repository.create_customer(customer)
+
+    assert created is customer
+    assert repository.list_customers() == [customer]
+
+
+def test_create_customer_rejects_duplicate_without_overwrite() -> None:
+    repository = InMemoryCustomerRepository()
+    original = _customer("cust-create", "Original Customer")
+    duplicate = _customer("cust-create", "Replacement Attempt")
+    repository.save_customer(original)
+
+    with pytest.raises(CustomerAlreadyExistsError):
+        repository.create_customer(duplicate)
+
+    assert repository.get_customer("cust-create") is original
+    assert repository.list_customers() == [original]
 
 
 def test_get_missing_customer_returns_none() -> None:

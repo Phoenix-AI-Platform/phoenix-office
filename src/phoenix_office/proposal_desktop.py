@@ -28,12 +28,14 @@ from phoenix_office.proposal_build import (
     validate_proposal_draft,
 )
 from phoenix_office.records import (
+    CustomerAlreadyExistsError,
     RecordProposalDetails,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
 )
 
 CustomerRepositoryFactory = Callable[..., SQLiteCustomerRepository]
+CustomerCreationRepositoryFactory = Callable[..., SQLiteCustomerRepository]
 JobRepositoryFactory = Callable[..., SQLiteJobRepository]
 ValidationFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftValidationResult]
 BuildFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftBuildResult]
@@ -57,6 +59,18 @@ _TEXT_FIELDS = frozenset(
         "terms_and_conditions",
         "starting_at_label",
         "total_label",
+    }
+)
+
+_CUSTOMER_CREATION_FIELDS = frozenset(
+    {
+        "customer_id",
+        "display_name",
+        "phone",
+        "email",
+        "billing_street_address",
+        "billing_city_state_zip",
+        "notes",
     }
 )
 
@@ -149,6 +163,19 @@ class DesktopFormState:
     terms_and_conditions: str = ""
     starting_at_label: str = "Starting at"
     total_label: str = "TOTAL"
+
+
+@dataclass(slots=True)
+class CustomerCreationState:
+    """Explicit operator-entered values for one create-only customer insert."""
+
+    customer_id: str = ""
+    display_name: str = ""
+    phone: str = ""
+    email: str = ""
+    billing_street_address: str = ""
+    billing_city_state_zip: str = ""
+    notes: str = ""
 
 
 def _load_tkinter() -> tuple[object, object, object, object]:
@@ -264,6 +291,9 @@ class ProposalDesktopController:
         customer_repository_factory: CustomerRepositoryFactory = (
             _default_customer_repository_factory
         ),
+        customer_creation_repository_factory: CustomerCreationRepositoryFactory = (
+            _default_customer_repository_factory
+        ),
         job_repository_factory: JobRepositoryFactory = _default_job_repository_factory,
         path_opener: PathOpener = _open_local_path,
         clock: Clock = datetime.now,
@@ -271,10 +301,14 @@ class ProposalDesktopController:
         self._validation_function = validation_function
         self._build_function = build_function
         self._customer_repository_factory = customer_repository_factory
+        self._customer_creation_repository_factory = (
+            customer_creation_repository_factory
+        )
         self._job_repository_factory = job_repository_factory
         self._path_opener = path_opener
         self._clock = clock
         self.state = DesktopFormState(proposal_date=clock().date().isoformat())
+        self.customer_creation_state = CustomerCreationState()
         self._customers: tuple[CustomerRecord, ...] = ()
         self._jobs: tuple[JobRecord, ...] = ()
         self._validated_request: ProposalDraftBuildRequest | None = None
@@ -372,6 +406,58 @@ class ProposalDesktopController:
             return
         self.state.is_starting_at = normalized
         self._invalidate_validation()
+
+    def set_customer_creation_field(self, name: str, value: str) -> None:
+        if name not in _CUSTOMER_CREATION_FIELDS:
+            raise DesktopFormError(f"Unsupported customer creation field: {name}")
+        setattr(self.customer_creation_state, name, value)
+
+    def create_customer_record(self) -> CustomerRecord:
+        """Validate only the explicit customer values currently in the form."""
+
+        state = self.customer_creation_state
+        return CustomerRecord(
+            customer_id=self._required_customer_text(
+                "Customer ID",
+                state.customer_id,
+            ),
+            display_name=self._required_customer_text(
+                "Display Name",
+                state.display_name,
+            ),
+            phone=self._optional_customer_text(state.phone),
+            email=self._optional_customer_text(state.email),
+            billing_street_address=self._optional_customer_text(
+                state.billing_street_address
+            ),
+            billing_city_state_zip=self._optional_customer_text(
+                state.billing_city_state_zip
+            ),
+            notes=[line.strip() for line in state.notes.splitlines() if line.strip()],
+        )
+
+    def create_customer(self) -> CustomerRecord:
+        """Insert one explicit customer, then reload through the read-only path."""
+
+        record = self.create_customer_record()
+        database_path = self._required_path(
+            "Records Database",
+            self.state.database_path,
+        )
+        self._reject_git_worktree_path("Records Database", database_path)
+        repository = self._customer_creation_repository_factory(
+            database_path,
+            initialize=False,
+            read_only=False,
+        )
+        created = repository.create_customer(record)
+        try:
+            self.load_customers()
+        except Exception as exc:
+            raise DesktopFormError(
+                "Customer was created, but the read-only customer reload failed."
+            ) from exc
+        return created
 
     def propose_output_paths(self, output_root: str | Path) -> tuple[Path, Path, Path]:
         root = Path(output_root).expanduser()
@@ -671,6 +757,18 @@ class ProposalDesktopController:
         return value
 
     @staticmethod
+    def _required_customer_text(label: str, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise DesktopFormError(f"{label} is required before creating a customer.")
+        return normalized
+
+    @staticmethod
+    def _optional_customer_text(value: str) -> str | None:
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
     def _required_path(label: str, value: str) -> Path:
         if not value.strip():
             raise DesktopFormError(f"{label} is required.")
@@ -763,6 +861,7 @@ class ProposalDesktopApp:
         self._root = root
         self._updating_widgets = False
         self._variables: dict[str, Any] = {}
+        self._customer_creation_variables: dict[str, Any] = {}
         self._build_widgets()
         self._bind_state_changes()
         self._refresh_scope_list(0)
@@ -794,6 +893,7 @@ class ProposalDesktopApp:
         )
 
         self._build_workspace_section()
+        self._build_customer_creation_section()
         self._build_job_section()
         self._build_details_section()
         self._build_actions_section()
@@ -808,6 +908,11 @@ class ProposalDesktopApp:
     def _string_variable(self, name: str, value: str) -> object:
         variable = self._tk.StringVar(value=value)
         self._variables[name] = variable
+        return variable
+
+    def _customer_creation_string_variable(self, name: str, value: str) -> object:
+        variable = self._tk.StringVar(value=value)
+        self._customer_creation_variables[name] = variable
         return variable
 
     def _labeled_entry(
@@ -887,8 +992,87 @@ class ProposalDesktopApp:
             command=self._load_customers,
         ).grid(row=3, column=2, padx=(8, 0), pady=3)
 
+    def _build_customer_creation_section(self) -> None:
+        state = self.controller.customer_creation_state
+        frame = self._section("Create Customer — Explicit Local Insert", 1)
+        for row, (label, name, value) in enumerate(
+            (
+                ("Customer ID", "customer_id", state.customer_id),
+                ("Display Name", "display_name", state.display_name),
+                ("Phone", "phone", state.phone),
+                ("Email", "email", state.email),
+                (
+                    "Billing Street Address",
+                    "billing_street_address",
+                    state.billing_street_address,
+                ),
+                (
+                    "Billing City / State / ZIP",
+                    "billing_city_state_zip",
+                    state.billing_city_state_zip,
+                ),
+            )
+        ):
+            self._ttk.Label(frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+            variable = self._customer_creation_string_variable(name, value)
+            self._ttk.Entry(frame, textvariable=variable).grid(
+                row=row,
+                column=1,
+                sticky="ew",
+                pady=3,
+            )
+
+        notes_row = len(self._customer_creation_variables)
+        self._ttk.Label(frame, text="Customer Notes").grid(
+            row=notes_row,
+            column=0,
+            sticky="nw",
+            padx=(0, 8),
+            pady=3,
+        )
+        self._customer_creation_notes_text = self._tk.Text(
+            frame,
+            height=4,
+            wrap="word",
+        )
+        self._customer_creation_notes_text.grid(
+            row=notes_row,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=3,
+        )
+        self._customer_creation_notes_text.edit_modified(False)
+
+        action_row = notes_row + 1
+        self._ttk.Button(
+            frame,
+            text="Create Customer",
+            command=self._create_customer,
+        ).grid(row=action_row, column=1, sticky="w", pady=(6, 3))
+        self._customer_creation_status_variable = self._tk.StringVar(
+            value="No customer creation requested."
+        )
+        self._ttk.Label(
+            frame,
+            textvariable=self._customer_creation_status_variable,
+            wraplength=760,
+        ).grid(
+            row=action_row + 1,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(3, 0),
+        )
+
     def _build_job_section(self) -> None:
-        frame = self._section("Step 2 — Existing Job", 1)
+        frame = self._section("Step 2 — Existing Job", 2)
         self._ttk.Label(frame, text="Existing Job").grid(
             row=0,
             column=0,
@@ -907,7 +1091,7 @@ class ProposalDesktopApp:
 
     def _build_details_section(self) -> None:
         state = self.controller.state
-        frame = self._section("Step 3 — Explicit Proposal Details", 2)
+        frame = self._section("Step 3 — Explicit Proposal Details", 3)
         row = 0
         for label, name, value, browse_command in (
             ("Proposal Date", "proposal_date", state.proposal_date, None),
@@ -1019,7 +1203,7 @@ class ProposalDesktopApp:
         return widget
 
     def _build_actions_section(self) -> None:
-        frame = self._section("Step 4 — Validate, Generate, and Open", 3)
+        frame = self._section("Step 4 — Validate, Generate, and Open", 4)
         buttons = self._ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=3, sticky="ew")
         self._validate_button = self._ttk.Button(
@@ -1085,6 +1269,13 @@ class ProposalDesktopApp:
                 "write",
                 lambda *_args, field_name=name: self._on_text_field_changed(field_name),
             )
+        for name, variable in self._customer_creation_variables.items():
+            variable.trace_add(
+                "write",
+                lambda *_args, field_name=name: (
+                    self._on_customer_creation_field_changed(field_name)
+                ),
+            )
         self._starting_at_variable.trace_add(
             "write",
             lambda *_args: self._on_starting_at_changed(),
@@ -1104,6 +1295,10 @@ class ProposalDesktopApp:
                 event.widget,
             ),
         )
+        self._customer_creation_notes_text.bind(
+            "<<Modified>>",
+            self._on_customer_creation_notes_changed,
+        )
 
     def _on_text_field_changed(self, name: str) -> None:
         if self._updating_widgets:
@@ -1118,6 +1313,28 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=())
             _clear_combobox_selection(self._job_combo, self._job_variable)
         self._show_invalidated_state()
+
+    def _on_customer_creation_field_changed(self, name: str) -> None:
+        self.controller.set_customer_creation_field(
+            name,
+            self._customer_creation_variables[name].get(),
+        )
+        self._customer_creation_status_variable.set(
+            "Customer details changed; click Create Customer to insert one record."
+        )
+
+    def _on_customer_creation_notes_changed(self, event: object) -> None:
+        widget = event.widget
+        if not widget.edit_modified():
+            return
+        self.controller.set_customer_creation_field(
+            "notes",
+            widget.get("1.0", "end-1c"),
+        )
+        widget.edit_modified(False)
+        self._customer_creation_status_variable.set(
+            "Customer details changed; click Create Customer to insert one record."
+        )
 
     def _on_starting_at_changed(self) -> None:
         if self._updating_widgets:
@@ -1295,6 +1512,33 @@ class ProposalDesktopApp:
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
             self._show_invalidated_state()
+            self._show_error(exc)
+
+    def _create_customer(self) -> None:
+        try:
+            created = self.controller.create_customer()
+            self._customer_combo.configure(
+                values=self.controller.customer_display_labels,
+            )
+            _clear_combobox_selection(
+                self._customer_combo,
+                self._customer_variable,
+            )
+            self._job_combo.configure(values=())
+            _clear_combobox_selection(self._job_combo, self._job_variable)
+            self._show_invalidated_state()
+            self._customer_creation_status_variable.set(
+                f"Customer {created.customer_id} created; customers reloaded."
+            )
+        except CustomerAlreadyExistsError as exc:
+            self._customer_creation_status_variable.set(
+                "Duplicate customer ID rejected; the existing customer was unchanged."
+            )
+            self._show_error(exc)
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._customer_creation_status_variable.set(
+                "Customer creation failed; review the error before retrying."
+            )
             self._show_error(exc)
 
     def _on_customer_selected(self, _event: object = None) -> None:

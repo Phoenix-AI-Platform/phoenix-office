@@ -1,14 +1,42 @@
 """Tests for SQLite customer and job repositories."""
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
 from phoenix_office.records import (
+    CustomerAlreadyExistsError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
     initialize_records_database,
 )
+
+
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _schema_signature(db_path: Path) -> list[tuple[str, str, str]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT type, name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+            ORDER BY type, name
+            """
+        ).fetchall()
+
+
+def _sqlite_sidecars(db_path: Path) -> list[Path]:
+    return [
+        Path(f"{db_path}{suffix}")
+        for suffix in ("-wal", "-shm", "-journal")
+        if Path(f"{db_path}{suffix}").exists()
+    ]
 
 
 def _customer(customer_id: str, display_name: str | None = None) -> CustomerRecord:
@@ -52,6 +80,113 @@ def test_sqlite_customer_repository_saves_and_gets_customer(tmp_path: Path) -> N
 
     assert saved is customer
     assert repository.get_customer("cust-1") == customer
+
+
+def test_sqlite_create_customer_inserts_only_one_customer_and_preserves_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    existing_customer = _customer("cust-existing", "Existing Customer")
+    existing_job = _job("job-existing", existing_customer.customer_id, "Existing Job")
+    customer_repository.save_customer(existing_customer)
+    job_repository.save_job(existing_job)
+    customers_before = customer_repository.list_customers()
+    jobs_before = job_repository.list_jobs()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    created_customer = CustomerRecord(
+        customer_id="cust-created",
+        display_name="Created Customer",
+        phone="555-0102",
+        email="created@example.test",
+        billing_street_address="200 Synthetic Ave",
+        billing_city_state_zip="Testville, WI 53000",
+        notes=["Synthetic note one", "Synthetic note two"],
+    )
+
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+    created = repository.create_customer(created_customer)
+
+    customers_after = customer_repository.list_customers()
+    jobs_after = job_repository.list_jobs()
+    assert created == created_customer
+    assert len(customers_after) == len(customers_before) + 1
+    assert customers_after[:-1] == customers_before
+    assert customers_after[-1] == created_customer
+    assert jobs_after == jobs_before
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) != hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_customer_duplicate_rejects_without_database_change(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteCustomerRepository(db_path)
+    original = _customer("cust-duplicate", "Original Customer")
+    repository.save_customer(original)
+    hash_before = _file_hash(db_path)
+    schema_before = _schema_signature(db_path)
+
+    with pytest.raises(CustomerAlreadyExistsError):
+        repository.create_customer(_customer("cust-duplicate", "Replacement Attempt"))
+
+    assert _file_hash(db_path) == hash_before
+    assert repository.list_customers() == [original]
+    assert _schema_signature(db_path) == schema_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_customer_rejects_read_only_repository(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    SQLiteCustomerRepository(db_path)
+    hash_before = _file_hash(db_path)
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=True,
+    )
+
+    with pytest.raises(PermissionError, match="read-only"):
+        repository.create_customer(_customer("cust-created"))
+
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_create_customer_does_not_create_nonexistent_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing.sqlite"
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+
+    with pytest.raises(ValueError, match="must already exist"):
+        repository.create_customer(_customer("cust-created"))
+
+    assert not db_path.exists()
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_customer_repository_initialize_false_does_not_create_schema(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "empty.sqlite"
+    db_path.touch()
+
+    SQLiteCustomerRepository(db_path, initialize=False, read_only=False)
+
+    assert db_path.read_bytes() == b""
 
 
 def test_sqlite_customer_repository_missing_customer_returns_none(tmp_path: Path) -> None:
