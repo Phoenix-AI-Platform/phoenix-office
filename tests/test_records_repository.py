@@ -125,6 +125,31 @@ def test_update_customer_rejects_stale_original_without_overwrite() -> None:
     assert repository.get_customer("cust-1") is newer
 
 
+def test_update_customer_ignores_nonpersisted_job_fields_in_stale_token() -> None:
+    repository = InMemoryCustomerRepository()
+    current = CustomerRecord(
+        customer_id="cust-1",
+        display_name="Original",
+        phone="555-0100",
+        notes=["Persisted note"],
+        job_street_address="100 Current Job Site",
+        job_city_state_zip="Current, WI 00000",
+    )
+    expected_original = current.model_copy(
+        update={
+            "job_street_address": "200 Historical Job Site",
+            "job_city_state_zip": "Historical, WI 00000",
+        }
+    )
+    updated = current.model_copy(update={"display_name": "Updated"})
+    repository.save_customer(current)
+
+    result = repository.update_customer(updated, expected_original)
+
+    assert result is updated
+    assert repository.get_customer("cust-1") is updated
+
+
 def test_update_customer_rejects_customer_id_change() -> None:
     repository = InMemoryCustomerRepository()
     original = _customer("cust-1", "Original")

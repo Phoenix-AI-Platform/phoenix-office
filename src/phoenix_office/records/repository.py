@@ -23,6 +23,20 @@ class JobAlreadyExistsError(ValueError):
     """A create-only job insert found an existing job id."""
 
 
+def _persisted_customer_values(record: CustomerRecord) -> tuple[object, ...]:
+    """Return only values represented by the persisted customer schema."""
+
+    return (
+        record.customer_id,
+        record.display_name,
+        record.phone,
+        record.email,
+        record.billing_street_address,
+        record.billing_city_state_zip,
+        tuple(record.notes),
+    )
+
+
 class CustomerRepository(Protocol):
     """Storage boundary for customer records."""
 
@@ -105,7 +119,9 @@ class InMemoryCustomerRepository:
             raise CustomerNotFoundError(
                 "Customer no longer exists; reload customers before retrying."
             )
-        if current != expected_original:
+        if _persisted_customer_values(current) != _persisted_customer_values(
+            expected_original
+        ):
             raise CustomerUpdateConflictError(
                 "Customer changed elsewhere; reload customers before retrying."
             )

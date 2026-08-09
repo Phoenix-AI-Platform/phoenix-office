@@ -14,6 +14,7 @@ from phoenix_office.records.repository import (
     CustomerNotFoundError,
     CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    _persisted_customer_values,
 )
 
 
@@ -468,20 +469,6 @@ def _customer_from_row(row: sqlite3.Row) -> CustomerRecord:
         billing_street_address=row["billing_street_address"],
         billing_city_state_zip=row["billing_city_state_zip"],
         notes=_load_json_list(row["notes_json"]),
-    )
-
-
-def _persisted_customer_values(record: CustomerRecord) -> tuple[Any, ...]:
-    """Return only values represented by the current SQLite customer schema."""
-
-    return (
-        record.customer_id,
-        record.display_name,
-        record.phone,
-        record.email,
-        record.billing_street_address,
-        record.billing_city_state_zip,
-        tuple(record.notes),
     )
 
 
