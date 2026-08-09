@@ -5,7 +5,9 @@ import pytest
 from phoenix_office.models.records import CustomerRecord, JobRecord
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    CustomerNotFoundError,
     CustomerRepository,
+    CustomerUpdateConflictError,
     InMemoryCustomerRepository,
     InMemoryJobRepository,
     JobAlreadyExistsError,
@@ -87,6 +89,51 @@ def test_saving_same_customer_id_overwrites() -> None:
 
     assert repository.get_customer("cust-1") is replacement
     assert repository.list_customers() == [replacement]
+
+
+def test_update_customer_replaces_matching_existing_customer() -> None:
+    repository = InMemoryCustomerRepository()
+    original = _customer("cust-1", "Original")
+    updated = _customer("cust-1", "Updated")
+    repository.save_customer(original)
+
+    result = repository.update_customer(updated, original)
+
+    assert result is updated
+    assert repository.get_customer("cust-1") is updated
+
+
+def test_update_customer_rejects_missing_customer_without_creating() -> None:
+    repository = InMemoryCustomerRepository()
+    original = _customer("cust-1", "Original")
+
+    with pytest.raises(CustomerNotFoundError):
+        repository.update_customer(_customer("cust-1", "Updated"), original)
+
+    assert repository.list_customers() == []
+
+
+def test_update_customer_rejects_stale_original_without_overwrite() -> None:
+    repository = InMemoryCustomerRepository()
+    original = _customer("cust-1", "Original")
+    newer = _customer("cust-1", "Newer")
+    repository.save_customer(newer)
+
+    with pytest.raises(CustomerUpdateConflictError):
+        repository.update_customer(_customer("cust-1", "Stale Update"), original)
+
+    assert repository.get_customer("cust-1") is newer
+
+
+def test_update_customer_rejects_customer_id_change() -> None:
+    repository = InMemoryCustomerRepository()
+    original = _customer("cust-1", "Original")
+    repository.save_customer(original)
+
+    with pytest.raises(ValueError, match="customer ID cannot change"):
+        repository.update_customer(_customer("cust-2", "Updated"), original)
+
+    assert repository.list_customers() == [original]
 
 
 def test_list_customers_preserves_insertion_order() -> None:

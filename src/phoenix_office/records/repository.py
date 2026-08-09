@@ -11,6 +11,14 @@ class CustomerAlreadyExistsError(ValueError):
     """A create-only customer insert found an existing customer id."""
 
 
+class CustomerNotFoundError(ValueError):
+    """A guarded customer update found that the original customer is missing."""
+
+
+class CustomerUpdateConflictError(ValueError):
+    """A guarded customer update found newer persisted customer values."""
+
+
 class JobAlreadyExistsError(ValueError):
     """A create-only job insert found an existing job id."""
 
@@ -24,6 +32,14 @@ class CustomerRepository(Protocol):
 
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
         """Save or overwrite a customer record."""
+        ...
+
+    def update_customer(
+        self,
+        record: CustomerRecord,
+        expected_original: CustomerRecord,
+    ) -> CustomerRecord:
+        """Update one unchanged existing customer without creating it."""
         ...
 
     def get_customer(self, customer_id: str) -> CustomerRecord | None:
@@ -74,6 +90,25 @@ class InMemoryCustomerRepository:
         return record
 
     def save_customer(self, record: CustomerRecord) -> CustomerRecord:
+        self._customers[record.customer_id] = record
+        return record
+
+    def update_customer(
+        self,
+        record: CustomerRecord,
+        expected_original: CustomerRecord,
+    ) -> CustomerRecord:
+        if record.customer_id != expected_original.customer_id:
+            raise ValueError("customer ID cannot change during an update")
+        current = self._customers.get(record.customer_id)
+        if current is None:
+            raise CustomerNotFoundError(
+                "Customer no longer exists; reload customers before retrying."
+            )
+        if current != expected_original:
+            raise CustomerUpdateConflictError(
+                "Customer changed elsewhere; reload customers before retrying."
+            )
         self._customers[record.customer_id] = record
         return record
 
