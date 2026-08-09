@@ -1,6 +1,7 @@
 """Tests for SQLite customer and job repositories."""
 
 import hashlib
+import inspect
 import sqlite3
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import pytest
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    CustomerNotFoundError,
+    CustomerUpdateConflictError,
     JobAlreadyExistsError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
@@ -206,6 +209,206 @@ def test_sqlite_customer_repository_overwrites_same_customer_id(tmp_path: Path) 
 
     assert repository.get_customer("cust-1") == replacement
     assert repository.list_customers() == [replacement]
+
+
+def test_sqlite_update_customer_changes_only_one_existing_customer(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    original = CustomerRecord(
+        customer_id="cust-a",
+        display_name="Original Customer",
+        phone="555-0100",
+        notes=["Original note"],
+    )
+    other = _customer("cust-b", "Other Customer")
+    jobs = (
+        _job("job-a", "cust-a", "Customer A Job"),
+        _job("job-b", "cust-b", "Customer B Job"),
+    )
+    customer_repository.save_customer(original)
+    customer_repository.save_customer(other)
+    for job in jobs:
+        job_repository.save_job(job)
+    customers_before = customer_repository.list_customers()
+    jobs_before = job_repository.list_jobs()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    updated = CustomerRecord(
+        customer_id="cust-a",
+        display_name="Updated Customer",
+        phone=None,
+        email="updated@example.test",
+        billing_street_address="400 Synthetic Ave.",
+        billing_city_state_zip="Example, WI 00000",
+        notes=["Updated note"],
+    )
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+
+    result = repository.update_customer(updated, original)
+
+    customers_after = customer_repository.list_customers()
+    assert result is updated
+    assert len(customers_after) == len(customers_before)
+    assert customers_after == [updated, other]
+    assert job_repository.list_jobs() == jobs_before
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) != hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_customer_rejects_stale_original_without_mutation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    original = _customer("cust-a", "Original Customer")
+    newer = _customer("cust-a", "Newer Customer")
+    job = _job("job-a", "cust-a", "Existing Job")
+    repository.save_customer(original)
+    job_repository.save_job(job)
+    repository.save_customer(newer)
+    hash_before = _file_hash(db_path)
+    schema_before = _schema_signature(db_path)
+    jobs_before = job_repository.list_jobs()
+
+    with pytest.raises(CustomerUpdateConflictError):
+        repository.update_customer(_customer("cust-a", "Stale Update"), original)
+
+    assert repository.get_customer("cust-a") == newer
+    assert _file_hash(db_path) == hash_before
+    assert _schema_signature(db_path) == schema_before
+    assert job_repository.list_jobs() == jobs_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_customer_ignores_nonpersisted_job_fields_in_stale_token(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteCustomerRepository(db_path)
+    persisted = _customer("cust-a", "Original Customer")
+    repository.save_customer(persisted)
+    expected = persisted.model_copy(
+        update={
+            "job_street_address": "Not a persisted concurrency value",
+            "job_city_state_zip": "Example, WI 00000",
+        }
+    )
+    updated = _customer("cust-a", "Updated Customer")
+
+    repository.update_customer(updated, expected)
+
+    assert repository.get_customer("cust-a") == updated
+
+
+def test_sqlite_update_customer_rejects_missing_without_recreation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    original = _customer("cust-a", "Original Customer")
+    job = _job("job-a", "cust-a", "Existing Job")
+    repository.save_customer(original)
+    job_repository.save_job(job)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DELETE FROM customers WHERE customer_id = ?", ("cust-a",))
+        connection.commit()
+    hash_before = _file_hash(db_path)
+    jobs_before = job_repository.list_jobs()
+
+    with pytest.raises(CustomerNotFoundError):
+        repository.update_customer(_customer("cust-a", "Updated Customer"), original)
+
+    assert repository.get_customer("cust-a") is None
+    assert _file_hash(db_path) == hash_before
+    assert job_repository.list_jobs() == jobs_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_customer_rejects_customer_id_change(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteCustomerRepository(db_path)
+    original = _customer("cust-a", "Original Customer")
+    repository.save_customer(original)
+    hash_before = _file_hash(db_path)
+
+    with pytest.raises(ValueError, match="customer ID cannot change"):
+        repository.update_customer(_customer("cust-b", "Updated Customer"), original)
+
+    assert repository.list_customers() == [original]
+    assert _file_hash(db_path) == hash_before
+
+
+def test_sqlite_update_customer_rejects_read_only_repository(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    writable = SQLiteCustomerRepository(db_path)
+    original = _customer("cust-a", "Original Customer")
+    writable.save_customer(original)
+    hash_before = _file_hash(db_path)
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=True,
+    )
+
+    with pytest.raises(PermissionError, match="read-only"):
+        repository.update_customer(_customer("cust-a", "Updated Customer"), original)
+
+    assert _file_hash(db_path) == hash_before
+
+
+def test_sqlite_update_customer_does_not_create_nonexistent_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing.sqlite"
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+    original = _customer("cust-a", "Original Customer")
+
+    with pytest.raises(ValueError, match="must already exist"):
+        repository.update_customer(_customer("cust-a", "Updated Customer"), original)
+
+    assert not db_path.exists()
+
+
+def test_sqlite_update_customer_rejects_missing_table_without_initialization(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "empty.sqlite"
+    db_path.touch()
+    bytes_before = db_path.read_bytes()
+    repository = SQLiteCustomerRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    )
+    original = _customer("cust-a", "Original Customer")
+
+    with pytest.raises(ValueError, match="not usable for customer updates"):
+        repository.update_customer(_customer("cust-a", "Updated Customer"), original)
+
+    assert db_path.read_bytes() == bytes_before
+
+
+def test_sqlite_update_customer_uses_plain_update_only() -> None:
+    source = inspect.getsource(SQLiteCustomerRepository.update_customer)
+
+    assert "UPDATE customers" in source
+    assert "INSERT" not in source
+    assert "ON CONFLICT" not in source
+    assert "save_customer" not in source
 
 
 def test_sqlite_customer_repository_lists_in_insertion_order(tmp_path: Path) -> None:

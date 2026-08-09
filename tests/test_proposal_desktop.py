@@ -33,6 +33,8 @@ from phoenix_office.proposal_build import (
 )
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    CustomerNotFoundError,
+    CustomerUpdateConflictError,
     JobAlreadyExistsError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
@@ -70,6 +72,8 @@ class ControllerHarness:
     customer_factory_calls: list[tuple[Path, bool, bool]]
     customer_creation_factory_calls: list[tuple[Path, bool, bool]]
     customer_create_calls: list[CustomerRecord]
+    customer_update_factory_calls: list[tuple[Path, bool, bool]]
+    customer_update_calls: list[tuple[CustomerRecord, CustomerRecord]]
     job_factory_calls: list[tuple[Path, bool, bool]]
     job_list_calls: list[str]
     job_creation_factory_calls: list[tuple[Path, bool, bool]]
@@ -181,6 +185,7 @@ class AppHarness:
     messagebox: FakeMessagebox
     filedialog: FakeFileDialog
     customer_creation_status_variable: FakeVariable
+    customer_edit_status_variable: FakeVariable
     job_creation_status_variable: FakeVariable
 
 
@@ -200,6 +205,9 @@ def _headless_app(
     filedialog = FakeFileDialog()
     customer_creation_status_variable = FakeVariable(
         "No customer creation requested."
+    )
+    customer_edit_status_variable = FakeVariable(
+        "Select an existing customer to edit."
     )
     job_creation_status_variable = FakeVariable("No job creation requested.")
     app.controller = controller
@@ -232,6 +240,19 @@ def _headless_app(
         controller.customer_creation_state.notes
     )
     app._customer_creation_status_variable = customer_creation_status_variable
+    app._customer_edit_variables = {
+        name: FakeVariable(getattr(controller.customer_edit_state, name))
+        for name in (
+            "customer_id",
+            "display_name",
+            "phone",
+            "email",
+            "billing_street_address",
+            "billing_city_state_zip",
+        )
+    }
+    app._customer_edit_notes_text = FakeText(controller.customer_edit_state.notes)
+    app._customer_edit_status_variable = customer_edit_status_variable
     app._job_creation_variables = {
         name: FakeVariable(getattr(controller.job_creation_state, name))
         for name in (
@@ -279,6 +300,7 @@ def _headless_app(
         messagebox=messagebox,
         filedialog=filedialog,
         customer_creation_status_variable=customer_creation_status_variable,
+        customer_edit_status_variable=customer_edit_status_variable,
         job_creation_status_variable=job_creation_status_variable,
     )
 
@@ -305,6 +327,8 @@ def _configured_controller(
     customer_factory_calls: list[tuple[Path, bool, bool]] = []
     customer_creation_factory_calls: list[tuple[Path, bool, bool]] = []
     customer_create_calls: list[CustomerRecord] = []
+    customer_update_factory_calls: list[tuple[Path, bool, bool]] = []
+    customer_update_calls: list[tuple[CustomerRecord, CustomerRecord]] = []
     job_factory_calls: list[tuple[Path, bool, bool]] = []
     job_list_calls: list[str] = []
     job_creation_factory_calls: list[tuple[Path, bool, bool]] = []
@@ -340,6 +364,32 @@ def _configured_controller(
             customer_create_calls.append(record)
             return record
 
+    class CustomerUpdateRepository:
+        def update_customer(
+            self,
+            record: CustomerRecord,
+            expected_original: CustomerRecord,
+        ) -> CustomerRecord:
+            index = next(
+                (
+                    index
+                    for index, customer in enumerate(customer_records)
+                    if customer.customer_id == record.customer_id
+                ),
+                None,
+            )
+            if index is None:
+                raise CustomerNotFoundError(
+                    "Customer no longer exists; reload customers before retrying."
+                )
+            if customer_records[index] != expected_original:
+                raise CustomerUpdateConflictError(
+                    "Customer changed elsewhere; reload customers before retrying."
+                )
+            customer_records[index] = record
+            customer_update_calls.append((record, expected_original))
+            return record
+
     class JobRepository:
         def list_jobs_for_customer(self, customer_id: str) -> list[JobRecord]:
             job_list_calls.append(customer_id)
@@ -372,6 +422,15 @@ def _configured_controller(
     ) -> Any:
         job_factory_calls.append((database_path, initialize, read_only))
         return JobRepository()
+
+    def customer_update_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> Any:
+        customer_update_factory_calls.append((database_path, initialize, read_only))
+        return CustomerUpdateRepository()
 
     def customer_creation_factory(
         database_path: Path,
@@ -420,6 +479,7 @@ def _configured_controller(
         build_function=build,
         customer_repository_factory=customer_factory,
         customer_creation_repository_factory=customer_creation_factory,
+        customer_update_repository_factory=customer_update_factory,
         job_repository_factory=job_factory,
         job_creation_repository_factory=job_creation_factory,
         path_opener=opened_paths.append,
@@ -442,6 +502,8 @@ def _configured_controller(
         customer_factory_calls=customer_factory_calls,
         customer_creation_factory_calls=customer_creation_factory_calls,
         customer_create_calls=customer_create_calls,
+        customer_update_factory_calls=customer_update_factory_calls,
+        customer_update_calls=customer_update_calls,
         job_factory_calls=job_factory_calls,
         job_list_calls=job_list_calls,
         job_creation_factory_calls=job_creation_factory_calls,
@@ -559,6 +621,8 @@ def test_initial_defaults_are_explicit_and_do_not_invent_business_values() -> No
     assert controller.state.selected_customer_id == ""
     assert controller.state.selected_job_id == ""
     assert controller.customer_creation_state == proposal_desktop.CustomerCreationState()
+    assert controller.customer_edit_state == proposal_desktop.CustomerEditState()
+    assert controller.customer_edit_expected_original is None
 
 
 def test_explicit_customer_fields_construct_only_the_persisted_customer_values(
@@ -754,6 +818,318 @@ def test_gui_customer_creation_failures_are_controlled_and_write_nothing(
     assert harness.customer_create_calls == []
     assert harness.controller.customers[0] == original
     assert harness.controller.customers[0].display_name == "Synthetic Customer"
+
+
+def test_customer_selection_populates_edit_state_and_exact_loaded_snapshot(
+    tmp_path: Path,
+) -> None:
+    customer = CustomerRecord(
+        customer_id="customer-synthetic-001",
+        display_name="Original Synthetic Customer",
+        phone="555-0100",
+        email="original@example.invalid",
+        billing_street_address="100 Synthetic Ave.",
+        billing_city_state_zip="Example, WI 00000",
+        notes=["First note", "Second note"],
+    )
+    harness = _configured_controller(tmp_path, customers=(customer,), jobs=())
+    controller = harness.controller
+
+    assert controller.customer_edit_expected_original is customer
+    assert controller.customer_edit_state == proposal_desktop.CustomerEditState(
+        customer_id=customer.customer_id,
+        display_name=customer.display_name,
+        phone=customer.phone or "",
+        email=customer.email or "",
+        billing_street_address=customer.billing_street_address or "",
+        billing_city_state_zip=customer.billing_city_state_zip or "",
+        notes="First note\nSecond note",
+    )
+
+
+def test_customer_edit_id_is_immutable_and_not_supported_by_setter(
+    tmp_path: Path,
+) -> None:
+    controller = _configured_controller(tmp_path).controller
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Unsupported"):
+        controller.set_customer_edit_field("customer_id", "renamed-customer")
+
+    assert controller.customer_edit_state.customer_id == "customer-synthetic-001"
+    source = inspect.getsource(
+        proposal_desktop.ProposalDesktopApp._build_customer_edit_section
+    )
+    assert 'state="readonly" if name == "customer_id" else "normal"' in source
+
+
+def test_customer_edit_snapshot_clears_on_database_change_and_customer_clear(
+    tmp_path: Path,
+) -> None:
+    controller = _configured_controller(tmp_path).controller
+    assert controller.customer_edit_expected_original is not None
+
+    controller.set_text_field("database_path", str(tmp_path / "other.sqlite"))
+
+    assert controller.customer_edit_state == proposal_desktop.CustomerEditState()
+    assert controller.customer_edit_expected_original is None
+
+
+def test_customer_switch_replaces_edit_state_and_snapshot(tmp_path: Path) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    original_snapshot = controller.customer_edit_expected_original
+
+    controller.select_customer("customer-synthetic-002")
+
+    assert controller.customer_edit_expected_original is harness.controller.customers[1]
+    assert controller.customer_edit_expected_original is not original_snapshot
+    assert controller.customer_edit_state.customer_id == "customer-synthetic-002"
+    assert controller.state.selected_job_id == ""
+
+
+def test_customer_update_record_normalizes_only_explicit_persisted_fields(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    for name, value in {
+        "display_name": "  Updated Synthetic Customer  ",
+        "phone": "   ",
+        "email": " updated@example.invalid ",
+        "billing_street_address": " 400 Synthetic Ave. ",
+        "billing_city_state_zip": " Example, WI 00000 ",
+        "notes": " First updated note\n\n Second updated note ",
+    }.items():
+        controller.set_customer_edit_field(name, value)
+
+    record = controller.create_customer_update_record()
+
+    assert record == CustomerRecord(
+        customer_id="customer-synthetic-001",
+        display_name="Updated Synthetic Customer",
+        phone=None,
+        email="updated@example.invalid",
+        billing_street_address="400 Synthetic Ave.",
+        billing_city_state_zip="Example, WI 00000",
+        notes=["First updated note", "Second updated note"],
+    )
+    assert harness.customer_update_factory_calls == []
+    assert harness.customer_update_calls == []
+
+
+def test_invalid_customer_edit_performs_no_write(tmp_path: Path) -> None:
+    harness = _configured_controller(tmp_path)
+    harness.controller.set_customer_edit_field("display_name", "   ")
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="required"):
+        harness.controller.update_customer()
+
+    assert harness.customer_update_factory_calls == []
+    assert harness.customer_update_calls == []
+
+
+def test_no_op_customer_save_rejects_before_writable_repository_and_keeps_hash(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(database_path)
+    customer_repository.save_customer(
+        CustomerRecord(
+            customer_id="customer-synthetic-001",
+            display_name="  Synthetic Customer  ",
+            phone="  555-0100  ",
+            notes=["  Existing explicit note  "],
+        )
+    )
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    controller.set_text_field("database_path", str(database_path))
+    controller.load_customers()
+    controller.select_customer("customer-synthetic-001")
+    hash_before = _database_hash(database_path)
+
+    with pytest.raises(proposal_desktop.NoCustomerChangesError):
+        controller.update_customer()
+
+    assert _database_hash(database_path) == hash_before
+
+
+def test_explicit_customer_update_uses_exact_snapshot_then_reloads_read_only(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    expected_original = controller.customer_edit_expected_original
+    read_calls_before = len(harness.customer_factory_calls)
+    job_calls_before = len(harness.job_factory_calls)
+    controller.set_customer_edit_field("display_name", "Updated Synthetic Customer")
+    controller.validate_draft()
+    assert controller.generation_enabled is True
+
+    updated = controller.update_customer()
+
+    assert harness.customer_update_factory_calls == [
+        (tmp_path / "records.sqlite", False, False)
+    ]
+    assert len(harness.customer_update_calls) == 1
+    assert harness.customer_update_calls[0][0] is updated
+    assert harness.customer_update_calls[0][1] is expected_original
+    assert len(harness.customer_factory_calls) == read_calls_before + 1
+    assert harness.customer_factory_calls[-1] == (
+        tmp_path / "records.sqlite",
+        False,
+        True,
+    )
+    assert len(harness.job_factory_calls) == job_calls_before + 1
+    assert harness.job_factory_calls[-1] == (
+        tmp_path / "records.sqlite",
+        False,
+        True,
+    )
+    assert controller.state.selected_customer_id == updated.customer_id
+    assert controller.state.selected_job_id == ""
+    assert controller.customer_edit_expected_original is updated
+    assert controller.customer_edit_state.display_name == updated.display_name
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("error", "status_prefix"),
+    [
+        (
+            CustomerNotFoundError(
+                "Customer no longer exists; reload customers before retrying."
+            ),
+            "Customer is missing",
+        ),
+        (
+            CustomerUpdateConflictError(
+                "Customer changed elsewhere; reload customers before retrying."
+            ),
+            "Customer changed elsewhere",
+        ),
+    ],
+)
+def test_customer_update_missing_or_stale_is_controlled_without_reload(
+    tmp_path: Path,
+    error: Exception,
+    status_prefix: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    expected_original = controller.customer_edit_expected_original
+    controller.set_customer_edit_field("display_name", "Update Attempt")
+    read_calls_before = len(harness.customer_factory_calls)
+    job_calls_before = len(harness.job_factory_calls)
+
+    class RejectingRepository:
+        def update_customer(
+            self,
+            record: CustomerRecord,
+            expected: CustomerRecord,
+        ) -> CustomerRecord:
+            del record, expected
+            raise error
+
+    controller._customer_update_repository_factory = (  # noqa: SLF001
+        lambda *_args, **_kwargs: RejectingRepository()
+    )
+    app_harness = _headless_app(controller)
+
+    app_harness.app._update_customer()
+
+    assert app_harness.customer_edit_status_variable.value.startswith(status_prefix)
+    assert len(app_harness.messagebox.errors) == 1
+    assert len(harness.customer_factory_calls) == read_calls_before
+    assert len(harness.job_factory_calls) == job_calls_before
+    assert controller.customer_edit_expected_original is expected_original
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.customer_edit_state.display_name == "Update Attempt"
+    assert controller.generation_enabled is False
+
+
+def test_gui_customer_edit_controls_are_explicit_and_typing_never_writes(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    app = app_harness.app
+    app._refresh_customer_edit_widgets()
+
+    assert app._customer_edit_variables["customer_id"].value == (
+        "customer-synthetic-001"
+    )
+    assert app._customer_edit_variables["display_name"].value == (
+        "Synthetic Customer"
+    )
+    app._customer_edit_variables["display_name"].set("Updated Synthetic Customer")
+    app._on_customer_edit_field_changed("display_name")
+
+    assert harness.customer_update_factory_calls == []
+    assert harness.customer_update_calls == []
+    assert app_harness.customer_edit_status_variable.value.startswith(
+        "Customer edit fields changed"
+    )
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
+    assert 'text="Save Customer Changes"' in source
+
+
+def test_gui_no_op_customer_save_is_status_only_without_error(tmp_path: Path) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+
+    app_harness.app._update_customer()
+
+    assert app_harness.customer_edit_status_variable.value == (
+        "No customer changes to save."
+    )
+    assert app_harness.messagebox.errors == []
+    assert harness.customer_update_factory_calls == []
+
+
+@pytest.mark.parametrize("invalid_state", ["no-selection", "blank-display-name"])
+def test_gui_invalid_customer_update_is_controlled_without_write(
+    tmp_path: Path,
+    invalid_state: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    if invalid_state == "no-selection":
+        controller.select_customer("")
+    else:
+        controller.set_customer_edit_field("display_name", "  ")
+    app_harness = _headless_app(controller)
+
+    app_harness.app._update_customer()
+
+    assert app_harness.customer_edit_status_variable.value.startswith(
+        "Customer update failed"
+    )
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.customer_update_factory_calls == []
+    assert harness.customer_update_calls == []
+
+
+def test_gui_customer_update_refreshes_edit_values_and_clears_job_selection(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_customer_edit_field("display_name", "Updated Synthetic Customer")
+    app_harness = _headless_app(controller)
+
+    app_harness.app._update_customer()
+
+    assert app_harness.customer_edit_status_variable.value.startswith(
+        "Customer updated"
+    )
+    assert app_harness.customer_combo.current() == 0
+    assert app_harness.job_combo.current() == -1
+    assert app_harness.app._customer_edit_variables["display_name"].value == (
+        "Updated Synthetic Customer"
+    )
+    assert controller.state.selected_job_id == ""
+    assert app_harness.messagebox.errors == []
 
 
 def test_job_creation_defaults_are_visible_and_have_no_customer_id_field() -> None:
@@ -1848,6 +2224,8 @@ def test_failed_customer_reload_clears_loaded_records_selections_and_authority(
     assert controller.open_actions_enabled is False
     assert len(harness.build_calls) == 1
     assert harness.opened_paths == []
+    assert controller.customer_edit_state == proposal_desktop.CustomerEditState()
+    assert controller.customer_edit_expected_original is None
 
 
 def test_failed_customer_transition_clears_selections_jobs_and_authority(
@@ -1880,6 +2258,8 @@ def test_failed_customer_transition_clears_selections_jobs_and_authority(
     assert controller.open_actions_enabled is False
     assert len(harness.build_calls) == 1
     assert harness.opened_paths == []
+    assert controller.customer_edit_state == proposal_desktop.CustomerEditState()
+    assert controller.customer_edit_expected_original is None
 
 
 def test_failed_job_selection_leaves_job_blank_and_generation_disabled(
@@ -2832,6 +3212,11 @@ def test_gui_customer_reload_failure_clears_customer_and_job_combos(
     assert len(app_harness.messagebox.errors) == 1
     assert harness.build_calls == []
     assert harness.opened_paths == []
+    assert all(
+        variable.get() == ""
+        for variable in app_harness.app._customer_edit_variables.values()
+    )
+    assert app_harness.app._customer_edit_notes_text.content == ""
 
 
 def test_gui_customer_selection_failure_clears_customer_and_job_combos(
@@ -2868,6 +3253,11 @@ def test_gui_customer_selection_failure_clears_customer_and_job_combos(
     assert len(app_harness.messagebox.errors) == 1
     assert harness.build_calls == []
     assert harness.opened_paths == []
+    assert all(
+        variable.get() == ""
+        for variable in app_harness.app._customer_edit_variables.values()
+    )
+    assert app_harness.app._customer_edit_notes_text.content == ""
 
 
 def test_gui_job_selection_failure_clears_job_combo_and_generation_authority(

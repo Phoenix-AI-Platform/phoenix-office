@@ -11,7 +11,10 @@ from typing import Any
 from phoenix_office.models.records import CustomerRecord, JobRecord, JobStatus, TankLocationType
 from phoenix_office.records.repository import (
     CustomerAlreadyExistsError,
+    CustomerNotFoundError,
+    CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    _persisted_customer_values,
 )
 
 
@@ -160,6 +163,72 @@ class SQLiteCustomerRepository:
                 ),
             )
             connection.commit()
+        return record
+
+    def update_customer(
+        self,
+        record: CustomerRecord,
+        expected_original: CustomerRecord,
+    ) -> CustomerRecord:
+        """Update one unchanged existing customer without inserting or upserting."""
+
+        if self.read_only:
+            raise PermissionError("read-only customer repositories cannot update customers")
+        if record.customer_id != expected_original.customer_id:
+            raise ValueError("customer ID cannot change during an update")
+        try:
+            with self._connect_existing_writable() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if not _table_exists(connection, "customers"):
+                    raise ValueError(
+                        "selected customer database is not usable for customer updates"
+                    )
+                row = connection.execute(
+                    "SELECT * FROM customers WHERE customer_id = ?",
+                    (record.customer_id,),
+                ).fetchone()
+                if row is None:
+                    raise CustomerNotFoundError(
+                        "Customer no longer exists; reload customers before retrying."
+                    )
+                current = _customer_from_row(row)
+                if _persisted_customer_values(current) != _persisted_customer_values(
+                    expected_original
+                ):
+                    raise CustomerUpdateConflictError(
+                        "Customer changed elsewhere; reload customers before retrying."
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE customers
+                    SET
+                        display_name = ?,
+                        phone = ?,
+                        email = ?,
+                        billing_street_address = ?,
+                        billing_city_state_zip = ?,
+                        notes_json = ?
+                    WHERE customer_id = ?
+                    """,
+                    (
+                        record.display_name,
+                        record.phone,
+                        record.email,
+                        record.billing_street_address,
+                        record.billing_city_state_zip,
+                        json.dumps(record.notes),
+                        record.customer_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise CustomerUpdateConflictError(
+                        "Customer changed elsewhere; reload customers before retrying."
+                    )
+                connection.commit()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "selected customer database is not usable for customer updates"
+            ) from exc
         return record
 
     def get_customer(self, customer_id: str) -> CustomerRecord | None:
