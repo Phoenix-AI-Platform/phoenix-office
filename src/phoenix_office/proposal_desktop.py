@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from phoenix_office.models.proposal import CompanyConfig, PricingLine, ScopeItem
-from phoenix_office.models.records import CustomerRecord, JobRecord
+from phoenix_office.models.records import (
+    CustomerRecord,
+    JobRecord,
+    JobStatus,
+    TankLocationType,
+)
 from phoenix_office.proposal_build import (
     ProposalDraftBuildRequest,
     ProposalDraftBuildResult,
@@ -29,6 +34,7 @@ from phoenix_office.proposal_build import (
 )
 from phoenix_office.records import (
     CustomerAlreadyExistsError,
+    JobAlreadyExistsError,
     RecordProposalDetails,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
@@ -37,6 +43,7 @@ from phoenix_office.records import (
 CustomerRepositoryFactory = Callable[..., SQLiteCustomerRepository]
 CustomerCreationRepositoryFactory = Callable[..., SQLiteCustomerRepository]
 JobRepositoryFactory = Callable[..., SQLiteJobRepository]
+JobCreationRepositoryFactory = Callable[..., SQLiteJobRepository]
 ValidationFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftValidationResult]
 BuildFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftBuildResult]
 PathOpener = Callable[[Path], None]
@@ -71,6 +78,21 @@ _CUSTOMER_CREATION_FIELDS = frozenset(
         "billing_street_address",
         "billing_city_state_zip",
         "notes",
+    }
+)
+
+_JOB_CREATION_FIELDS = frozenset(
+    {
+        "job_id",
+        "job_name",
+        "site_street_address",
+        "site_city_state_zip",
+        "status",
+        "tank_location_type",
+        "tank_size_gallons",
+        "tank_contents",
+        "scope_notes",
+        "internal_notes",
     }
 )
 
@@ -176,6 +198,23 @@ class CustomerCreationState:
     billing_street_address: str = ""
     billing_city_state_zip: str = ""
     notes: str = ""
+
+
+@dataclass(slots=True)
+class JobCreationState:
+    """Explicit operator-entered values for one create-only job insert."""
+
+    job_id: str = ""
+    job_name: str = ""
+    site_street_address: str = ""
+    site_city_state_zip: str = ""
+    status: str = JobStatus.draft.value
+    tank_location_type: str = TankLocationType.unknown.value
+    tank_size_gallons: str = ""
+    tank_contents: str = ""
+    contents_known: bool = False
+    scope_notes: str = ""
+    internal_notes: str = ""
 
 
 def _load_tkinter() -> tuple[object, object, object, object]:
@@ -295,6 +334,9 @@ class ProposalDesktopController:
             _default_customer_repository_factory
         ),
         job_repository_factory: JobRepositoryFactory = _default_job_repository_factory,
+        job_creation_repository_factory: JobCreationRepositoryFactory = (
+            _default_job_repository_factory
+        ),
         path_opener: PathOpener = _open_local_path,
         clock: Clock = datetime.now,
     ) -> None:
@@ -305,10 +347,12 @@ class ProposalDesktopController:
             customer_creation_repository_factory
         )
         self._job_repository_factory = job_repository_factory
+        self._job_creation_repository_factory = job_creation_repository_factory
         self._path_opener = path_opener
         self._clock = clock
         self.state = DesktopFormState(proposal_date=clock().date().isoformat())
         self.customer_creation_state = CustomerCreationState()
+        self.job_creation_state = JobCreationState()
         self._customers: tuple[CustomerRecord, ...] = ()
         self._jobs: tuple[JobRecord, ...] = ()
         self._validated_request: ProposalDraftBuildRequest | None = None
@@ -456,6 +500,90 @@ class ProposalDesktopController:
         except Exception as exc:
             raise DesktopFormError(
                 "Customer was created, but the read-only customer reload failed."
+            ) from exc
+        return created
+
+    def set_job_creation_field(self, name: str, value: str) -> None:
+        if name not in _JOB_CREATION_FIELDS:
+            raise DesktopFormError(f"Unsupported job creation field: {name}")
+        setattr(self.job_creation_state, name, value)
+
+    def set_job_creation_contents_known(self, value: bool) -> None:
+        self.job_creation_state.contents_known = bool(value)
+
+    def create_job_record(self) -> JobRecord:
+        """Validate explicit job values for the currently selected customer."""
+
+        customer_id = self._selected_loaded_customer_id()
+        state = self.job_creation_state
+        tank_size_text = state.tank_size_gallons.strip()
+        try:
+            tank_size = int(tank_size_text) if tank_size_text else None
+        except ValueError as exc:
+            raise DesktopFormError(
+                "Tank Size Gallons must be a whole number."
+            ) from exc
+
+        try:
+            return JobRecord(
+                job_id=self._required_job_text("Job ID", state.job_id),
+                customer_id=customer_id,
+                job_name=self._required_job_text("Job Name", state.job_name),
+                site_street_address=self._required_job_text(
+                    "Site Street Address",
+                    state.site_street_address,
+                ),
+                site_city_state_zip=self._required_job_text(
+                    "Site City / State / ZIP",
+                    state.site_city_state_zip,
+                ),
+                status=JobStatus(state.status),
+                tank_location_type=TankLocationType(state.tank_location_type),
+                tank_size_gallons=tank_size,
+                tank_contents=self._optional_job_text(state.tank_contents),
+                contents_known=state.contents_known,
+                scope_notes=self._normalize_job_notes(state.scope_notes),
+                internal_notes=self._normalize_job_notes(state.internal_notes),
+            )
+        except DesktopFormError:
+            raise
+        except ValueError as exc:
+            raise DesktopFormError(
+                "Enter valid explicit job details before creating the job."
+            ) from exc
+
+    def create_job(self) -> JobRecord:
+        """Insert one explicit job, then reload selected-customer jobs read-only."""
+
+        record = self.create_job_record()
+        database_path = self._required_path(
+            "Records Database",
+            self.state.database_path,
+        )
+        self._reject_git_worktree_path("Records Database", database_path)
+
+        customer_repository = self._customer_repository_factory(
+            database_path,
+            initialize=False,
+            read_only=True,
+        )
+        current_customer = customer_repository.get_customer(record.customer_id)
+        if current_customer is None:
+            raise DesktopFormError(
+                "The selected customer is stale or missing; reload customers."
+            )
+
+        repository = self._job_creation_repository_factory(
+            database_path,
+            initialize=False,
+            read_only=False,
+        )
+        created = repository.create_job(record)
+        try:
+            self.select_customer(record.customer_id)
+        except Exception as exc:
+            raise DesktopFormError(
+                "Job was created, but the read-only job reload failed."
             ) from exc
         return created
 
@@ -768,6 +896,32 @@ class ProposalDesktopController:
         normalized = value.strip()
         return normalized or None
 
+    def _selected_loaded_customer_id(self) -> str:
+        customer_id = self.state.selected_customer_id
+        if not customer_id:
+            raise DesktopFormError("Select an existing customer before creating a job.")
+        if not any(customer.customer_id == customer_id for customer in self._customers):
+            raise DesktopFormError(
+                "The selected customer is stale or missing; reload customers."
+            )
+        return customer_id
+
+    @staticmethod
+    def _required_job_text(label: str, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise DesktopFormError(f"{label} is required to create a job.")
+        return normalized
+
+    @staticmethod
+    def _optional_job_text(value: str) -> str | None:
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_job_notes(value: str) -> list[str]:
+        return [line.strip() for line in value.splitlines() if line.strip()]
+
     @staticmethod
     def _required_path(label: str, value: str) -> Path:
         if not value.strip():
@@ -862,6 +1016,7 @@ class ProposalDesktopApp:
         self._updating_widgets = False
         self._variables: dict[str, Any] = {}
         self._customer_creation_variables: dict[str, Any] = {}
+        self._job_creation_variables: dict[str, Any] = {}
         self._build_widgets()
         self._bind_state_changes()
         self._refresh_scope_list(0)
@@ -895,6 +1050,7 @@ class ProposalDesktopApp:
         self._build_workspace_section()
         self._build_customer_creation_section()
         self._build_job_section()
+        self._build_job_creation_section()
         self._build_details_section()
         self._build_actions_section()
 
@@ -913,6 +1069,11 @@ class ProposalDesktopApp:
     def _customer_creation_string_variable(self, name: str, value: str) -> object:
         variable = self._tk.StringVar(value=value)
         self._customer_creation_variables[name] = variable
+        return variable
+
+    def _job_creation_string_variable(self, name: str, value: str) -> object:
+        variable = self._tk.StringVar(value=value)
+        self._job_creation_variables[name] = variable
         return variable
 
     def _labeled_entry(
@@ -1089,9 +1250,111 @@ class ProposalDesktopApp:
         self._job_combo.grid(row=0, column=1, sticky="ew", pady=3)
         self._job_combo.bind("<<ComboboxSelected>>", self._on_job_selected)
 
+    def _build_job_creation_section(self) -> None:
+        state = self.controller.job_creation_state
+        frame = self._section("Create Job — Explicit Local Insert", 3)
+        fields = (
+            ("Job ID", "job_id", state.job_id),
+            ("Job Name", "job_name", state.job_name),
+            ("Site Street Address", "site_street_address", state.site_street_address),
+            (
+                "Site City / State / ZIP",
+                "site_city_state_zip",
+                state.site_city_state_zip,
+            ),
+            ("Tank Size Gallons", "tank_size_gallons", state.tank_size_gallons),
+            ("Tank Contents", "tank_contents", state.tank_contents),
+        )
+        for row, (label, name, value) in enumerate(fields):
+            self._ttk.Label(frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+            variable = self._job_creation_string_variable(name, value)
+            self._ttk.Entry(frame, textvariable=variable).grid(
+                row=row,
+                column=1,
+                sticky="ew",
+                pady=3,
+            )
+
+        row = len(fields)
+        for label, name, value, choices in (
+            ("Status", "status", state.status, tuple(status.value for status in JobStatus)),
+            (
+                "Tank Location",
+                "tank_location_type",
+                state.tank_location_type,
+                tuple(location.value for location in TankLocationType),
+            ),
+        ):
+            self._ttk.Label(frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+            variable = self._job_creation_string_variable(name, value)
+            self._ttk.Combobox(
+                frame,
+                textvariable=variable,
+                values=choices,
+                state="readonly",
+            ).grid(row=row, column=1, sticky="ew", pady=3)
+            row += 1
+
+        self._job_creation_contents_known_variable = self._tk.BooleanVar(
+            value=state.contents_known
+        )
+        self._ttk.Checkbutton(
+            frame,
+            text="Tank contents known",
+            variable=self._job_creation_contents_known_variable,
+        ).grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        self._job_creation_scope_notes_text = self._multiline_field(
+            frame,
+            row,
+            "Scope Notes",
+            state.scope_notes,
+        )
+        row += 1
+        self._job_creation_internal_notes_text = self._multiline_field(
+            frame,
+            row,
+            "Internal Notes",
+            state.internal_notes,
+        )
+        row += 1
+
+        self._ttk.Button(
+            frame,
+            text="Create Job",
+            command=self._create_job,
+        ).grid(row=row, column=1, sticky="w", pady=(6, 3))
+        self._job_creation_status_variable = self._tk.StringVar(
+            value="No job creation requested."
+        )
+        self._ttk.Label(
+            frame,
+            textvariable=self._job_creation_status_variable,
+            wraplength=760,
+        ).grid(
+            row=row + 1,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(3, 0),
+        )
+
     def _build_details_section(self) -> None:
         state = self.controller.state
-        frame = self._section("Step 3 — Explicit Proposal Details", 3)
+        frame = self._section("Step 3 — Explicit Proposal Details", 4)
         row = 0
         for label, name, value, browse_command in (
             ("Proposal Date", "proposal_date", state.proposal_date, None),
@@ -1203,7 +1466,7 @@ class ProposalDesktopApp:
         return widget
 
     def _build_actions_section(self) -> None:
-        frame = self._section("Step 4 — Validate, Generate, and Open", 4)
+        frame = self._section("Step 4 — Validate, Generate, and Open", 5)
         buttons = self._ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=3, sticky="ew")
         self._validate_button = self._ttk.Button(
@@ -1276,6 +1539,17 @@ class ProposalDesktopApp:
                     self._on_customer_creation_field_changed(field_name)
                 ),
             )
+        for name, variable in self._job_creation_variables.items():
+            variable.trace_add(
+                "write",
+                lambda *_args, field_name=name: (
+                    self._on_job_creation_field_changed(field_name)
+                ),
+            )
+        self._job_creation_contents_known_variable.trace_add(
+            "write",
+            lambda *_args: self._on_job_creation_contents_known_changed(),
+        )
         self._starting_at_variable.trace_add(
             "write",
             lambda *_args: self._on_starting_at_changed(),
@@ -1298,6 +1572,14 @@ class ProposalDesktopApp:
         self._customer_creation_notes_text.bind(
             "<<Modified>>",
             self._on_customer_creation_notes_changed,
+        )
+        self._job_creation_scope_notes_text.bind(
+            "<<Modified>>",
+            lambda event: self._on_job_creation_notes_changed("scope_notes", event),
+        )
+        self._job_creation_internal_notes_text.bind(
+            "<<Modified>>",
+            lambda event: self._on_job_creation_notes_changed("internal_notes", event),
         )
 
     def _on_text_field_changed(self, name: str) -> None:
@@ -1334,6 +1616,36 @@ class ProposalDesktopApp:
         widget.edit_modified(False)
         self._customer_creation_status_variable.set(
             "Customer details changed; click Create Customer to insert one record."
+        )
+
+    def _on_job_creation_field_changed(self, name: str) -> None:
+        self.controller.set_job_creation_field(
+            name,
+            self._job_creation_variables[name].get(),
+        )
+        self._job_creation_status_variable.set(
+            "Job details changed; click Create Job to insert one record."
+        )
+
+    def _on_job_creation_contents_known_changed(self) -> None:
+        self.controller.set_job_creation_contents_known(
+            bool(self._job_creation_contents_known_variable.get())
+        )
+        self._job_creation_status_variable.set(
+            "Job details changed; click Create Job to insert one record."
+        )
+
+    def _on_job_creation_notes_changed(self, name: str, event: object) -> None:
+        widget = event.widget
+        if not widget.edit_modified():
+            return
+        self.controller.set_job_creation_field(
+            name,
+            widget.get("1.0", "end-1c"),
+        )
+        widget.edit_modified(False)
+        self._job_creation_status_variable.set(
+            "Job details changed; click Create Job to insert one record."
         )
 
     def _on_starting_at_changed(self) -> None:
@@ -1538,6 +1850,26 @@ class ProposalDesktopApp:
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._customer_creation_status_variable.set(
                 "Customer creation failed; review the error before retrying."
+            )
+            self._show_error(exc)
+
+    def _create_job(self) -> None:
+        try:
+            created = self.controller.create_job()
+            self._job_combo.configure(values=self.controller.job_display_labels)
+            _clear_combobox_selection(self._job_combo, self._job_variable)
+            self._show_invalidated_state()
+            self._job_creation_status_variable.set(
+                f"Job {created.job_id} created; selected-customer jobs reloaded."
+            )
+        except JobAlreadyExistsError as exc:
+            self._job_creation_status_variable.set(
+                "Duplicate job ID rejected; the existing job was unchanged."
+            )
+            self._show_error(exc)
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._job_creation_status_variable.set(
+                "Job creation failed; review the error before retrying."
             )
             self._show_error(exc)
 

@@ -11,6 +11,10 @@ class CustomerAlreadyExistsError(ValueError):
     """A create-only customer insert found an existing customer id."""
 
 
+class JobAlreadyExistsError(ValueError):
+    """A create-only job insert found an existing job id."""
+
+
 class CustomerRepository(Protocol):
     """Storage boundary for customer records."""
 
@@ -33,6 +37,10 @@ class CustomerRepository(Protocol):
 
 class JobRepository(Protocol):
     """Storage boundary for job records."""
+
+    def create_job(self, record: JobRecord) -> JobRecord:
+        """Insert a new job without overwriting an existing id."""
+        ...
 
     def save_job(self, record: JobRecord) -> JobRecord:
         """Save or overwrite a job record."""
@@ -81,6 +89,14 @@ class InMemoryJobRepository:
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobRecord] = {}
+
+    def create_job(self, record: JobRecord) -> JobRecord:
+        if record.job_id in self._jobs:
+            raise JobAlreadyExistsError(
+                "Job ID already exists; no job was changed."
+            )
+        self._jobs[record.job_id] = record
+        return record
 
     def save_job(self, record: JobRecord) -> JobRecord:
         self._jobs[record.job_id] = record
