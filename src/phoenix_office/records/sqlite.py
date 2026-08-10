@@ -14,7 +14,10 @@ from phoenix_office.records.repository import (
     CustomerNotFoundError,
     CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    JobNotFoundError,
+    JobUpdateConflictError,
     _persisted_customer_values,
+    _persisted_job_values,
 )
 
 
@@ -403,6 +406,84 @@ class SQLiteJobRepository:
                 ),
             )
             connection.commit()
+        return record
+
+    def update_job(
+        self,
+        record: JobRecord,
+        expected_original: JobRecord,
+    ) -> JobRecord:
+        """Update one unchanged existing job without inserting or upserting."""
+
+        if self.read_only:
+            raise PermissionError("read-only job repositories cannot update jobs")
+        if record.job_id != expected_original.job_id:
+            raise ValueError("job ID cannot change during an update")
+        if record.customer_id != expected_original.customer_id:
+            raise ValueError("job customer ID cannot change during an update")
+        try:
+            with self._connect_existing_writable() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if not _table_exists(connection, "jobs"):
+                    raise ValueError(
+                        "selected job database is not usable for job updates"
+                    )
+                row = connection.execute(
+                    "SELECT * FROM jobs WHERE job_id = ?",
+                    (record.job_id,),
+                ).fetchone()
+                if row is None:
+                    raise JobNotFoundError(
+                        "Job no longer exists; reload jobs before retrying."
+                    )
+                current = _job_from_row(row)
+                if _persisted_job_values(current) != _persisted_job_values(
+                    expected_original
+                ):
+                    raise JobUpdateConflictError(
+                        "Job changed elsewhere; reload jobs before retrying."
+                    )
+                cursor = connection.execute(
+                    """
+                    UPDATE jobs
+                    SET
+                        job_name = ?,
+                        site_street_address = ?,
+                        site_city_state_zip = ?,
+                        status = ?,
+                        tank_location_type = ?,
+                        tank_size_gallons = ?,
+                        tank_contents = ?,
+                        contents_known = ?,
+                        scope_notes_json = ?,
+                        internal_notes_json = ?
+                    WHERE job_id = ?
+                      AND customer_id = ?
+                    """,
+                    (
+                        record.job_name,
+                        record.site_street_address,
+                        record.site_city_state_zip,
+                        record.status.value,
+                        record.tank_location_type.value,
+                        record.tank_size_gallons,
+                        record.tank_contents,
+                        int(record.contents_known),
+                        json.dumps(record.scope_notes),
+                        json.dumps(record.internal_notes),
+                        record.job_id,
+                        record.customer_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise JobUpdateConflictError(
+                        "Job changed elsewhere; reload jobs before retrying."
+                    )
+                connection.commit()
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "selected job database is not usable for job updates"
+            ) from exc
         return record
 
     def get_job(self, job_id: str) -> JobRecord | None:

@@ -36,6 +36,8 @@ from phoenix_office.records import (
     CustomerNotFoundError,
     CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    JobNotFoundError,
+    JobUpdateConflictError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
 )
@@ -78,6 +80,8 @@ class ControllerHarness:
     job_list_calls: list[str]
     job_creation_factory_calls: list[tuple[Path, bool, bool]]
     job_create_calls: list[JobRecord]
+    job_update_factory_calls: list[tuple[Path, bool, bool]]
+    job_update_calls: list[tuple[JobRecord, JobRecord]]
     validation_calls: list[ProposalDraftBuildRequest]
     build_calls: list[ProposalDraftBuildRequest]
     opened_paths: list[Path]
@@ -187,6 +191,7 @@ class AppHarness:
     customer_creation_status_variable: FakeVariable
     customer_edit_status_variable: FakeVariable
     job_creation_status_variable: FakeVariable
+    job_edit_status_variable: FakeVariable
 
 
 def _headless_app(
@@ -210,6 +215,7 @@ def _headless_app(
         "Select an existing customer to edit."
     )
     job_creation_status_variable = FakeVariable("No job creation requested.")
+    job_edit_status_variable = FakeVariable("Select an existing job to edit.")
     app.controller = controller
     app._root = object()
     app._messagebox = messagebox
@@ -276,6 +282,28 @@ def _headless_app(
         controller.job_creation_state.internal_notes
     )
     app._job_creation_status_variable = job_creation_status_variable
+    app._job_edit_variables = {
+        name: FakeVariable(getattr(controller.job_edit_state, name))
+        for name in (
+            "job_id",
+            "customer_id",
+            "job_name",
+            "site_street_address",
+            "site_city_state_zip",
+            "status",
+            "tank_location_type",
+            "tank_size_gallons",
+            "tank_contents",
+        )
+    }
+    app._job_edit_contents_known_variable = FakeVariable(
+        controller.job_edit_state.contents_known
+    )
+    app._job_edit_scope_notes_text = FakeText(controller.job_edit_state.scope_notes)
+    app._job_edit_internal_notes_text = FakeText(
+        controller.job_edit_state.internal_notes
+    )
+    app._job_edit_status_variable = job_edit_status_variable
     app._customer_combo = customer_combo
     app._job_combo = job_combo
     app._customer_variable = customer_variable
@@ -302,6 +330,7 @@ def _headless_app(
         customer_creation_status_variable=customer_creation_status_variable,
         customer_edit_status_variable=customer_edit_status_variable,
         job_creation_status_variable=job_creation_status_variable,
+        job_edit_status_variable=job_edit_status_variable,
     )
 
 
@@ -333,6 +362,8 @@ def _configured_controller(
     job_list_calls: list[str] = []
     job_creation_factory_calls: list[tuple[Path, bool, bool]] = []
     job_create_calls: list[JobRecord] = []
+    job_update_factory_calls: list[tuple[Path, bool, bool]] = []
+    job_update_calls: list[tuple[JobRecord, JobRecord]] = []
     validation_calls: list[ProposalDraftBuildRequest] = []
     build_calls: list[ProposalDraftBuildRequest] = []
     opened_paths: list[Path] = []
@@ -405,6 +436,32 @@ def _configured_controller(
             job_create_calls.append(record)
             return record
 
+    class JobUpdateRepository:
+        def update_job(
+            self,
+            record: JobRecord,
+            expected_original: JobRecord,
+        ) -> JobRecord:
+            index = next(
+                (
+                    index
+                    for index, job in enumerate(job_records)
+                    if job.job_id == record.job_id
+                ),
+                None,
+            )
+            if index is None:
+                raise JobNotFoundError(
+                    "Job no longer exists; reload jobs before retrying."
+                )
+            if job_records[index] != expected_original:
+                raise JobUpdateConflictError(
+                    "Job changed elsewhere; reload jobs before retrying."
+                )
+            job_records[index] = record
+            job_update_calls.append((record, expected_original))
+            return record
+
     def customer_factory(
         database_path: Path,
         *,
@@ -452,6 +509,15 @@ def _configured_controller(
         job_creation_factory_calls.append((database_path, initialize, read_only))
         return JobCreationRepository()
 
+    def job_update_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> Any:
+        job_update_factory_calls.append((database_path, initialize, read_only))
+        return JobUpdateRepository()
+
     def validate(request: ProposalDraftBuildRequest) -> ProposalDraftValidationResult:
         validation_calls.append(request)
         return ProposalDraftValidationResult(
@@ -482,6 +548,7 @@ def _configured_controller(
         customer_update_repository_factory=customer_update_factory,
         job_repository_factory=job_factory,
         job_creation_repository_factory=job_creation_factory,
+        job_update_repository_factory=job_update_factory,
         path_opener=opened_paths.append,
         clock=lambda: NOW,
     )
@@ -508,6 +575,8 @@ def _configured_controller(
         job_list_calls=job_list_calls,
         job_creation_factory_calls=job_creation_factory_calls,
         job_create_calls=job_create_calls,
+        job_update_factory_calls=job_update_factory_calls,
+        job_update_calls=job_update_calls,
         validation_calls=validation_calls,
         build_calls=build_calls,
         opened_paths=opened_paths,
@@ -1446,6 +1515,356 @@ def test_gui_job_creation_failures_are_controlled_and_write_nothing(
     assert app_harness.job_creation_status_variable.value.startswith(expected_status)
     assert len(app_harness.messagebox.errors) == 1
     assert harness.job_create_calls == []
+
+
+def test_job_selection_populates_edit_state_and_exact_loaded_snapshot(
+    tmp_path: Path,
+) -> None:
+    job = JobRecord(
+        job_id="job-synthetic-001",
+        customer_id="customer-synthetic-001",
+        job_name="Original Synthetic Job",
+        site_street_address="100 Synthetic Site",
+        site_city_state_zip="Example, WI 00000",
+        status=JobStatus.proposed,
+        tank_location_type=TankLocationType.aboveground,
+        tank_size_gallons=900,
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes=["First scope", "Second scope"],
+        internal_notes=["First internal note"],
+    )
+    harness = _configured_controller(tmp_path, jobs=(job,))
+    controller = harness.controller
+
+    assert controller.job_edit_expected_original is job
+    assert controller.job_edit_state == proposal_desktop.JobEditState(
+        job_id=job.job_id,
+        customer_id=job.customer_id,
+        job_name=job.job_name,
+        site_street_address=job.site_street_address,
+        site_city_state_zip=job.site_city_state_zip,
+        status=job.status.value,
+        tank_location_type=job.tank_location_type.value,
+        tank_size_gallons="900",
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes="First scope\nSecond scope",
+        internal_notes="First internal note",
+    )
+
+
+def test_desktop_job_update_uses_guarded_primitive_not_legacy_save() -> None:
+    source = inspect.getsource(proposal_desktop.ProposalDesktopController.update_job)
+
+    assert ".update_job(record, expected_original)" in source
+    assert ".save_job(" not in source
+
+
+@pytest.mark.parametrize("identity", ["job_id", "customer_id"])
+def test_job_edit_identity_fields_are_immutable(identity: str, tmp_path: Path) -> None:
+    controller = _configured_controller(tmp_path).controller
+    original = controller.job_edit_expected_original
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="Unsupported"):
+        controller.set_job_edit_field(identity, f"changed-{identity}")
+
+    assert controller.job_edit_expected_original is original
+    assert getattr(controller.job_edit_state, identity) == getattr(original, identity)
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp._build_job_edit_section)
+    assert 'name in {"job_id", "customer_id"}' in source
+
+
+def test_job_edit_snapshot_clears_and_switches_with_selection_lifecycle(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    first_snapshot = controller.job_edit_expected_original
+
+    controller.select_job("")
+    assert controller.job_edit_expected_original is None
+    assert controller.job_edit_state == proposal_desktop.JobEditState()
+
+    controller.select_job("job-synthetic-002")
+    assert controller.job_edit_expected_original is harness.controller.jobs[1]
+    assert controller.job_edit_expected_original is not first_snapshot
+
+    controller.select_customer("customer-synthetic-002")
+    assert controller.job_edit_expected_original is None
+    assert controller.job_edit_state == proposal_desktop.JobEditState()
+
+    controller.set_text_field("database_path", str(tmp_path / "other.sqlite"))
+    assert controller.job_edit_expected_original is None
+
+
+def test_job_update_record_uses_immutable_identity_and_normalizes_explicit_fields(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    for name, value in {
+        "job_name": " Updated Synthetic Job ",
+        "site_street_address": " 700 Synthetic Site ",
+        "site_city_state_zip": " Example, WI 00000 ",
+        "status": JobStatus.scheduled.value,
+        "tank_location_type": TankLocationType.underground.value,
+        "tank_size_gallons": " 1200 ",
+        "tank_contents": " synthetic material ",
+        "scope_notes": " First updated scope\n\n Second updated scope ",
+        "internal_notes": " First internal note\n\n Second internal note ",
+    }.items():
+        controller.set_job_edit_field(name, value)
+    controller.set_job_edit_contents_known(True)
+
+    record = controller.create_job_update_record()
+
+    assert record == JobRecord(
+        job_id="job-synthetic-001",
+        customer_id="customer-synthetic-001",
+        job_name="Updated Synthetic Job",
+        site_street_address="700 Synthetic Site",
+        site_city_state_zip="Example, WI 00000",
+        status=JobStatus.scheduled,
+        tank_location_type=TankLocationType.underground,
+        tank_size_gallons=1200,
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes=["First updated scope", "Second updated scope"],
+        internal_notes=["First internal note", "Second internal note"],
+    )
+    assert harness.job_update_factory_calls == []
+    assert harness.job_update_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("job_name", "   "),
+        ("site_street_address", "   "),
+        ("site_city_state_zip", "   "),
+        ("tank_size_gallons", "not-an-integer"),
+        ("tank_size_gallons", "0"),
+        ("status", "not-a-status"),
+        ("tank_location_type", "not-a-location"),
+    ],
+)
+def test_invalid_job_edit_rejects_before_writable_repository(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    harness.controller.set_job_edit_field(field, value)
+
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        harness.controller.update_job()
+
+    assert harness.job_update_factory_calls == []
+    assert harness.job_update_calls == []
+
+
+def test_no_op_job_save_rejects_without_write_and_keeps_hash(tmp_path: Path) -> None:
+    database_path = tmp_path / "records.sqlite"
+    SQLiteCustomerRepository(database_path).save_customer(_customer())
+    job = JobRecord(
+        job_id="job-synthetic-001",
+        customer_id="customer-synthetic-001",
+        job_name="  Synthetic Job  ",
+        site_street_address=" 100 Synthetic Site ",
+        site_city_state_zip=" Example, WI 00000 ",
+        tank_contents=" synthetic material ",
+        scope_notes=[" Explicit scope "],
+    )
+    SQLiteJobRepository(database_path, initialize=False).save_job(job)
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    controller.set_text_field("database_path", str(database_path))
+    controller.load_customers()
+    controller.select_customer("customer-synthetic-001")
+    controller.select_job("job-synthetic-001")
+    hash_before = _database_hash(database_path)
+
+    with pytest.raises(proposal_desktop.NoJobChangesError):
+        controller.update_job()
+
+    assert _database_hash(database_path) == hash_before
+
+
+def test_explicit_job_update_uses_exact_snapshot_then_reloads_and_reselects(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    expected_original = controller.job_edit_expected_original
+    customer_read_calls_before = len(harness.customer_factory_calls)
+    job_read_calls_before = len(harness.job_factory_calls)
+    controller.set_job_edit_field("job_name", "Updated Synthetic Job")
+    controller.validate_draft()
+    assert controller.generation_enabled is True
+
+    updated = controller.update_job()
+
+    database_path = tmp_path / "records.sqlite"
+    assert harness.job_update_factory_calls == [(database_path, False, False)]
+    assert len(harness.job_update_calls) == 1
+    assert harness.job_update_calls[0][0] is updated
+    assert harness.job_update_calls[0][1] is expected_original
+    assert len(harness.customer_factory_calls) == customer_read_calls_before + 1
+    assert harness.customer_factory_calls[-1] == (database_path, False, True)
+    assert len(harness.job_factory_calls) == job_read_calls_before + 1
+    assert harness.job_factory_calls[-1] == (database_path, False, True)
+    assert controller.state.selected_customer_id == updated.customer_id
+    assert controller.state.selected_job_id == updated.job_id
+    assert controller.job_edit_expected_original is updated
+    assert controller.job_edit_state.job_name == updated.job_name
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+
+
+def test_stale_customer_rejects_before_writable_job_repository(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_job_edit_field("job_name", "Update Attempt")
+    customer_read_calls: list[tuple[Path, bool, bool]] = []
+
+    class MissingCustomerRepository:
+        def get_customer(self, _customer_id: str) -> None:
+            return None
+
+    def missing_customer_factory(
+        database_path: Path,
+        *,
+        initialize: bool,
+        read_only: bool,
+    ) -> MissingCustomerRepository:
+        customer_read_calls.append((database_path, initialize, read_only))
+        return MissingCustomerRepository()
+
+    controller._customer_repository_factory = missing_customer_factory
+
+    with pytest.raises(proposal_desktop.DesktopFormError, match="stale or missing"):
+        controller.update_job()
+
+    assert customer_read_calls == [(tmp_path / "records.sqlite", False, True)]
+    assert harness.job_update_factory_calls == []
+    assert harness.job_update_calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "status_prefix"),
+    [
+        (
+            JobNotFoundError("Job no longer exists; reload jobs before retrying."),
+            "Job is missing",
+        ),
+        (
+            JobUpdateConflictError(
+                "Job changed elsewhere; reload jobs before retrying."
+            ),
+            "Job changed elsewhere",
+        ),
+    ],
+)
+def test_job_update_missing_or_stale_is_controlled_without_reload(
+    tmp_path: Path,
+    error: Exception,
+    status_prefix: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    expected_original = controller.job_edit_expected_original
+    controller.set_job_edit_field("job_name", "Update Attempt")
+    job_read_calls_before = len(harness.job_factory_calls)
+
+    class RejectingRepository:
+        def update_job(
+            self,
+            record: JobRecord,
+            expected: JobRecord,
+        ) -> JobRecord:
+            del record, expected
+            raise error
+
+    controller._job_update_repository_factory = (  # noqa: SLF001
+        lambda *_args, **_kwargs: RejectingRepository()
+    )
+    app_harness = _headless_app(controller)
+
+    app_harness.app._update_job()
+
+    assert app_harness.job_edit_status_variable.value.startswith(status_prefix)
+    assert len(app_harness.messagebox.errors) == 1
+    assert len(harness.job_factory_calls) == job_read_calls_before
+    assert controller.job_edit_expected_original is expected_original
+    assert controller.state.selected_job_id == "job-synthetic-001"
+    assert controller.job_edit_state.job_name == "Update Attempt"
+    assert controller.generation_enabled is False
+
+
+def test_gui_job_edit_controls_are_explicit_and_typing_never_writes(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+    app = app_harness.app
+    app._refresh_job_edit_widgets()
+
+    assert app._job_edit_variables["job_id"].value == "job-synthetic-001"
+    assert app._job_edit_variables["customer_id"].value == (
+        "customer-synthetic-001"
+    )
+    app._job_edit_variables["job_name"].set("Updated Synthetic Job")
+    app._on_job_edit_field_changed("job_name")
+
+    assert harness.job_update_factory_calls == []
+    assert harness.job_update_calls == []
+    assert app_harness.job_edit_status_variable.value.startswith(
+        "Job edit fields changed"
+    )
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
+    assert 'text="Save Job Changes"' in source
+
+
+def test_gui_no_op_and_invalid_job_saves_are_controlled(tmp_path: Path) -> None:
+    harness = _configured_controller(tmp_path)
+    app_harness = _headless_app(harness.controller)
+
+    app_harness.app._update_job()
+
+    assert app_harness.job_edit_status_variable.value == "No job changes to save."
+    assert app_harness.messagebox.errors == []
+    assert harness.job_update_factory_calls == []
+
+    harness.controller.select_job("")
+    app_harness.app._update_job()
+    assert app_harness.job_edit_status_variable.value.startswith("Job update failed")
+    assert len(app_harness.messagebox.errors) == 1
+    assert harness.job_update_factory_calls == []
+
+
+def test_gui_job_update_refreshes_values_and_preserves_association(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_job_edit_field("job_name", "Updated Synthetic Job")
+    app_harness = _headless_app(controller)
+    app_harness.customer_combo.current(0)
+
+    app_harness.app._update_job()
+
+    assert app_harness.job_edit_status_variable.value.startswith("Job updated")
+    assert app_harness.customer_combo.current() == 0
+    assert app_harness.job_combo.current() == 0
+    assert app_harness.app._job_edit_variables["job_name"].value == (
+        "Updated Synthetic Job"
+    )
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == "job-synthetic-001"
+    assert controller.job_edit_expected_original is harness.job_update_calls[0][0]
+    assert app_harness.messagebox.errors == []
 
 
 def test_output_proposal_is_identity_free_and_creates_nothing(tmp_path: Path) -> None:

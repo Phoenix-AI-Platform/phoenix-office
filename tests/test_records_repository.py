@@ -11,7 +11,9 @@ from phoenix_office.records import (
     InMemoryCustomerRepository,
     InMemoryJobRepository,
     JobAlreadyExistsError,
+    JobNotFoundError,
     JobRepository,
+    JobUpdateConflictError,
 )
 
 
@@ -231,6 +233,63 @@ def test_saving_same_job_id_overwrites() -> None:
 
     assert repository.get_job("job-1") is replacement
     assert repository.list_jobs() == [replacement]
+
+
+def test_update_job_succeeds_when_current_matches_expected() -> None:
+    repository = InMemoryJobRepository()
+    original = _job("job-1", "cust-1", "Original")
+    updated = original.model_copy(
+        update={
+            "job_name": "Updated",
+            "tank_size_gallons": 1000,
+            "scope_notes": ["Explicit updated scope"],
+        }
+    )
+    repository.save_job(original)
+
+    result = repository.update_job(updated, original)
+
+    assert result is updated
+    assert repository.get_job("job-1") is updated
+
+
+def test_update_job_rejects_missing_without_creating() -> None:
+    repository = InMemoryJobRepository()
+    original = _job("job-missing", "cust-1", "Original")
+    updated = original.model_copy(update={"job_name": "Updated"})
+
+    with pytest.raises(JobNotFoundError):
+        repository.update_job(updated, original)
+
+    assert repository.list_jobs() == []
+
+
+def test_update_job_rejects_stale_original_and_preserves_newer_job() -> None:
+    repository = InMemoryJobRepository()
+    original = _job("job-1", "cust-1", "Original")
+    newer = original.model_copy(update={"job_name": "Newer"})
+    attempted = original.model_copy(update={"job_name": "Stale Attempt"})
+    repository.save_job(newer)
+
+    with pytest.raises(JobUpdateConflictError):
+        repository.update_job(attempted, original)
+
+    assert repository.get_job("job-1") is newer
+    assert repository.list_jobs() == [newer]
+
+
+@pytest.mark.parametrize("identity", ["job_id", "customer_id"])
+def test_update_job_rejects_identity_changes(identity: str) -> None:
+    repository = InMemoryJobRepository()
+    original = _job("job-1", "cust-1", "Original")
+    changes = {identity: f"changed-{identity}"}
+    attempted = original.model_copy(update=changes)
+    repository.save_job(original)
+
+    with pytest.raises(ValueError, match="cannot change"):
+        repository.update_job(attempted, original)
+
+    assert repository.get_job("job-1") is original
 
 
 def test_list_jobs_preserves_insertion_order() -> None:
