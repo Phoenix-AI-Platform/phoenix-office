@@ -37,6 +37,8 @@ from phoenix_office.records import (
     CustomerNotFoundError,
     CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    JobNotFoundError,
+    JobUpdateConflictError,
     RecordProposalDetails,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
@@ -47,6 +49,7 @@ CustomerCreationRepositoryFactory = Callable[..., SQLiteCustomerRepository]
 CustomerUpdateRepositoryFactory = Callable[..., SQLiteCustomerRepository]
 JobRepositoryFactory = Callable[..., SQLiteJobRepository]
 JobCreationRepositoryFactory = Callable[..., SQLiteJobRepository]
+JobUpdateRepositoryFactory = Callable[..., SQLiteJobRepository]
 ValidationFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftValidationResult]
 BuildFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftBuildResult]
 PathOpener = Callable[[Path], None]
@@ -110,6 +113,20 @@ _JOB_CREATION_FIELDS = frozenset(
     }
 )
 
+_JOB_EDIT_FIELDS = frozenset(
+    {
+        "job_name",
+        "site_street_address",
+        "site_city_state_zip",
+        "status",
+        "tank_location_type",
+        "tank_size_gallons",
+        "tank_contents",
+        "scope_notes",
+        "internal_notes",
+    }
+)
+
 
 class DesktopFormError(ValueError):
     """A local operator-facing form state error."""
@@ -121,6 +138,10 @@ class ExistingOutputPathError(DesktopFormError):
 
 class NoCustomerChangesError(DesktopFormError):
     """A customer save was requested without any persisted field changes."""
+
+
+class NoJobChangesError(DesktopFormError):
+    """A job save was requested without any persisted field changes."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +257,24 @@ class JobCreationState:
     """Explicit operator-entered values for one create-only job insert."""
 
     job_id: str = ""
+    job_name: str = ""
+    site_street_address: str = ""
+    site_city_state_zip: str = ""
+    status: str = JobStatus.draft.value
+    tank_location_type: str = TankLocationType.unknown.value
+    tank_size_gallons: str = ""
+    tank_contents: str = ""
+    contents_known: bool = False
+    scope_notes: str = ""
+    internal_notes: str = ""
+
+
+@dataclass(slots=True)
+class JobEditState:
+    """Editable persisted values copied from one deliberately selected job."""
+
+    job_id: str = ""
+    customer_id: str = ""
     job_name: str = ""
     site_street_address: str = ""
     site_city_state_zip: str = ""
@@ -371,6 +410,9 @@ class ProposalDesktopController:
         job_creation_repository_factory: JobCreationRepositoryFactory = (
             _default_job_repository_factory
         ),
+        job_update_repository_factory: JobUpdateRepositoryFactory = (
+            _default_job_repository_factory
+        ),
         path_opener: PathOpener = _open_local_path,
         clock: Clock = datetime.now,
     ) -> None:
@@ -383,13 +425,16 @@ class ProposalDesktopController:
         self._customer_update_repository_factory = customer_update_repository_factory
         self._job_repository_factory = job_repository_factory
         self._job_creation_repository_factory = job_creation_repository_factory
+        self._job_update_repository_factory = job_update_repository_factory
         self._path_opener = path_opener
         self._clock = clock
         self.state = DesktopFormState(proposal_date=clock().date().isoformat())
         self.customer_creation_state = CustomerCreationState()
         self.customer_edit_state = CustomerEditState()
         self.job_creation_state = JobCreationState()
+        self.job_edit_state = JobEditState()
         self._customer_edit_expected_original: CustomerRecord | None = None
+        self._job_edit_expected_original: JobRecord | None = None
         self._customers: tuple[CustomerRecord, ...] = ()
         self._jobs: tuple[JobRecord, ...] = ()
         self._validated_request: ProposalDraftBuildRequest | None = None
@@ -434,6 +479,10 @@ class ProposalDesktopController:
     @property
     def customer_edit_expected_original(self) -> CustomerRecord | None:
         return self._customer_edit_expected_original
+
+    @property
+    def job_edit_expected_original(self) -> JobRecord | None:
+        return self._job_edit_expected_original
 
     @property
     def generation_enabled(self) -> bool:
@@ -484,6 +533,7 @@ class ProposalDesktopController:
             self.state.selected_customer_id = ""
             self.state.selected_job_id = ""
             self._clear_customer_edit_state()
+            self._clear_job_edit_state()
         self._invalidate_validation()
 
     def set_starting_at(self, value: bool) -> None:
@@ -705,6 +755,127 @@ class ProposalDesktopController:
             ) from exc
         return created
 
+    def set_job_edit_field(self, name: str, value: str) -> None:
+        if name not in _JOB_EDIT_FIELDS:
+            raise DesktopFormError(f"Unsupported job edit field: {name}")
+        setattr(self.job_edit_state, name, value)
+
+    def set_job_edit_contents_known(self, value: bool) -> None:
+        self.job_edit_state.contents_known = bool(value)
+
+    def create_job_update_record(self) -> JobRecord:
+        """Build one update-only job record from explicit edit values."""
+
+        selected_customer_id = self.state.selected_customer_id
+        selected_job_id = self.state.selected_job_id
+        expected_original = self._job_edit_expected_original
+        if not selected_customer_id or not selected_job_id or expected_original is None:
+            raise DesktopFormError("Select an existing job before saving changes.")
+        if not any(
+            customer.customer_id == selected_customer_id
+            for customer in self._customers
+        ):
+            raise DesktopFormError(
+                "The selected customer is stale or missing; reload customers."
+            )
+        selected_job = next(
+            (job for job in self._jobs if job.job_id == selected_job_id),
+            None,
+        )
+        if selected_job is None or selected_job.customer_id != selected_customer_id:
+            raise DesktopFormError("The selected job is stale or mismatched; reload jobs.")
+        state = self.job_edit_state
+        if (
+            state.job_id != selected_job_id
+            or state.customer_id != selected_customer_id
+            or expected_original.job_id != selected_job_id
+            or expected_original.customer_id != selected_customer_id
+        ):
+            raise DesktopFormError(
+                "Job edit identity changed; reload jobs before retrying."
+            )
+
+        tank_size_text = state.tank_size_gallons.strip()
+        try:
+            tank_size = int(tank_size_text) if tank_size_text else None
+        except ValueError as exc:
+            raise DesktopFormError(
+                "Tank Size Gallons must be a whole number."
+            ) from exc
+
+        try:
+            return JobRecord(
+                job_id=expected_original.job_id,
+                customer_id=expected_original.customer_id,
+                job_name=self._required_job_update_text("Job Name", state.job_name),
+                site_street_address=self._required_job_update_text(
+                    "Site Street Address",
+                    state.site_street_address,
+                ),
+                site_city_state_zip=self._required_job_update_text(
+                    "Site City / State / ZIP",
+                    state.site_city_state_zip,
+                ),
+                status=JobStatus(state.status),
+                tank_location_type=TankLocationType(state.tank_location_type),
+                tank_size_gallons=tank_size,
+                tank_contents=self._optional_job_text(state.tank_contents),
+                contents_known=state.contents_known,
+                scope_notes=self._normalize_job_notes(state.scope_notes),
+                internal_notes=self._normalize_job_notes(state.internal_notes),
+            )
+        except DesktopFormError:
+            raise
+        except ValueError as exc:
+            raise DesktopFormError(
+                "Enter valid explicit job details before saving changes."
+            ) from exc
+
+    def update_job(self) -> JobRecord:
+        """Guardedly update one selected job, then reload and reselect it read-only."""
+
+        record = self.create_job_update_record()
+        expected_original = self._job_edit_expected_original
+        if expected_original is None:  # Defensive after record construction.
+            raise DesktopFormError("Select an existing job before saving changes.")
+        if self._normalized_persisted_job_values(
+            record
+        ) == self._normalized_persisted_job_values(expected_original):
+            raise NoJobChangesError("No job changes to save.")
+
+        database_path = self._required_path(
+            "Records Database",
+            self.state.database_path,
+        )
+        self._reject_git_worktree_path("Records Database", database_path)
+        self._invalidate_validation()
+
+        customer_repository = self._customer_repository_factory(
+            database_path,
+            initialize=False,
+            read_only=True,
+        )
+        current_customer = customer_repository.get_customer(record.customer_id)
+        if current_customer is None:
+            raise DesktopFormError(
+                "The selected customer is stale or missing; reload customers."
+            )
+
+        repository = self._job_update_repository_factory(
+            database_path,
+            initialize=False,
+            read_only=False,
+        )
+        updated = repository.update_job(record, expected_original)
+        try:
+            self.select_customer(record.customer_id)
+            self.select_job(record.job_id)
+        except Exception as exc:
+            raise DesktopFormError(
+                "Job was updated, but the read-only job reload failed."
+            ) from exc
+        return updated
+
     def propose_output_paths(self, output_root: str | Path) -> tuple[Path, Path, Path]:
         root = Path(output_root).expanduser()
         output_folder, output_json, output_docx = propose_identity_free_output_paths(
@@ -753,6 +924,7 @@ class ProposalDesktopController:
         self.state.selected_customer_id = ""
         self.state.selected_job_id = ""
         self._clear_customer_edit_state()
+        self._clear_job_edit_state()
         self._invalidate_validation()
         database_path = self._required_path("Records Database", self.state.database_path)
         self._reject_git_worktree_path("Records Database", database_path)
@@ -770,6 +942,7 @@ class ProposalDesktopController:
         self.state.selected_job_id = ""
         self._jobs = ()
         self._clear_customer_edit_state()
+        self._clear_job_edit_state()
         self._invalidate_validation()
         if not customer_id:
             return ()
@@ -802,6 +975,7 @@ class ProposalDesktopController:
 
     def select_job(self, job_id: str) -> None:
         self.state.selected_job_id = ""
+        self._clear_job_edit_state()
         self._invalidate_validation()
         if not job_id:
             return
@@ -811,6 +985,7 @@ class ProposalDesktopController:
         if selected_job.customer_id != self.state.selected_customer_id:
             raise DesktopFormError("Selected job does not belong to the selected customer.")
         self.state.selected_job_id = job_id
+        self._populate_job_edit_state(selected_job)
 
     def set_scope_description(self, index: int, description: str) -> None:
         self._require_scope_index(index)
@@ -1065,6 +1240,31 @@ class ProposalDesktopController:
         )
         self._customer_edit_expected_original = customer
 
+    def _clear_job_edit_state(self) -> None:
+        self.job_edit_state = JobEditState()
+        self._job_edit_expected_original = None
+
+    def _populate_job_edit_state(self, job: JobRecord) -> None:
+        self.job_edit_state = JobEditState(
+            job_id=job.job_id,
+            customer_id=job.customer_id,
+            job_name=job.job_name,
+            site_street_address=job.site_street_address,
+            site_city_state_zip=job.site_city_state_zip,
+            status=job.status.value,
+            tank_location_type=job.tank_location_type.value,
+            tank_size_gallons=(
+                str(job.tank_size_gallons)
+                if job.tank_size_gallons is not None
+                else ""
+            ),
+            tank_contents=job.tank_contents or "",
+            contents_known=job.contents_known,
+            scope_notes="\n".join(job.scope_notes),
+            internal_notes="\n".join(job.internal_notes),
+        )
+        self._job_edit_expected_original = job
+
     def _selected_loaded_customer_id(self) -> str:
         customer_id = self.state.selected_customer_id
         if not customer_id:
@@ -1083,6 +1283,13 @@ class ProposalDesktopController:
         return normalized
 
     @staticmethod
+    def _required_job_update_text(label: str, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise DesktopFormError(f"{label} is required before saving job changes.")
+        return normalized
+
+    @staticmethod
     def _optional_job_text(value: str) -> str | None:
         normalized = value.strip()
         return normalized or None
@@ -1090,6 +1297,28 @@ class ProposalDesktopController:
     @staticmethod
     def _normalize_job_notes(value: str) -> list[str]:
         return [line.strip() for line in value.splitlines() if line.strip()]
+
+    @staticmethod
+    def _normalized_persisted_job_values(record: JobRecord) -> tuple[Any, ...]:
+        tank_contents = (
+            record.tank_contents.strip() or None
+            if record.tank_contents is not None
+            else None
+        )
+        return (
+            record.job_id,
+            record.customer_id,
+            record.job_name.strip(),
+            record.site_street_address.strip(),
+            record.site_city_state_zip.strip(),
+            record.status,
+            record.tank_location_type,
+            record.tank_size_gallons,
+            tank_contents,
+            record.contents_known,
+            tuple(line.strip() for line in record.scope_notes if line.strip()),
+            tuple(line.strip() for line in record.internal_notes if line.strip()),
+        )
 
     @staticmethod
     def _required_path(label: str, value: str) -> Path:
@@ -1187,6 +1416,7 @@ class ProposalDesktopApp:
         self._customer_creation_variables: dict[str, Any] = {}
         self._customer_edit_variables: dict[str, Any] = {}
         self._job_creation_variables: dict[str, Any] = {}
+        self._job_edit_variables: dict[str, Any] = {}
         self._build_widgets()
         self._bind_state_changes()
         self._refresh_scope_list(0)
@@ -1222,6 +1452,7 @@ class ProposalDesktopApp:
         self._build_customer_edit_section()
         self._build_job_section()
         self._build_job_creation_section()
+        self._build_job_edit_section()
         self._build_details_section()
         self._build_actions_section()
 
@@ -1250,6 +1481,11 @@ class ProposalDesktopApp:
     def _job_creation_string_variable(self, name: str, value: str) -> object:
         variable = self._tk.StringVar(value=value)
         self._job_creation_variables[name] = variable
+        return variable
+
+    def _job_edit_string_variable(self, name: str, value: str) -> object:
+        variable = self._tk.StringVar(value=value)
+        self._job_edit_variables[name] = variable
         return variable
 
     def _labeled_entry(
@@ -1603,9 +1839,111 @@ class ProposalDesktopApp:
             pady=(3, 0),
         )
 
+    def _build_job_edit_section(self) -> None:
+        state = self.controller.job_edit_state
+        frame = self._section("Edit Job — Guarded Existing-Record Update", 5)
+        fields = (
+            ("Job ID", "job_id", state.job_id),
+            ("Customer ID", "customer_id", state.customer_id),
+            ("Job Name", "job_name", state.job_name),
+            ("Site Street Address", "site_street_address", state.site_street_address),
+            (
+                "Site City / State / ZIP",
+                "site_city_state_zip",
+                state.site_city_state_zip,
+            ),
+            ("Tank Size Gallons", "tank_size_gallons", state.tank_size_gallons),
+            ("Tank Contents", "tank_contents", state.tank_contents),
+        )
+        for row, (label, name, value) in enumerate(fields):
+            self._ttk.Label(frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+            variable = self._job_edit_string_variable(name, value)
+            self._ttk.Entry(
+                frame,
+                textvariable=variable,
+                state="readonly" if name in {"job_id", "customer_id"} else "normal",
+            ).grid(row=row, column=1, sticky="ew", pady=3)
+
+        row = len(fields)
+        for label, name, value, choices in (
+            ("Status", "status", state.status, tuple(status.value for status in JobStatus)),
+            (
+                "Tank Location",
+                "tank_location_type",
+                state.tank_location_type,
+                tuple(location.value for location in TankLocationType),
+            ),
+        ):
+            self._ttk.Label(frame, text=label).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 8),
+                pady=3,
+            )
+            variable = self._job_edit_string_variable(name, value)
+            self._ttk.Combobox(
+                frame,
+                textvariable=variable,
+                values=choices,
+                state="readonly",
+            ).grid(row=row, column=1, sticky="ew", pady=3)
+            row += 1
+
+        self._job_edit_contents_known_variable = self._tk.BooleanVar(
+            value=state.contents_known
+        )
+        self._ttk.Checkbutton(
+            frame,
+            text="Tank contents known",
+            variable=self._job_edit_contents_known_variable,
+        ).grid(row=row, column=1, sticky="w", pady=3)
+        row += 1
+
+        self._job_edit_scope_notes_text = self._multiline_field(
+            frame,
+            row,
+            "Scope Notes",
+            state.scope_notes,
+        )
+        row += 1
+        self._job_edit_internal_notes_text = self._multiline_field(
+            frame,
+            row,
+            "Internal Notes",
+            state.internal_notes,
+        )
+        row += 1
+
+        self._ttk.Button(
+            frame,
+            text="Save Job Changes",
+            command=self._update_job,
+        ).grid(row=row, column=1, sticky="w", pady=(6, 3))
+        self._job_edit_status_variable = self._tk.StringVar(
+            value="Select an existing job to edit."
+        )
+        self._ttk.Label(
+            frame,
+            textvariable=self._job_edit_status_variable,
+            wraplength=760,
+        ).grid(
+            row=row + 1,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(3, 0),
+        )
+
     def _build_details_section(self) -> None:
         state = self.controller.state
-        frame = self._section("Step 3 — Explicit Proposal Details", 5)
+        frame = self._section("Step 3 — Explicit Proposal Details", 6)
         row = 0
         for label, name, value, browse_command in (
             ("Proposal Date", "proposal_date", state.proposal_date, None),
@@ -1717,7 +2055,7 @@ class ProposalDesktopApp:
         return widget
 
     def _build_actions_section(self) -> None:
-        frame = self._section("Step 4 — Validate, Generate, and Open", 6)
+        frame = self._section("Step 4 — Validate, Generate, and Open", 7)
         buttons = self._ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=3, sticky="ew")
         self._validate_button = self._ttk.Button(
@@ -1806,9 +2144,22 @@ class ProposalDesktopApp:
                     self._on_job_creation_field_changed(field_name)
                 ),
             )
+        for name, variable in self._job_edit_variables.items():
+            if name in {"job_id", "customer_id"}:
+                continue
+            variable.trace_add(
+                "write",
+                lambda *_args, field_name=name: (
+                    self._on_job_edit_field_changed(field_name)
+                ),
+            )
         self._job_creation_contents_known_variable.trace_add(
             "write",
             lambda *_args: self._on_job_creation_contents_known_changed(),
+        )
+        self._job_edit_contents_known_variable.trace_add(
+            "write",
+            lambda *_args: self._on_job_edit_contents_known_changed(),
         )
         self._starting_at_variable.trace_add(
             "write",
@@ -1844,6 +2195,14 @@ class ProposalDesktopApp:
         self._job_creation_internal_notes_text.bind(
             "<<Modified>>",
             lambda event: self._on_job_creation_notes_changed("internal_notes", event),
+        )
+        self._job_edit_scope_notes_text.bind(
+            "<<Modified>>",
+            lambda event: self._on_job_edit_notes_changed("scope_notes", event),
+        )
+        self._job_edit_internal_notes_text.bind(
+            "<<Modified>>",
+            lambda event: self._on_job_edit_notes_changed("internal_notes", event),
         )
 
     def _on_text_field_changed(self, name: str) -> None:
@@ -1935,6 +2294,40 @@ class ProposalDesktopApp:
         widget.edit_modified(False)
         self._job_creation_status_variable.set(
             "Job details changed; click Create Job to insert one record."
+        )
+
+    def _on_job_edit_field_changed(self, name: str) -> None:
+        if self._updating_widgets:
+            return
+        self.controller.set_job_edit_field(
+            name,
+            self._job_edit_variables[name].get(),
+        )
+        self._job_edit_status_variable.set(
+            "Job edit fields changed; click Save Job Changes to update."
+        )
+
+    def _on_job_edit_contents_known_changed(self) -> None:
+        if self._updating_widgets:
+            return
+        self.controller.set_job_edit_contents_known(
+            bool(self._job_edit_contents_known_variable.get())
+        )
+        self._job_edit_status_variable.set(
+            "Job edit fields changed; click Save Job Changes to update."
+        )
+
+    def _on_job_edit_notes_changed(self, name: str, event: object) -> None:
+        widget = event.widget
+        if self._updating_widgets or not widget.edit_modified():
+            return
+        self.controller.set_job_edit_field(
+            name,
+            widget.get("1.0", "end-1c"),
+        )
+        widget.edit_modified(False)
+        self._job_edit_status_variable.set(
+            "Job edit fields changed; click Save Job Changes to update."
         )
 
     def _on_starting_at_changed(self) -> None:
@@ -2110,6 +2503,8 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=())
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._clear_customer_edit_widgets()
+            self._clear_job_edit_widgets()
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
@@ -2129,6 +2524,7 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=())
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._clear_customer_edit_widgets()
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
             self._customer_creation_status_variable.set(
                 f"Customer {created.customer_id} created; customers reloaded."
@@ -2169,6 +2565,7 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=self.controller.job_display_labels)
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._refresh_customer_edit_widgets()
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
             self._customer_edit_status_variable.set(
                 "Customer updated; customers and selected-customer jobs reloaded."
@@ -2196,6 +2593,7 @@ class ProposalDesktopApp:
             created = self.controller.create_job()
             self._job_combo.configure(values=self.controller.job_display_labels)
             _clear_combobox_selection(self._job_combo, self._job_variable)
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
             self._job_creation_status_variable.set(
                 f"Job {created.job_id} created; selected-customer jobs reloaded."
@@ -2208,6 +2606,47 @@ class ProposalDesktopApp:
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._job_creation_status_variable.set(
                 "Job creation failed; review the error before retrying."
+            )
+            self._show_error(exc)
+
+    def _update_job(self) -> None:
+        try:
+            updated = self.controller.update_job()
+            self._job_combo.configure(values=self.controller.job_display_labels)
+            selected_index = next(
+                (
+                    index
+                    for index, job in enumerate(self.controller.jobs)
+                    if job.job_id == updated.job_id
+                ),
+                None,
+            )
+            if selected_index is None:
+                raise DesktopFormError(
+                    "Job updated, but the refreshed selection is unavailable."
+                )
+            self._job_combo.current(selected_index)
+            self._job_variable.set(self.controller.job_display_labels[selected_index])
+            self._refresh_job_edit_widgets()
+            self._show_invalidated_state()
+            self._job_edit_status_variable.set(
+                "Job updated; selected-customer jobs reloaded."
+            )
+        except NoJobChangesError:
+            self._job_edit_status_variable.set("No job changes to save.")
+        except JobNotFoundError as exc:
+            self._job_edit_status_variable.set(
+                "Job is missing; reload jobs before retrying."
+            )
+            self._show_error(exc)
+        except JobUpdateConflictError as exc:
+            self._job_edit_status_variable.set(
+                "Job changed elsewhere; reload jobs before retrying."
+            )
+            self._show_error(exc)
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._job_edit_status_variable.set(
+                "Job update failed; review the error before retrying."
             )
             self._show_error(exc)
 
@@ -2225,6 +2664,7 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=self.controller.job_display_labels)
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._refresh_customer_edit_widgets()
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
@@ -2242,9 +2682,11 @@ class ProposalDesktopApp:
             else:
                 job_id = self.controller.jobs[index].job_id
             self.controller.select_job(job_id)
+            self._refresh_job_edit_widgets()
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             _clear_combobox_selection(self._job_combo, self._job_variable)
+            self._clear_job_edit_widgets()
             self._show_invalidated_state()
             self._show_error(exc)
 
@@ -2310,6 +2752,7 @@ class ProposalDesktopApp:
         self._job_combo.configure(values=())
         _clear_combobox_selection(self._job_combo, self._job_variable)
         self._clear_customer_edit_widgets()
+        self._clear_job_edit_widgets()
 
     def _clear_customer_edit_widgets(self) -> None:
         self._updating_widgets = True
@@ -2344,6 +2787,46 @@ class ProposalDesktopApp:
             self._customer_edit_status_variable.set(
                 "Select an existing customer to edit."
             )
+
+    def _clear_job_edit_widgets(self) -> None:
+        self._updating_widgets = True
+        try:
+            for variable in self._job_edit_variables.values():
+                variable.set("")
+            self._job_edit_contents_known_variable.set(False)
+            for widget in (
+                self._job_edit_scope_notes_text,
+                self._job_edit_internal_notes_text,
+            ):
+                widget.delete("1.0", "end")
+                widget.edit_modified(False)
+        finally:
+            self._updating_widgets = False
+        self._job_edit_status_variable.set("Select an existing job to edit.")
+
+    def _refresh_job_edit_widgets(self) -> None:
+        state = self.controller.job_edit_state
+        self._updating_widgets = True
+        try:
+            for name, variable in self._job_edit_variables.items():
+                variable.set(getattr(state, name))
+            self._job_edit_contents_known_variable.set(state.contents_known)
+            for widget, value in (
+                (self._job_edit_scope_notes_text, state.scope_notes),
+                (self._job_edit_internal_notes_text, state.internal_notes),
+            ):
+                widget.delete("1.0", "end")
+                if value:
+                    widget.insert("1.0", value)
+                widget.edit_modified(False)
+        finally:
+            self._updating_widgets = False
+        if state.job_id:
+            self._job_edit_status_variable.set(
+                "Job edit form loaded; changes require explicit Save Job Changes."
+            )
+        else:
+            self._job_edit_status_variable.set("Select an existing job to edit.")
 
     def _set_summary(self, lines: tuple[str, ...]) -> None:
         self._summary_text.configure(state="normal")

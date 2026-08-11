@@ -23,6 +23,14 @@ class JobAlreadyExistsError(ValueError):
     """A create-only job insert found an existing job id."""
 
 
+class JobNotFoundError(ValueError):
+    """A guarded job update found that the original job is missing."""
+
+
+class JobUpdateConflictError(ValueError):
+    """A guarded job update found newer persisted job values."""
+
+
 def _persisted_customer_values(record: CustomerRecord) -> tuple[object, ...]:
     """Return only values represented by the persisted customer schema."""
 
@@ -34,6 +42,25 @@ def _persisted_customer_values(record: CustomerRecord) -> tuple[object, ...]:
         record.billing_street_address,
         record.billing_city_state_zip,
         tuple(record.notes),
+    )
+
+
+def _persisted_job_values(record: JobRecord) -> tuple[object, ...]:
+    """Return every value represented by the persisted job schema."""
+
+    return (
+        record.job_id,
+        record.customer_id,
+        record.job_name,
+        record.site_street_address,
+        record.site_city_state_zip,
+        record.status,
+        record.tank_location_type,
+        record.tank_size_gallons,
+        record.tank_contents,
+        record.contents_known,
+        tuple(record.scope_notes),
+        tuple(record.internal_notes),
     )
 
 
@@ -74,6 +101,14 @@ class JobRepository(Protocol):
 
     def save_job(self, record: JobRecord) -> JobRecord:
         """Save or overwrite a job record."""
+        ...
+
+    def update_job(
+        self,
+        record: JobRecord,
+        expected_original: JobRecord,
+    ) -> JobRecord:
+        """Update one unchanged existing job without creating it."""
         ...
 
     def get_job(self, job_id: str) -> JobRecord | None:
@@ -150,6 +185,29 @@ class InMemoryJobRepository:
         return record
 
     def save_job(self, record: JobRecord) -> JobRecord:
+        self._jobs[record.job_id] = record
+        return record
+
+    def update_job(
+        self,
+        record: JobRecord,
+        expected_original: JobRecord,
+    ) -> JobRecord:
+        if record.job_id != expected_original.job_id:
+            raise ValueError("job ID cannot change during an update")
+        if record.customer_id != expected_original.customer_id:
+            raise ValueError("job customer ID cannot change during an update")
+        current = self._jobs.get(record.job_id)
+        if current is None:
+            raise JobNotFoundError(
+                "Job no longer exists; reload jobs before retrying."
+            )
+        if _persisted_job_values(current) != _persisted_job_values(
+            expected_original
+        ):
+            raise JobUpdateConflictError(
+                "Job changed elsewhere; reload jobs before retrying."
+            )
         self._jobs[record.job_id] = record
         return record
 

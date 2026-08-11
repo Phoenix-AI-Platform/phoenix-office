@@ -13,6 +13,8 @@ from phoenix_office.records import (
     CustomerNotFoundError,
     CustomerUpdateConflictError,
     JobAlreadyExistsError,
+    JobNotFoundError,
+    JobUpdateConflictError,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
     initialize_records_database,
@@ -613,6 +615,192 @@ def test_sqlite_job_repository_initialize_false_does_not_create_schema(
     SQLiteJobRepository(db_path, initialize=False, read_only=False)
 
     assert db_path.read_bytes() == b""
+
+
+def test_sqlite_update_job_changes_exactly_one_existing_job(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    job_repository = SQLiteJobRepository(db_path, initialize=False)
+    customer_a = _customer("cust-a", "Synthetic Customer A")
+    customer_b = _customer("cust-b", "Synthetic Customer B")
+    job_a1 = _job("job-a1", "cust-a", "Original Job A1")
+    job_a2 = _job("job-a2", "cust-a", "Original Job A2")
+    job_b1 = _job("job-b1", "cust-b", "Original Job B1")
+    for customer in (customer_a, customer_b):
+        customer_repository.save_customer(customer)
+    for job in (job_a1, job_a2, job_b1):
+        job_repository.save_job(job)
+    customers_before = customer_repository.list_customers()
+    jobs_before = job_repository.list_jobs()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    updated = JobRecord(
+        job_id=job_a1.job_id,
+        customer_id=job_a1.customer_id,
+        job_name="Updated Synthetic Job A1",
+        site_street_address="500 Synthetic Ave",
+        site_city_state_zip="Testville, WI 53000",
+        status=JobStatus.scheduled,
+        tank_location_type=TankLocationType.underground,
+        tank_size_gallons=1200,
+        tank_contents="synthetic material",
+        contents_known=True,
+        scope_notes=["Updated explicit scope"],
+        internal_notes=["Updated explicit internal note"],
+    )
+
+    result = SQLiteJobRepository(
+        db_path,
+        initialize=False,
+        read_only=False,
+    ).update_job(updated, job_a1)
+
+    jobs_after = job_repository.list_jobs()
+    assert result == updated
+    assert job_repository.get_job(job_a1.job_id) == updated
+    assert customer_repository.list_customers() == customers_before
+    assert len(jobs_after) == len(jobs_before)
+    assert jobs_after[1:] == jobs_before[1:]
+    assert updated.customer_id == job_a1.customer_id
+    assert job_repository.list_jobs_for_customer("cust-a") == [updated, job_a2]
+    assert job_repository.list_jobs_for_customer("cust-b") == [job_b1]
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) != hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_job_rejects_stale_original_without_mutation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteJobRepository(db_path)
+    original = _job("job-1", "cust-1", "Original")
+    newer = original.model_copy(update={"job_name": "Newer"})
+    attempted = original.model_copy(update={"job_name": "Stale Attempt"})
+    repository.save_job(original)
+    repository.save_job(newer)
+    hash_before = _file_hash(db_path)
+    schema_before = _schema_signature(db_path)
+
+    with pytest.raises(JobUpdateConflictError):
+        repository.update_job(attempted, original)
+
+    assert repository.get_job("job-1") == newer
+    assert _file_hash(db_path) == hash_before
+    assert _schema_signature(db_path) == schema_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_job_rejects_missing_without_recreation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    customer_repository = SQLiteCustomerRepository(db_path)
+    repository = SQLiteJobRepository(db_path, initialize=False)
+    customer = _customer("cust-1")
+    original = _job("job-1", customer.customer_id, "Original")
+    other = _job("job-2", customer.customer_id, "Other")
+    customer_repository.save_customer(customer)
+    repository.save_job(original)
+    repository.save_job(other)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DELETE FROM jobs WHERE job_id = ?", (original.job_id,))
+        connection.commit()
+    customers_before = customer_repository.list_customers()
+    jobs_before = repository.list_jobs()
+    hash_before = _file_hash(db_path)
+
+    with pytest.raises(JobNotFoundError):
+        repository.update_job(
+            original.model_copy(update={"job_name": "Recreate Attempt"}),
+            original,
+        )
+
+    assert repository.get_job(original.job_id) is None
+    assert repository.list_jobs() == jobs_before
+    assert customer_repository.list_customers() == customers_before
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+@pytest.mark.parametrize("identity", ["job_id", "customer_id"])
+def test_sqlite_update_job_rejects_identity_changes_without_mutation(
+    tmp_path: Path,
+    identity: str,
+) -> None:
+    db_path = tmp_path / "records.sqlite"
+    repository = SQLiteJobRepository(db_path)
+    original = _job("job-1", "cust-1", "Original")
+    repository.save_job(original)
+    attempted = original.model_copy(update={identity: f"changed-{identity}"})
+    hash_before = _file_hash(db_path)
+
+    with pytest.raises(ValueError, match="cannot change"):
+        repository.update_job(attempted, original)
+
+    assert repository.get_job("job-1") == original
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_job_rejects_read_only_repository(tmp_path: Path) -> None:
+    db_path = tmp_path / "records.sqlite"
+    writable = SQLiteJobRepository(db_path)
+    original = _job("job-1", "cust-1", "Original")
+    writable.save_job(original)
+    hash_before = _file_hash(db_path)
+    repository = SQLiteJobRepository(db_path, initialize=False, read_only=True)
+
+    with pytest.raises(PermissionError, match="read-only"):
+        repository.update_job(
+            original.model_copy(update={"job_name": "Updated"}),
+            original,
+        )
+
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_job_does_not_create_nonexistent_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "missing.sqlite"
+    original = _job("job-1", "cust-1", "Original")
+    repository = SQLiteJobRepository(db_path, initialize=False, read_only=False)
+
+    with pytest.raises(ValueError, match="must already exist"):
+        repository.update_job(
+            original.model_copy(update={"job_name": "Updated"}),
+            original,
+        )
+
+    assert not db_path.exists()
+    assert _sqlite_sidecars(db_path) == []
+
+
+def test_sqlite_update_job_rejects_missing_table_without_initialization(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "customers-only.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE customers (customer_id TEXT PRIMARY KEY)")
+        connection.commit()
+    schema_before = _schema_signature(db_path)
+    hash_before = _file_hash(db_path)
+    original = _job("job-1", "cust-1", "Original")
+    repository = SQLiteJobRepository(db_path, initialize=False, read_only=False)
+
+    with pytest.raises(ValueError, match="not usable"):
+        repository.update_job(
+            original.model_copy(update={"job_name": "Updated"}),
+            original,
+        )
+
+    assert _schema_signature(db_path) == schema_before
+    assert _file_hash(db_path) == hash_before
+    assert _sqlite_sidecars(db_path) == []
 
 
 def test_sqlite_job_repository_missing_job_returns_none(tmp_path: Path) -> None:

@@ -36,7 +36,9 @@ from phoenix_office.records.repository import (
     InMemoryCustomerRepository,
     InMemoryJobRepository,
     JobAlreadyExistsError,
+    JobNotFoundError,
     JobRepository,
+    JobUpdateConflictError,
 )
 from phoenix_office.records.sqlite import (
     SQLiteCustomerRepository,
@@ -73,7 +75,9 @@ __all__ = [
     "InMemoryCustomerRepository",
     "InMemoryJobRepository",
     "JobAlreadyExistsError",
+    "JobNotFoundError",
     "JobRepository",
+    "JobUpdateConflictError",
     "RecordProposalDetails",
     "RecordStore",
     "SQLiteCustomerRepository",
