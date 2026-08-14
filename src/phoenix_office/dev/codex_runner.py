@@ -452,16 +452,18 @@ class SupervisedCodexPilotRunner:
         except Exception:
             worktree_result = WorktreeResult(False, "worktree_creation_failed")
         if not worktree_result.passed or worktree_result.handle is None:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=worktree_result.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category="usage_unknown",
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, worktree_result.category, status="failed")
         worktree = worktree_result.handle
 
         if not self._append(
@@ -471,16 +473,18 @@ class SupervisedCodexPilotRunner:
             lifecycle,
             "invocation_starting",
         ):
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category="lifecycle_append_failed",
+                result_status="failed",
                 next_state="failed",
                 usage_category="usage_unknown",
                 recovery_category="storage_uncertain",
             )
-            return _with_category(result, "lifecycle_append_failed", status="failed")
 
         def _record_started() -> None:
             if not self._append(
@@ -509,50 +513,58 @@ class SupervisedCodexPilotRunner:
 
         if execution.status == "timed_out":
             result["timeout_category"] = "timeout_reached"
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=execution.category,
+                result_status="timed_out",
                 next_state="timed_out",
                 usage_category=usage_category,
                 timeout_category="timeout_reached",
             )
-            return _with_category(result, execution.category, status="timed_out")
         if execution.status == "cancelled":
             result["cancellation_category"] = "operator_cancelled"
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=execution.category,
+                result_status="cancelled",
                 next_state="cancelled",
                 usage_category=usage_category,
                 cancellation_category="operator_cancelled",
             )
-            return _with_category(result, execution.category, status="cancelled")
         if execution.status != "succeeded":
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=execution.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="runner_crash",
             )
-            return _with_category(result, execution.category, status="failed")
         if usage_category == "budget_exceeded":
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category="budget_exceeded",
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, "budget_exceeded", status="failed")
 
         allowed_paths = tuple(str(path) for path in authorization_data["allowed_paths"])
         try:
@@ -560,16 +572,18 @@ class SupervisedCodexPilotRunner:
         except Exception:
             diff_result = DiffGateResult(False, "diff_gate_unavailable")
         if not diff_result.passed:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=diff_result.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, diff_result.category, status="failed")
         result["changed_paths"] = list(diff_result.changed_paths)
 
         try:
@@ -584,16 +598,18 @@ class SupervisedCodexPilotRunner:
             validation = ValidationGateResult(False, "validation_gate_unavailable")
         result["validation_categories"] = list(validation.command_categories)
         if not validation.passed:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=validation.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, validation.category, status="failed")
 
         try:
             post_validation_diff = self._system.inspect_diff(
@@ -606,19 +622,17 @@ class SupervisedCodexPilotRunner:
             not post_validation_diff.passed
             or post_validation_diff.changed_paths != diff_result.changed_paths
         ):
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category="post_validation_diff_changed",
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
-            )
-            return _with_category(
-                result,
-                "post_validation_diff_changed",
-                status="failed",
             )
 
         try:
@@ -630,48 +644,54 @@ class SupervisedCodexPilotRunner:
         except Exception:
             commit = GateResult(False, "commit_gate_unavailable")
         if not commit.passed:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=commit.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, commit.category, status="failed")
 
         try:
             prepublication = self._system.prepublication_gate(authorization_data)
         except Exception:
             prepublication = GateResult(False, "prepublication_gate_unavailable")
         if not prepublication.passed:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=prepublication.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, prepublication.category, status="failed")
 
         try:
             push = self._system.push_authorized_branch(worktree)
         except Exception:
             push = GateResult(False, "push_gate_unavailable")
         if not push.passed:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=push.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, push.category, status="failed")
 
         try:
             publication = self._system.create_pull_request(
@@ -688,16 +708,18 @@ class SupervisedCodexPilotRunner:
         except Exception:
             publication = PublicationResult(False, "publication_gate_unavailable")
         if not publication.passed or publication.pull_request_identity is None:
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category=publication.category,
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="operator_recovery",
             )
-            return _with_category(result, publication.category, status="failed")
 
         result["pull_request_identity"] = publication.pull_request_identity
         if not self._append(
@@ -710,19 +732,17 @@ class SupervisedCodexPilotRunner:
             pull_request_identity=publication.pull_request_identity,
             usage_category=usage_category,
         ):
-            self._terminalize(
+            return self._terminal_result(
+                result,
                 claim_store,
                 attempt_id,
                 authorization_data,
                 lifecycle,
+                result_category="publication_audit_storage_uncertain",
+                result_status="failed",
                 next_state="failed",
                 usage_category=usage_category,
                 recovery_category="storage_uncertain",
-            )
-            return _with_category(
-                result,
-                "publication_audit_storage_uncertain",
-                status="failed",
             )
         return _with_category(result, "pr_opened_and_stopped", status="success")
 
@@ -751,6 +771,42 @@ class SupervisedCodexPilotRunner:
         lifecycle["sequence"] = append["event_sequence"]
         lifecycle["state"] = append["lifecycle_state"]
         return True
+
+    def _terminal_result(
+        self,
+        result: dict[str, object],
+        store: LifecycleClaimStore,
+        attempt_id: str,
+        authorization: dict[str, object],
+        lifecycle: dict[str, object],
+        *,
+        result_category: str,
+        result_status: str,
+        next_state: str,
+        usage_category: str,
+        timeout_category: str | None = None,
+        cancellation_category: str | None = None,
+        recovery_category: str | None = None,
+    ) -> dict[str, object]:
+        """Publish a terminal result only after its durable event is confirmed."""
+        persisted = self._terminalize(
+            store,
+            attempt_id,
+            authorization,
+            lifecycle,
+            next_state=next_state,
+            usage_category=usage_category,
+            timeout_category=timeout_category,
+            cancellation_category=cancellation_category,
+            recovery_category=recovery_category,
+        )
+        if not persisted:
+            return _with_category(
+                result,
+                "lifecycle_storage_uncertain",
+                status="failed",
+            )
+        return _with_category(result, result_category, status=result_status)
 
     def _terminalize(
         self,

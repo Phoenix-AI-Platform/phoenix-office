@@ -197,6 +197,7 @@ class FakeSystem:
     publication: PublicationResult = PublicationResult(
         True, "pull_request_created", "pr-400"
     )
+    worktree_outcome: WorktreeResult | None = None
     calls: list[str] = field(default_factory=list)
     prompts: list[str] = field(default_factory=list)
     worktree: WorktreeHandle = field(
@@ -228,6 +229,8 @@ class FakeSystem:
     def create_worktree(self, authorization: dict[str, object]) -> WorktreeResult:
         assert authorization["base_commit_sha"] == BASE_SHA
         self.calls.append("worktree")
+        if self.worktree_outcome is not None:
+            return self.worktree_outcome
         return WorktreeResult(True, "worktree_created", self.worktree)
 
     def invoke_codex(
@@ -318,11 +321,15 @@ def _run(
     authorization: dict[str, object] | None = None,
     reviewed_prompt: str | None = None,
     static_preflight_passed: bool = True,
+    claim_store_factory: runner_module.ClaimStoreFactory = (
+        SQLiteCodexPilotInitialClaimStore
+    ),
 ) -> tuple[dict[str, object], Path]:
     actual_handoff = handoff or _handoff()
     database_path = tmp_path / "control-state.sqlite3"
     runner = SupervisedCodexPilotRunner(
         system=system,
+        claim_store_factory=claim_store_factory,
         attempt_id_factory=lambda: ATTEMPT_ID,
     )
     result = runner.run(
@@ -514,6 +521,117 @@ def test_static_binding_failures_precede_every_system_action(
     assert not database_path.exists()
 
 
+class TerminalAppendFailureStore(SQLiteCodexPilotInitialClaimStore):
+    """Inject one failed durable terminal append without retrying it."""
+
+    def __init__(self, database_path: Path) -> None:
+        super().__init__(database_path)
+        self.terminal_append_attempts = 0
+
+    def append_lifecycle_event(self, *args, **kwargs):
+        if kwargs.get("next_lifecycle_state") in {
+            "failed",
+            "cancelled",
+            "timed_out",
+        }:
+            self.terminal_append_attempts += 1
+            return {
+                "lifecycle_append_category": "claim_store_unavailable",
+                "event_sequence": None,
+                "lifecycle_state": None,
+            }
+        return super().append_lifecycle_event(*args, **kwargs)
+
+
+def _run_with_terminal_append_failure(
+    tmp_path: Path,
+    system: FakeSystem,
+) -> tuple[dict[str, object], Path, TerminalAppendFailureStore]:
+    stores: list[TerminalAppendFailureStore] = []
+
+    def factory(database_path: Path) -> TerminalAppendFailureStore:
+        store = TerminalAppendFailureStore(database_path)
+        stores.append(store)
+        return store
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        claim_store_factory=factory,
+    )
+    assert len(stores) == 1
+    return result, database_path, stores[0]
+
+
+def test_preinvocation_terminal_append_failure_surfaces_storage_uncertainty(
+    tmp_path: Path,
+):
+    system = FakeSystem(
+        worktree_outcome=WorktreeResult(False, "worktree_creation_failed")
+    )
+
+    result, database_path, store = _run_with_terminal_append_failure(
+        tmp_path,
+        system,
+    )
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert result["attempt_id"] == ATTEMPT_ID
+    assert store.terminal_append_attempts == 1
+    assert system.calls == ["preclaim", "runtime", "probe", "worktree"]
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == "claim_created"
+    reuse_system = FakeSystem()
+    reuse_result, _ = _run(tmp_path, reuse_system)
+    assert reuse_result["category"] == "claim_attempt_id_conflict"
+    assert "worktree" not in reuse_system.calls
+
+
+@pytest.mark.parametrize(
+    ("execution_status", "execution_category"),
+    [
+        ("failed", "codex_structured_failure"),
+        ("timed_out", "codex_timed_out"),
+        ("cancelled", "codex_cancelled"),
+    ],
+)
+def test_process_terminal_append_failure_surfaces_storage_uncertainty(
+    tmp_path: Path,
+    execution_status: str,
+    execution_category: str,
+):
+    system = FakeSystem(
+        execution=CodexExecutionResult(
+            execution_status,
+            execution_category,
+            25,
+        )
+    )
+
+    result, database_path, store = _run_with_terminal_append_failure(
+        tmp_path,
+        system,
+    )
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert result["attempt_id"] == ATTEMPT_ID
+    assert store.terminal_append_attempts == 1
+    assert system.calls.count("invoke") == 1
+    assert "diff" not in system.calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == (
+        "invocation_started"
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "category", "expected_state"),
     [
@@ -627,6 +745,90 @@ def test_postclaim_gate_failures_never_retry(
     assert lifecycle["snapshot"]["current_lifecycle_state"] == "failed"
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "forbidden_call"),
+    [
+        (
+            "first_diff",
+            DiffGateResult(False, "unauthorized_path_changed"),
+            "validation",
+        ),
+        (
+            "validation",
+            ValidationGateResult(False, "validation_failed", ("failed",)),
+            "commit",
+        ),
+    ],
+)
+def test_post_worker_gate_terminal_append_failure_stops_publication(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    forbidden_call: str,
+):
+    system = FakeSystem()
+    setattr(system, field_name, field_value)
+
+    result, database_path, store = _run_with_terminal_append_failure(
+        tmp_path,
+        system,
+    )
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert store.terminal_append_attempts == 1
+    assert forbidden_call not in system.calls
+    assert "push" not in system.calls
+    assert "pull_request" not in system.calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == (
+        "invocation_started"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "expected_pull_request_calls"),
+    [
+        ("push", GateResult(False, "push_failed"), 0),
+        (
+            "publication",
+            PublicationResult(False, "pull_request_create_failed"),
+            1,
+        ),
+    ],
+)
+def test_publication_failure_terminal_append_failure_never_retries(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    expected_pull_request_calls: int,
+):
+    system = FakeSystem()
+    setattr(system, field_name, field_value)
+
+    result, database_path, store = _run_with_terminal_append_failure(
+        tmp_path,
+        system,
+    )
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert store.terminal_append_attempts == 1
+    assert system.calls.count("invoke") == 1
+    assert system.calls.count("push") == 1
+    assert system.calls.count("pull_request") == expected_pull_request_calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == (
+        "invocation_started"
+    )
+
+
 def test_postvalidation_diff_change_blocks_commit(tmp_path: Path):
     system = FakeSystem(
         second_diff=DiffGateResult(
@@ -643,6 +845,17 @@ def test_postvalidation_diff_change_blocks_commit(tmp_path: Path):
 
 
 class FinalAppendFailureStore(SQLiteCodexPilotInitialClaimStore):
+    def append_lifecycle_event(self, *args, **kwargs):
+        if kwargs.get("next_lifecycle_state") == "pr_opened_and_stopped":
+            return {
+                "lifecycle_append_category": "claim_store_unavailable",
+                "event_sequence": None,
+                "lifecycle_state": None,
+            }
+        return super().append_lifecycle_event(*args, **kwargs)
+
+
+class FinalAndTerminalAppendFailureStore(TerminalAppendFailureStore):
     def append_lifecycle_event(self, *args, **kwargs):
         if kwargs.get("next_lifecycle_state") == "pr_opened_and_stopped":
             return {
@@ -673,6 +886,45 @@ def test_pr_audit_uncertainty_does_not_create_a_second_pr(tmp_path: Path):
     assert result["category"] == "publication_audit_storage_uncertain"
     assert system.calls.count("pull_request") == 1
     assert system.calls.count("push") == 1
+    lifecycle = SQLiteCodexPilotInitialClaimStore(
+        tmp_path / "control.sqlite3"
+    ).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == "failed"
+
+
+def test_pr_audit_and_terminal_append_uncertainty_never_republishes(tmp_path: Path):
+    system = FakeSystem()
+    stores: list[FinalAndTerminalAppendFailureStore] = []
+
+    def factory(database_path: Path) -> FinalAndTerminalAppendFailureStore:
+        store = FinalAndTerminalAppendFailureStore(database_path)
+        stores.append(store)
+        return store
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        claim_store_factory=factory,
+    )
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert result["pull_request_identity"] == "pr-400"
+    assert len(stores) == 1
+    assert stores[0].terminal_append_attempts == 1
+    assert system.calls.count("invoke") == 1
+    assert system.calls.count("push") == 1
+    assert system.calls.count("pull_request") == 1
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == (
+        "invocation_started"
+    )
 
 
 def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority():
