@@ -1,8 +1,9 @@
 # Phoenix Office Development Progress Dashboard
 
 > **Phoenix Office still cannot execute orchestration plans.**
-> All execution, preflight, enforcement, audit persistence, and automation gates remain unimplemented.
-> This dashboard reflects verified progress through PR #97.
+> Orchestration execution, mutation, audit persistence, worker/background processing, scheduling, retries, and automatic delivery remain unavailable.
+> Read-only inspection and preflight capabilities remain non-executing.
+> This dashboard reflects verified progress through PR #358.
 
 ---
 
@@ -10,11 +11,18 @@
 
 | Capability | Status |
 |---|---|
-| Proposal DOCX generation | ✅ Complete |
-| Record-backed proposal workflow | ✅ Complete |
+| Local desktop proposal workflow | ✅ Complete |
+| Customer creation | ✅ Complete — insert-only |
+| Customer guarded editing | ✅ Complete — immutable ID and stale-data protection |
+| Job creation | ✅ Complete — insert-only for the selected customer |
+| Job guarded editing | ✅ Complete — immutable IDs, fixed customer association, stale-data protection |
+| Desktop DOCX + companion JSON generation | ✅ Complete — deliberate explicit action |
+| CLI proposal DOCX generation | ✅ Complete |
+| Record-backed CLI proposal workflow | ✅ Complete |
 | Validation / inspection CLI | ✅ Complete |
 | WorkflowPlan inspect | ✅ Complete |
 | WorkflowPlanReview inspect | ✅ Complete |
+| Read-only orchestration preflight | ✅ Complete — non-executing |
 | Orchestration execution gate design docs | 🟡 Designed / documented |
 | Execution implementation | ⛔ Not implemented |
 | Audit persistence | ⛔ Not implemented |
@@ -35,13 +43,16 @@
 
 | Area | Current state | Evidence / source docs | Next likely step |
 |---|---|---|---|
-| Proposal generation | Complete — DOCX output from JSON records | `src/phoenix_office/renderers/`, `src/phoenix_office/generators/`, PR #2–#7 | Stable; no changes planned |
+| Local desktop proposal workflow | Complete — explicit records and proposal details, deterministic validation, DOCX + companion JSON generation | `src/phoenix_office/proposal_desktop.py`, PR #347, PR #349, PR #350 | Stable; no successor implied |
+| Desktop customer records | Complete within current authority — insert-only creation and guarded editing; no delete or ID rename | `src/phoenix_office/records/`, PR #352, PR #356 | Stable within current authority |
+| Desktop job records | Complete within current authority — selected-customer insert-only creation and guarded editing; no delete, ID rename, or reassignment | `src/phoenix_office/records/`, PR #354, PR #358 | Stable within current authority |
+| CLI proposal generation | Complete — DOCX output from JSON records | `src/phoenix_office/renderers/`, `src/phoenix_office/generators/`, PR #2–#7 | Stable; no changes planned |
 | Record storage / import / export | Complete — SQLite-backed `RecordStore` with CLI | `src/phoenix_office/records/`, `docs/development/records_cli.md`, PR #29–#41 | Stable |
 | Proposal validation / inspection | Complete — `validate` and `inspect` CLI for `ProposalInput` and `RecordProposalDetails` | `docs/development/proposal_workflow_runbook.md`, PR #49–#55 | Stable |
 | WorkflowPlan inspection | Complete — read-only `orchestration plan inspect` CLI | `docs/development/orchestration_inspection_cli.md`, PR #72 | Stable |
 | WorkflowPlanReview inspection | Complete — read-only `orchestration review inspect` CLI | `docs/development/orchestration_inspection_cli.md`, PR #74 | Stable |
-| Orchestration execution gates | Design notes only — 13 documented gate areas, none implemented | `docs/development/orchestration_execution_readiness_checklist.md`, PR #85–#97 | Preflight skeleton (Lane C, future) |
-| Future preflight | ⛔ Not implemented | `docs/development/orchestration_validation_preflight_design_notes.md` | Skeleton only, when explicitly approved |
+| Read-only orchestration preflight | Complete — deterministic non-executing reports and plan/review fingerprint checks | `docs/development/orchestration-preflight-json-contract.md`, PR #134–#139 | Stable; remains non-executing |
+| Orchestration execution gates | Design notes and read-only preflight only — execution remains unavailable | `docs/development/orchestration_execution_readiness_checklist.md`, PR #85–#97, PR #134–#139 | No execution work authorized |
 | Future execution | ⛔ Not implemented | `docs/development/orchestration_execution_command_surface_design_notes.md` | Requires all gates cleared |
 | Future audit persistence | ⛔ Not implemented | `docs/development/orchestration_audit_logging_design_notes.md` | Skeleton only, when explicitly approved |
 | Future API / MCP surfaces | ⛔ Not implemented | `docs/prd/ecosystem-informed-prd.md` | After execution boundary is stable |
@@ -55,22 +66,29 @@ flowchart TD
     A[Proposal models] --> B[DOCX renderer]
     B --> C[Proposal CLI]
     C --> D[Records store]
-    D --> E[Record-backed proposal workflow]
+    D --> E[Record-backed CLI proposal workflow]
     E --> F[Validation and inspection]
+
+    D --> R[Local desktop]
+    R --> S[Customer create and guarded edit]
+    S --> T[Job create and guarded edit]
+    T --> U[Explicit proposal intake]
+    U --> V[Deterministic validation]
+    V --> W[DOCX + companion JSON]
+
     F --> G[WorkflowPlan inspect]
     G --> H[WorkflowPlanReview inspect]
-    H --> I[Execution gate design notes]
-    I --> J[Future: preflight skeleton 🔒]
+    H --> I[Read-only orchestration preflight]
+    I --> J[Execution gate design notes]
     J --> K[Future: execution boundary 🔒]
 
-    I --> L[Future: audit persistence ⛔]
-    I --> M[Future: plan/review binding ⛔]
-    I --> N[Future: operator confirmation ⛔]
-    I --> O[Future: artifact policy enforcement ⛔]
-    I --> P[Future: idempotency/replay ⛔]
-    I --> Q[Future: capability enforcement ⛔]
+    J --> L[Future: audit persistence ⛔]
+    J --> M[Future: execution binding enforcement ⛔]
+    J --> N[Future: operator confirmation ⛔]
+    J --> O[Future: artifact policy enforcement ⛔]
+    J --> P[Future: idempotency/replay ⛔]
+    J --> Q[Future: capability enforcement ⛔]
 
-    style J fill:#ffd700,color:#000
     style K fill:#ffd700,color:#000
     style L fill:#ff6b6b,color:#fff
     style M fill:#ff6b6b,color:#fff
@@ -95,6 +113,7 @@ flowchart TD
 | Record-backed proposal workflow | #42–#59 | Record-to-`ProposalInput` adapter, compose/validate/inspect CLI, smoke tests, runbook, operator checklist, output artifact conventions, MVP acceptance doc |
 | Orchestration contracts and inspection | #60–#84 | `WorkflowPlan` model + fixture, approval boundary + fixtures, project state/runbook/guardrails docs, `WorkflowPlan` inspect CLI, `WorkflowPlanReview` inspect CLI, inspection guide, CLI help/path/non-execution tests, next-brick planning guide |
 | Execution readiness and guardrail docs | #85–#97 | Execution readiness checklist, 12 design-notes-only gate areas (audit, binding, preflight, confirmation, artifact policy, dry-run, result, command surface, cancellation, provenance, private data/secrets, permission/capability, idempotency/replay) |
+| Verified local desktop records and proposal workflow | #347, #349–#350, #352, #354, #356, #358 | Read-only desktop foundation, controlled DOCX + companion JSON generation, real-Tk correction, insert-only customer/job creation, and guarded customer/job editing with immutable identities and stale-data protection |
 
 ---
 
@@ -104,6 +123,12 @@ The following are explicitly **not implemented**:
 
 - **Planning and approval contracts are non-executing.** They describe and record decisions; they do not trigger any action.
 - **Phoenix Office cannot execute orchestration plans.** No execution path exists.
+- **No worker or background execution exists.** No scheduling or retries exist.
+- **No automatic proposal generation from orchestration plans exists.**
+- **No network integration or automatic email/delivery exists in the desktop workflow.**
+- **Desktop record authority is create/update only.** Customer/job deletion, identity rename, and job customer reassignment are unavailable.
+- **Desktop database initialization, migration, and schema changes are unavailable.**
+- **Proposal reopening or revision persistence is not implemented.**
 - **No audit persistence exists.**
 - **No plan / review binding enforcement exists.**
 - **No validation / preflight enforcement exists.**
@@ -124,20 +149,19 @@ The following are explicitly **not implemented**:
 ### Lane A — docs / manual (safe for this agent now)
 
 - [x] Progress dashboard (this document)
-- [ ] Documentation cleanup and navigation updates
+- [x] Project state and dashboard synchronized through PR #358
+- [ ] Documentation cleanup and navigation updates when explicitly scoped
 - [ ] Project state updates after future merged PRs
 
 ### Lane B — tests (should wait for Codex or careful local work)
 
 - [ ] Unsupported command-surface guard tests for new gate areas
 - [ ] Path / error handling tests for edge cases
-- [ ] Preflight contract tests (when preflight implementation is approved)
+- [ ] Additional read-only preflight contract tests only when explicitly scoped
 
-### Lane C — implementation (should wait for Codex or careful local work)
+### Lane C — future implementation (unauthorized here)
 
-- [ ] Preflight skeleton
-- [ ] Plan / review binding skeleton
-- [ ] Operator confirmation skeleton
-- [ ] Audit persistence skeleton
+- [ ] No implementation task is selected or authorized by this dashboard update
+- [ ] Any future implementation requires a separate scoped task and review
 
 > ⚠️ **Lane B and Lane C should not be started without explicit scoped approval.** Do not implement, automate, or enforce anything in these lanes without a dedicated task prompt.

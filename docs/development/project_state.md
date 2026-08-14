@@ -193,6 +193,13 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #266 docs/process: validate Codex handoff dry-run workflow (records successful main-branch manual dry-run validation and unsafe escaping-path fail-closed behavior; documentation only)
 #270 feat: add prompt-only Codex handoff output (adds `dev codex-handoff --prompt-only` to print only the validated prompt for manual copy/paste; Codex invocation remains manual and unauthorized, with no PR approval, merge, GitHub mutation, workflow execution, or orchestration execution added)
 #272 feat: add structured Codex handoff JSON failures (updates `dev codex-handoff --json` to emit deterministic JSON failure payloads for missing, malformed, unreadable, or unsafe packages while preserving human-readable failure behavior without `--json`; no invocation or mutation behavior added)
+#347 feat: implement TASK-052 read-only local desktop proposal form foundation
+#349 feat: implement TASK-053 controlled desktop DOCX and companion JSON generation
+#350 fix: correct real Tk customer/job combobox clearing for TASK-053
+#352 feat: implement TASK-054 insert-only desktop customer creation
+#354 feat: implement TASK-055 insert-only desktop job creation for the selected customer
+#356 feat: implement TASK-056 guarded desktop customer editing with immutable identity and stale-data protection
+#358 feat: implement TASK-057 guarded desktop job editing with immutable identity, fixed customer association, and stale-data protection
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -210,6 +217,65 @@ CustomerRecord / JobRecord JSON
 ```
 
 This workflow is accepted for internal manual v0.1 use, subject to human review.
+
+## Current Local Desktop Proposal Workflow
+
+Verified progress through PR #358 adds a local standard-library desktop workflow at:
+
+```bash
+python -m phoenix_office.proposal_desktop
+```
+
+The completed desktop capability cluster is:
+
+- PR #347 / TASK-052 — read-only local desktop proposal-form foundation for explicit existing-customer and existing-job selection.
+- PR #349 plus corrective PR #350 / TASK-053 — deliberate DOCX and companion JSON generation through the existing deterministic validation/build path, including the real-Tk combobox clearing correction.
+- PR #352 / TASK-054 — insert-only customer creation with duplicate protection.
+- PR #354 / TASK-055 — insert-only job creation bound only to the deliberately selected existing customer.
+- PR #356 / TASK-056 — guarded customer editing with immutable `customer_id` and optimistic stale-data protection.
+- PR #358 / TASK-057 — guarded job editing with immutable `job_id` and `customer_id`, no customer reassignment, and optimistic stale-data protection.
+
+Current deliberate operator flow:
+
+```text
+create customer
+  -> edit customer safely
+  -> create job for the selected customer
+  -> edit job safely without changing its identity or customer
+  -> select customer and job
+  -> enter explicit proposal details
+  -> validate through the existing deterministic pipeline
+  -> generate DOCX + companion JSON
+```
+
+The desktop adapter reuses the established record models, validation/build services, DOCX renderer, and template behavior. It does not replace or alter the existing CLI proposal workflow above.
+
+Current desktop authority is intentionally narrow:
+
+```text
+CUSTOMER_CREATE=YES
+CUSTOMER_EDIT=YES
+CUSTOMER_DELETE=NO
+CUSTOMER_ID_RENAME=NO
+
+JOB_CREATE=YES
+JOB_EDIT=YES
+JOB_DELETE=NO
+JOB_ID_RENAME=NO
+JOB_CUSTOMER_REASSIGNMENT=NO
+
+DATABASE_INITIALIZATION_FROM_DESKTOP=NO
+DATABASE_MIGRATION=NO
+SCHEMA_CHANGE=NO
+NETWORK_ACCESS=NO
+BACKGROUND_WORK=NO
+AUTOMATIC_EMAIL_OR_DELIVERY=NO
+INFERRED_PRICING=NO
+INFERRED_SCOPE=NO
+INFERRED_NOTES=NO
+```
+
+Desktop writes are limited to explicit insert-only customer/job creation and optimistic guarded updates of existing customer/job rows. The desktop does not delete records, initialize or migrate databases, change schemas, infer proposal content, send proposals, or run background/network work. Proposal reopening or revision persistence is not implemented.
 
 ## Current Orchestration State
 
@@ -330,11 +396,23 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No automatic DOCX generation from orchestration exists.
 - No automatic sending or filing exists.
 - Pricing, scope, and notes are not inferred.
+- No desktop customer or job deletion exists.
+- No desktop customer-ID or job-ID rename exists.
+- No desktop job customer reassignment exists.
+- No desktop database initialization, migration, or schema change exists.
+- No desktop network access, background work, or automatic email/delivery exists.
+- No proposal reopening or revision persistence exists.
 
 ## Completed Items Not To Duplicate
 
 Do not recreate these as new work:
 
+- guarded desktop job editing from PR #358
+- guarded desktop customer editing from PR #356
+- insert-only desktop job creation from PR #354
+- insert-only desktop customer creation from PR #352
+- controlled desktop proposal generation and real-Tk correction from PRs #349 and #350
+- read-only local desktop proposal-form foundation from PR #347
 - orchestration dry-run/no-write design notes from PR #96
 - orchestration execution result design notes from PR #96
 - orchestration execution command surface design notes from PR #96
@@ -384,5 +462,8 @@ Execution remains out of scope until explicitly approved in a later task.
 - No customer data in repo.
 - No generated output artifacts committed.
 - No pricing, scope, or notes inference.
+- No desktop record deletion, identity rename, or job customer reassignment.
+- No desktop database initialization, migration, networking, background work, or automatic delivery.
+- No proposal reopening or revision persistence claim.
 - No DOCX renderer/template changes without a dedicated PR.
 - One branch, one PR, one narrow scope.
