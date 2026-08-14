@@ -1,0 +1,1460 @@
+"""Tests for the supervised Codex execution-to-PR runner."""
+
+from __future__ import annotations
+
+import io
+import json
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+import phoenix_office.cli as cli
+import phoenix_office.dev.codex_runner as runner_module
+from phoenix_office.cli import main
+from phoenix_office.dev import SQLiteCodexPilotInitialClaimStore
+from phoenix_office.dev.codex_runner import (
+    BASE_BRANCH,
+    CAPABILITY_MARKER_CONTENT,
+    CAPABILITY_MARKER_NAME,
+    REQUIRED_EVIDENCE_CONTROLS,
+    VALIDATION_COMMANDS,
+    CapabilityProbeResult,
+    CodexExecutionResult,
+    DiffGateResult,
+    GateResult,
+    PublicationResult,
+    SupervisedCodexPilotRunner,
+    SystemCodexPilotServices,
+    ValidationGateResult,
+    WorktreeHandle,
+    WorktreeResult,
+    _codex_exec_argv,
+    _parse_codex_jsonl,
+    _pull_request_body,
+    render_codex_worker_prompt,
+    render_reviewed_codex_invocation_prompt,
+)
+
+BASE_SHA = "0" * 40
+ATTEMPT_ID = "pilot-attempt-task060abc123"
+ALLOWED_PATH = "docs/process/supervised-codex-pilot-storage.md"
+BRANCH = "codex/pilot-060-runner"
+
+
+def _authorization() -> dict[str, object]:
+    return {
+        "schema_version": "codex-pilot-authorization.v1",
+        "authorization_id": "pilot-auth-issue-363",
+        "repository": "Phoenix-AI-Platform/phoenix-office",
+        "pilot_kind": "docs-only-supervised",
+        "decision_state": "human_authorized_for_one_run",
+        "authorizer_role": "human_operator",
+        "base_commit_sha": BASE_SHA,
+        "handoff_path": "handoff.json",
+        "evidence_path": "evidence.json",
+        "handoff_id": "codex-handoff-issue-363",
+        "objective": "Update one reviewed Phoenix process document.",
+        "allowed_paths": [ALLOWED_PATH],
+        "expected_pr_title": "docs: update supervised Codex storage",
+        "branch_name": BRANCH,
+        "validation_commands": list(VALIDATION_COMMANDS),
+        "budget_metric": "tokens",
+        "budget_ceiling": 50_000,
+        "budget_enforcement_ref": "budget-control-reviewed",
+        "timeout_seconds": 1800,
+        "cancellation_ref": "cancellation-control-reviewed",
+        "authentication_runner_ref": "authentication-runner-reviewed",
+        "branch_permission_ref": "branch-permission-reviewed",
+        "pr_permission_ref": "pr-permission-reviewed",
+        "duplicate_pr_check_ref": "duplicate-pr-check-reviewed",
+        "branch_collision_check_ref": "branch-collision-check-reviewed",
+        "codex_no_approve_merge_ref": "codex-no-approve-merge-reviewed",
+        "final_ci_required": True,
+        "assistant_review_required": True,
+        "worker_may_approve": False,
+        "worker_may_merge": False,
+        "one_invocation_only": True,
+        "retry_authorized": False,
+        "background_execution_authorized": False,
+    }
+
+
+def _handoff() -> dict[str, object]:
+    authorization = _authorization()
+    return {
+        "schema_version": "codex-handoff-package.v1",
+        "handoff_id": authorization["handoff_id"],
+        "repository": authorization["repository"],
+        "base_branch": BASE_BRANCH,
+        "expected_pr_title": authorization["expected_pr_title"],
+        "prompt": "Apply the reviewed documentation clarification and stop.",
+        "required_pr_body_headings": [
+            "Summary",
+            "Scope",
+            "Changed files",
+            "Out-of-scope confirmation",
+            "Validation performed",
+            "Risks",
+        ],
+        "task": {
+            "task_id": "task-issue-363-runner-test",
+            "title": "Update supervised Codex storage documentation",
+            "objective": authorization["objective"],
+            "source": {
+                "kind": "github_issue",
+                "uri": (
+                    "https://github.com/Phoenix-AI-Platform/"
+                    "phoenix-office/issues/363"
+                ),
+            },
+            "allowed_resources": {"paths": [ALLOWED_PATH]},
+            "verification_plan": {"commands": list(VALIDATION_COMMANDS)},
+            "permissions": {
+                "read": True,
+                "write": True,
+                "execute": False,
+                "network": False,
+                "destructive": False,
+            },
+        },
+    }
+
+
+def _evidence() -> dict[str, object]:
+    authorization = _authorization()
+    reference_fields = {
+        "authentication_runner_access": "authentication_runner_ref",
+        "per_run_budget_ceiling": "budget_enforcement_ref",
+        "operator_cancellation_timeout": "cancellation_ref",
+        "github_branch_creation_permission": "branch_permission_ref",
+        "github_pr_creation_permission": "pr_permission_ref",
+        "codex_cannot_approve_or_merge": "codex_no_approve_merge_ref",
+        "duplicate_active_pr_detection": "duplicate_pr_check_ref",
+        "branch_collision_detection": "branch_collision_check_ref",
+    }
+    return {
+        "schema_version": "codex-pilot-evidence.v1",
+        "repository": authorization["repository"],
+        "pilot_kind": authorization["pilot_kind"],
+        "handoff_id": authorization["handoff_id"],
+        "pilot_ready": False,
+        "invocation_authorized": False,
+        "controls": [
+            {
+                "control_id": control_id,
+                "status": "verified",
+                "evidence_ref": authorization.get(
+                    reference_fields.get(control_id, ""),
+                    f"{control_id}-reviewed",
+                ),
+                "reviewer_role": "assistant_reviewer",
+            }
+            for control_id in sorted(REQUIRED_EVIDENCE_CONTROLS)
+        ],
+    }
+
+
+def _reviewed_prompt(handoff: dict[str, object]) -> str:
+    task = handoff["task"]
+    assert isinstance(task, dict)
+    source = task["source"]
+    assert isinstance(source, dict)
+    issue_number = int(str(source["uri"]).rsplit("/", 1)[1])
+    return render_reviewed_codex_invocation_prompt(
+        package=handoff,
+        preflight_report={
+            "source_issue_number": issue_number,
+            "repository": handoff["repository"],
+            "base_branch": handoff["base_branch"],
+            "declared_changed_files": [ALLOWED_PATH],
+            "external_checks_required": list(
+                runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+            ),
+        },
+    )
+
+
+@dataclass
+class FakeSystem:
+    preclaim: GateResult = GateResult(True, "preclaim_passed")
+    runtime: GateResult = GateResult(True, "runtime_ready")
+    probe: CapabilityProbeResult = CapabilityProbeResult(True, "probe_passed")
+    execution: CodexExecutionResult = CodexExecutionResult(
+        "succeeded", "codex_completed", 100
+    )
+    first_diff: DiffGateResult = DiffGateResult(
+        True, "diff_allowed", (ALLOWED_PATH,)
+    )
+    second_diff: DiffGateResult | None = None
+    validation: ValidationGateResult = ValidationGateResult(
+        True, "validation_passed", ("passed", "passed", "passed")
+    )
+    commit: GateResult = GateResult(True, "committed")
+    prepublication: GateResult = GateResult(True, "prepublication_passed")
+    push: GateResult = GateResult(True, "pushed")
+    publication: PublicationResult = PublicationResult(
+        True, "pull_request_created", "pr-400"
+    )
+    calls: list[str] = field(default_factory=list)
+    prompts: list[str] = field(default_factory=list)
+    worktree: WorktreeHandle = field(
+        default_factory=lambda: WorktreeHandle(
+            Path("synthetic-worktree"),
+            BRANCH,
+            BASE_SHA,
+            b"gitdir",
+            (),
+            "",
+            "",
+        )
+    )
+
+    def preclaim_repository_gate(self, authorization: dict[str, object]) -> GateResult:
+        assert authorization["branch_name"] == BRANCH
+        self.calls.append("preclaim")
+        return self.preclaim
+
+    def runtime_gate(self) -> GateResult:
+        self.calls.append("runtime")
+        return self.runtime
+
+    def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+        assert timeout_seconds == 180
+        self.calls.append("probe")
+        return self.probe
+
+    def create_worktree(self, authorization: dict[str, object]) -> WorktreeResult:
+        assert authorization["base_commit_sha"] == BASE_SHA
+        self.calls.append("worktree")
+        return WorktreeResult(True, "worktree_created", self.worktree)
+
+    def invoke_codex(
+        self,
+        worktree: WorktreeHandle,
+        prompt: str,
+        timeout_seconds: int,
+        on_started,
+    ) -> CodexExecutionResult:
+        assert worktree is self.worktree
+        assert timeout_seconds == 1800
+        self.calls.append("invoke")
+        self.prompts.append(prompt)
+        on_started()
+        return self.execution
+
+    def inspect_diff(
+        self,
+        worktree: WorktreeHandle,
+        allowed_paths: tuple[str, ...],
+    ) -> DiffGateResult:
+        assert worktree is self.worktree
+        assert allowed_paths == (ALLOWED_PATH,)
+        self.calls.append("diff")
+        if self.calls.count("diff") == 1 or self.second_diff is None:
+            return self.first_diff
+        return self.second_diff
+
+    def run_validations(
+        self,
+        worktree: WorktreeHandle,
+        commands: tuple[str, ...],
+    ) -> ValidationGateResult:
+        assert worktree is self.worktree
+        assert commands == VALIDATION_COMMANDS
+        self.calls.append("validation")
+        return self.validation
+
+    def commit_authorized_changes(
+        self,
+        worktree: WorktreeHandle,
+        changed_paths: tuple[str, ...],
+        commit_message: str,
+    ) -> GateResult:
+        assert worktree is self.worktree
+        assert changed_paths == (ALLOWED_PATH,)
+        assert commit_message == _authorization()["expected_pr_title"]
+        self.calls.append("commit")
+        return self.commit
+
+    def prepublication_gate(self, authorization: dict[str, object]) -> GateResult:
+        assert authorization["branch_name"] == BRANCH
+        self.calls.append("prepublication")
+        return self.prepublication
+
+    def push_authorized_branch(self, worktree: WorktreeHandle) -> GateResult:
+        assert worktree is self.worktree
+        self.calls.append("push")
+        return self.push
+
+    def create_pull_request(
+        self,
+        worktree: WorktreeHandle,
+        authorization: dict[str, object],
+        source_issue_number: int,
+        required_headings: tuple[str, ...],
+        changed_paths: tuple[str, ...],
+        validation_commands: tuple[str, ...],
+    ) -> PublicationResult:
+        assert worktree is self.worktree
+        assert authorization["expected_pr_title"] == _authorization()[
+            "expected_pr_title"
+        ]
+        assert source_issue_number == 363
+        assert required_headings == tuple(_handoff()["required_pr_body_headings"])
+        assert changed_paths == (ALLOWED_PATH,)
+        assert validation_commands == VALIDATION_COMMANDS
+        self.calls.append("pull_request")
+        return self.publication
+
+
+def _run(
+    tmp_path: Path,
+    system: FakeSystem,
+    *,
+    handoff: dict[str, object] | None = None,
+    evidence: dict[str, object] | None = None,
+    authorization: dict[str, object] | None = None,
+    reviewed_prompt: str | None = None,
+    static_preflight_passed: bool = True,
+) -> tuple[dict[str, object], Path]:
+    actual_handoff = handoff or _handoff()
+    database_path = tmp_path / "control-state.sqlite3"
+    runner = SupervisedCodexPilotRunner(
+        system=system,
+        attempt_id_factory=lambda: ATTEMPT_ID,
+    )
+    result = runner.run(
+        handoff=actual_handoff,
+        evidence=evidence or _evidence(),
+        authorization=authorization or _authorization(),
+        reviewed_prompt=(
+            reviewed_prompt
+            if reviewed_prompt is not None
+            else _reviewed_prompt(actual_handoff)
+        ),
+        claim_store_path=database_path,
+        static_preflight_passed=static_preflight_passed,
+    )
+    return result, database_path
+
+
+def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_path: Path):
+    system = FakeSystem()
+
+    result, database_path = _run(tmp_path, system)
+
+    assert result == {
+        "schema_version": "codex-pilot-run-result.v1",
+        "status": "success",
+        "category": "pr_opened_and_stopped",
+        "attempt_id": ATTEMPT_ID,
+        "branch_identity": BRANCH,
+        "pull_request_identity": "pr-400",
+        "changed_paths": [ALLOWED_PATH],
+        "validation_categories": ["passed", "passed", "passed"],
+        "usage_category": "within_budget",
+        "timeout_category": "timeout_unknown",
+        "cancellation_category": "cancellation_unknown",
+    }
+    assert system.calls == [
+        "preclaim",
+        "runtime",
+        "probe",
+        "worktree",
+        "invoke",
+        "diff",
+        "validation",
+        "diff",
+        "commit",
+        "prepublication",
+        "push",
+        "pull_request",
+    ]
+    assert len(system.prompts) == 1
+    assert "- open one PR and stop" not in system.prompts[0]
+    assert "Do not stage, commit, push, open a PR" in system.prompts[0]
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["lifecycle_read_category"] == "read_success"
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == (
+        "pr_opened_and_stopped"
+    )
+    assert lifecycle["snapshot"]["pull_request_identity"] == "pr-400"
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "gate_value", "category", "expected_calls"),
+    [
+        (
+            "preclaim",
+            GateResult(False, "base_sha_gate_failed"),
+            "base_sha_gate_failed",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "clean_repo_gate_failed"),
+            "clean_repo_gate_failed",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "local_branch_collision"),
+            "local_branch_collision",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "remote_branch_collision"),
+            "remote_branch_collision",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "duplicate_active_pr"),
+            "duplicate_active_pr",
+            ["preclaim"],
+        ),
+        (
+            "runtime",
+            GateResult(False, "codex_unavailable"),
+            "codex_unavailable",
+            ["preclaim", "runtime"],
+        ),
+        (
+            "runtime",
+            GateResult(False, "process_control_unavailable"),
+            "process_control_unavailable",
+            ["preclaim", "runtime"],
+        ),
+        (
+            "probe",
+            CapabilityProbeResult(False, "codex_authentication_unavailable"),
+            "codex_authentication_unavailable",
+            ["preclaim", "runtime", "probe"],
+        ),
+        (
+            "probe",
+            CapabilityProbeResult(False, "workspace_write_capability_unproved"),
+            "workspace_write_capability_unproved",
+            ["preclaim", "runtime", "probe"],
+        ),
+    ],
+)
+def test_preclaim_gate_failures_consume_nothing(
+    tmp_path: Path,
+    gate_name: str,
+    gate_value: object,
+    category: str,
+    expected_calls: list[str],
+):
+    system = FakeSystem()
+    setattr(system, gate_name, gate_value)
+
+    result, database_path = _run(tmp_path, system)
+
+    assert result["status"] == "blocked"
+    assert result["category"] == category
+    assert result["attempt_id"] is None
+    assert not database_path.exists()
+    assert system.calls == expected_calls
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "static_preflight",
+        "prompt_drift",
+        "budget_control_unverified",
+        "invalid_authorization",
+    ],
+)
+def test_static_binding_failures_precede_every_system_action(
+    tmp_path: Path,
+    mutation: str,
+):
+    handoff = _handoff()
+    evidence = _evidence()
+    authorization = _authorization()
+    reviewed_prompt = _reviewed_prompt(handoff)
+    static_passed = True
+    if mutation == "static_preflight":
+        static_passed = False
+    elif mutation == "prompt_drift":
+        reviewed_prompt += "\nUnreviewed instruction."
+    elif mutation == "budget_control_unverified":
+        controls = evidence["controls"]
+        assert isinstance(controls, list)
+        next(
+            item
+            for item in controls
+            if item["control_id"] == "per_run_budget_ceiling"
+        )["status"] = "unverified"
+    else:
+        authorization["retry_authorized"] = True
+    system = FakeSystem()
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        handoff=handoff,
+        evidence=evidence,
+        authorization=authorization,
+        reviewed_prompt=reviewed_prompt,
+        static_preflight_passed=static_passed,
+    )
+
+    assert result["category"] == "preclaim_static_preflight_failed"
+    assert result["attempt_id"] is None
+    assert system.calls == []
+    assert not database_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "category", "expected_state"),
+    [
+        ("timed_out", "codex_timed_out", "timed_out"),
+        ("cancelled", "codex_cancelled", "cancelled"),
+        ("failed", "codex_structured_failure", "failed"),
+    ],
+)
+def test_process_failures_terminalize_without_publication(
+    tmp_path: Path,
+    status: str,
+    category: str,
+    expected_state: str,
+):
+    system = FakeSystem(execution=CodexExecutionResult(status, category, 25))
+
+    result, database_path = _run(tmp_path, system)
+
+    assert result["status"] == status
+    assert result["category"] == category
+    assert "diff" not in system.calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == expected_state
+
+
+def test_observed_budget_excess_blocks_commit_push_and_pr(tmp_path: Path):
+    system = FakeSystem(
+        execution=CodexExecutionResult("succeeded", "codex_completed", 50_001)
+    )
+
+    result, database_path = _run(tmp_path, system)
+
+    assert result["status"] == "failed"
+    assert result["category"] == "budget_exceeded"
+    assert result["usage_category"] == "budget_exceeded"
+    assert "diff" not in system.calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "category", "forbidden_call"),
+    [
+        (
+            "first_diff",
+            DiffGateResult(False, "unauthorized_path_changed"),
+            "unauthorized_path_changed",
+            "validation",
+        ),
+        (
+            "validation",
+            ValidationGateResult(False, "validation_failed", ("failed",)),
+            "validation_failed",
+            "commit",
+        ),
+        (
+            "commit",
+            GateResult(False, "commit_failed"),
+            "commit_failed",
+            "prepublication",
+        ),
+        (
+            "prepublication",
+            GateResult(False, "remote_branch_collision"),
+            "remote_branch_collision",
+            "push",
+        ),
+        (
+            "push",
+            GateResult(False, "push_failed"),
+            "push_failed",
+            "pull_request",
+        ),
+        (
+            "publication",
+            PublicationResult(False, "pull_request_create_failed"),
+            "pull_request_create_failed",
+            "never",
+        ),
+    ],
+)
+def test_postclaim_gate_failures_never_retry(
+    tmp_path: Path,
+    field_name: str,
+    field_value: object,
+    category: str,
+    forbidden_call: str,
+):
+    system = FakeSystem()
+    setattr(system, field_name, field_value)
+
+    result, database_path = _run(tmp_path, system)
+
+    assert result["status"] == "failed"
+    assert result["category"] == category
+    assert system.calls.count("invoke") == 1
+    assert system.calls.count("push") <= 1
+    assert system.calls.count("pull_request") <= 1
+    if forbidden_call != "never":
+        assert forbidden_call not in system.calls
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == "failed"
+
+
+def test_postvalidation_diff_change_blocks_commit(tmp_path: Path):
+    system = FakeSystem(
+        second_diff=DiffGateResult(
+            True,
+            "diff_allowed",
+            ("docs/development/other.md",),
+        )
+    )
+
+    result, _database_path = _run(tmp_path, system)
+
+    assert result["category"] == "post_validation_diff_changed"
+    assert "commit" not in system.calls
+
+
+class FinalAppendFailureStore(SQLiteCodexPilotInitialClaimStore):
+    def append_lifecycle_event(self, *args, **kwargs):
+        if kwargs.get("next_lifecycle_state") == "pr_opened_and_stopped":
+            return {
+                "lifecycle_append_category": "claim_store_unavailable",
+                "event_sequence": None,
+                "lifecycle_state": None,
+            }
+        return super().append_lifecycle_event(*args, **kwargs)
+
+
+def test_pr_audit_uncertainty_does_not_create_a_second_pr(tmp_path: Path):
+    system = FakeSystem()
+    runner = SupervisedCodexPilotRunner(
+        system=system,
+        claim_store_factory=FinalAppendFailureStore,
+        attempt_id_factory=lambda: ATTEMPT_ID,
+    )
+
+    result = runner.run(
+        handoff=_handoff(),
+        evidence=_evidence(),
+        authorization=_authorization(),
+        reviewed_prompt=_reviewed_prompt(_handoff()),
+        claim_store_path=tmp_path / "control.sqlite3",
+        static_preflight_passed=True,
+    )
+
+    assert result["category"] == "publication_audit_storage_uncertain"
+    assert system.calls.count("pull_request") == 1
+    assert system.calls.count("push") == 1
+
+
+def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority():
+    reviewed = _reviewed_prompt(_handoff())
+    prompt = render_codex_worker_prompt(reviewed)
+    argv = _codex_exec_argv(Path("worktree"))
+
+    assert "- open one PR and stop" not in prompt
+    assert "Phoenix owns all Git and GitHub publication" in prompt
+    assert argv[:2] == ["codex", "exec"]
+    assert "--ask-for-approval" in argv
+    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "--ephemeral" in argv
+    assert "--json" in argv
+    assert "sandbox_workspace_write.network_access=false" in argv
+    assert 'web_search="disabled"' in argv
+    joined = " ".join(argv)
+    assert "danger-full-access" not in joined
+    assert "dangerously-bypass" not in joined
+    assert "--yolo" not in joined
+
+
+def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    del tmp_path
+    service = SystemCodexPilotServices(Path.cwd())
+    observed: dict[str, object] = {}
+
+    def fake_run_codex_process(*, workspace, prompt, timeout_seconds, on_started):
+        observed["workspace"] = workspace
+        observed["prompt"] = prompt
+        observed["timeout"] = timeout_seconds
+        assert (workspace / ".git").exists()
+        on_started()
+        (workspace / CAPABILITY_MARKER_NAME).write_text(
+            CAPABILITY_MARKER_CONTENT,
+            encoding="utf-8",
+        )
+        return CodexExecutionResult("succeeded", "codex_completed", 1)
+
+    monkeypatch.setattr(service, "_run_codex_process", fake_run_codex_process)
+
+    result = service.capability_probe(30)
+
+    assert result == CapabilityProbeResult(
+        True,
+        "workspace_write_capability_proved",
+    )
+    assert CAPABILITY_MARKER_NAME in str(observed["prompt"])
+    assert observed["timeout"] == 30
+    assert not Path(observed["workspace"]).exists()
+
+
+def test_capability_probe_without_marker_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = SystemCodexPilotServices(Path.cwd())
+    monkeypatch.setattr(
+        service,
+        "_run_codex_process",
+        lambda **_kwargs: CodexExecutionResult("succeeded", "codex_completed", 1),
+    )
+
+    result = service.capability_probe(30)
+
+    assert result == CapabilityProbeResult(
+        False,
+        "workspace_write_capability_unproved",
+    )
+
+
+class InterruptingProcess:
+    def __init__(self, exception: BaseException):
+        self.stdin = io.StringIO()
+        self.stdout = io.StringIO("")
+        self.returncode = None
+        self.pid = 999999
+        self._exception = exception
+
+    def wait(self, timeout=None):
+        del timeout
+        raise self._exception
+
+    def poll(self):
+        return None
+
+    def kill(self):
+        self.returncode = -1
+
+
+class CapturingInput(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self.captured = ""
+
+    def close(self):
+        self.captured = self.getvalue()
+        super().close()
+
+
+class SuccessfulProcess:
+    def __init__(self):
+        self.stdin = CapturingInput()
+        self.stdout = io.StringIO(
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {"total_tokens": 12},
+                }
+            )
+            + "\n"
+        )
+        self.returncode = None
+        self.pid = 999998
+
+    def wait(self, timeout=None):
+        assert timeout == 60
+        self.returncode = 0
+        return 0
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -1
+
+
+def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    process = SuccessfulProcess()
+    launches: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_popen(argv, **kwargs):
+        launches.append((list(argv), kwargs))
+        return process
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", fake_popen)
+    service = SystemCodexPilotServices(tmp_path)
+    started: list[bool] = []
+
+    result = service._run_codex_process(
+        workspace=tmp_path,
+        prompt="exact reviewed worker prompt",
+        timeout_seconds=60,
+        on_started=lambda: started.append(True),
+    )
+
+    assert result == CodexExecutionResult("succeeded", "codex_completed", 12)
+    assert started == [True]
+    assert len(launches) == 1
+    argv, kwargs = launches[0]
+    assert argv == _codex_exec_argv(tmp_path)
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["shell"] is False
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert process.stdin.captured == "exact reviewed worker prompt"
+
+
+@pytest.mark.parametrize(
+    ("exception", "status", "category"),
+    [
+        (subprocess.TimeoutExpired(["codex"], 1), "timed_out", "codex_timed_out"),
+        (KeyboardInterrupt(), "cancelled", "codex_cancelled"),
+    ],
+)
+def test_process_timeout_and_cancellation_terminate_child_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    exception: BaseException,
+    status: str,
+    category: str,
+):
+    process = InterruptingProcess(exception)
+    terminated: list[object] = []
+    monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_a, **_k: process)
+
+    def fake_terminate(child):
+        terminated.append(child)
+        return True
+
+    monkeypatch.setattr(
+        runner_module,
+        "_terminate_process_tree",
+        fake_terminate,
+    )
+    service = SystemCodexPilotServices(Path.cwd())
+
+    result = service._run_codex_process(
+        workspace=Path.cwd(),
+        prompt="reviewed prompt",
+        timeout_seconds=1,
+        on_started=lambda: None,
+    )
+
+    assert result.status == status
+    assert result.category == category
+    assert terminated == [process]
+
+
+def test_structured_json_parser_is_bounded_and_classifies_usage():
+    success = _parse_codex_jsonl(
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            }
+        )
+    )
+    fatal = _parse_codex_jsonl('{"type":"turn.failed"}\nnot-json')
+    oversized = _parse_codex_jsonl("x" * (runner_module.MAX_JSONL_LINE_BYTES + 1))
+
+    assert success == {
+        "fatal": False,
+        "turn_completed": True,
+        "usage_tokens": 7,
+    }
+    assert fatal["fatal"] is True
+    assert oversized["fatal"] is True
+
+
+def _git(cwd: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _real_worktree(tmp_path: Path) -> WorktreeHandle:
+    repository = tmp_path / "repository"
+    worktree = tmp_path / "worktree"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Phoenix Test")
+    _git(repository, "config", "user.email", "test@phoenix.invalid")
+    document = repository / ALLOWED_PATH
+    document.parent.mkdir(parents=True)
+    document.write_text("Initial documentation.\n", encoding="utf-8")
+    unrelated = repository / "src" / "safe.py"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", "--", ALLOWED_PATH, "src/safe.py")
+    _git(repository, "commit", "-m", "initial")
+    head = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "worktree", "add", "-b", BRANCH, str(worktree), head)
+    service = SystemCodexPilotServices(repository)
+    control_state = service._git_control_state(worktree)
+    assert control_state is not None
+    git_refs, git_worktree_state, local_git_config = control_state
+    return WorktreeHandle(
+        worktree,
+        BRANCH,
+        head,
+        (worktree / ".git").read_bytes(),
+        git_refs,
+        git_worktree_state,
+        local_git_config,
+    )
+
+
+def test_diff_gate_allows_only_authorized_utf8_markdown(tmp_path: Path):
+    worktree = _real_worktree(tmp_path)
+    (worktree.path / ALLOWED_PATH).write_text(
+        "Updated reviewed documentation.\n",
+        encoding="utf-8",
+    )
+
+    result = SystemCodexPilotServices(tmp_path / "repository").inspect_diff(
+        worktree,
+        (ALLOWED_PATH,),
+    )
+
+    assert result == DiffGateResult(True, "diff_allowed", (ALLOWED_PATH,))
+
+
+def test_phoenix_commit_has_exact_parent_branch_and_authorized_scope(tmp_path: Path):
+    worktree = _real_worktree(tmp_path)
+    (worktree.path / ALLOWED_PATH).write_text(
+        "Committed reviewed documentation.\n",
+        encoding="utf-8",
+    )
+    service = SystemCodexPilotServices(tmp_path / "repository")
+
+    result = service.commit_authorized_changes(
+        worktree,
+        (ALLOWED_PATH,),
+        "docs: commit reviewed documentation",
+    )
+
+    assert result == GateResult(True, "committed")
+    assert _git(worktree.path, "rev-parse", "HEAD^") == worktree.base_commit_sha
+    assert _git(worktree.path, "branch", "--show-current") == BRANCH
+    assert _git(
+        worktree.path,
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "HEAD",
+    ) == ALLOWED_PATH
+    assert _git(worktree.path, "status", "--porcelain=v1") == ""
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_category"),
+    [
+        ("tracked", "unauthorized_path_changed"),
+        ("untracked", "unauthorized_path_changed"),
+        ("binary", "binary_or_unreadable_change"),
+        ("non_markdown", "unsafe_changed_path"),
+        ("staged", "git_control_manipulation"),
+    ],
+)
+def test_diff_gate_rejects_unauthorized_or_unsafe_state_without_cleanup(
+    tmp_path: Path,
+    mutation: str,
+    expected_category: str,
+):
+    worktree = _real_worktree(tmp_path)
+    allowed_paths = (ALLOWED_PATH,)
+    evidence_path = worktree.path / ALLOWED_PATH
+    if mutation == "tracked":
+        evidence_path = worktree.path / "src" / "safe.py"
+        evidence_path.write_text("VALUE = 2\n", encoding="utf-8")
+    elif mutation == "untracked":
+        evidence_path = worktree.path / "unexpected.txt"
+        evidence_path.write_text("unexpected\n", encoding="utf-8")
+    elif mutation == "binary":
+        evidence_path.write_bytes(b"\x00\xff")
+    elif mutation == "non_markdown":
+        evidence_path = worktree.path / "docs" / "process" / "unsafe.txt"
+        evidence_path.write_text("unsafe\n", encoding="utf-8")
+        allowed_paths = ("docs/process/unsafe.txt",)
+    else:
+        evidence_path.write_text("staged\n", encoding="utf-8")
+        _git(worktree.path, "add", "--", ALLOWED_PATH)
+
+    result = SystemCodexPilotServices(tmp_path / "repository").inspect_diff(
+        worktree,
+        allowed_paths,
+    )
+
+    assert result.passed is False
+    assert result.category == expected_category
+    assert evidence_path.exists()
+
+
+def test_diff_gate_rejects_symlink_when_platform_allows_creation(tmp_path: Path):
+    worktree = _real_worktree(tmp_path)
+    target = worktree.path / "target.md"
+    target.write_text("target\n", encoding="utf-8")
+    authorized = worktree.path / ALLOWED_PATH
+    authorized.unlink()
+    try:
+        authorized.symlink_to(target)
+    except OSError:
+        pytest.skip("host does not allow an unprivileged symlink")
+
+    result = SystemCodexPilotServices(tmp_path / "repository").inspect_diff(
+        worktree,
+        (ALLOWED_PATH,),
+    )
+
+    assert result.passed is False
+    assert result.category in {
+        "symlink_or_nonfile_change",
+        "symlink_or_submodule_change",
+    }
+
+
+def test_diff_gate_rejects_extra_branch_control_manipulation(tmp_path: Path):
+    worktree = _real_worktree(tmp_path)
+    (worktree.path / ALLOWED_PATH).write_text("updated\n", encoding="utf-8")
+    _git(worktree.path, "branch", "codex/unreviewed-branch")
+
+    result = SystemCodexPilotServices(tmp_path / "repository").inspect_diff(
+        worktree,
+        (ALLOWED_PATH,),
+    )
+
+    assert result == DiffGateResult(False, "git_control_manipulation")
+
+
+def test_system_preclaim_fetches_exact_main_and_checks_all_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = SystemCodexPilotServices(Path("repository"))
+    calls: list[list[str]] = []
+    authorization = _authorization()
+
+    def fake_run(argv, *, cwd, timeout):
+        del cwd, timeout
+        calls.append(list(argv))
+        if argv == ["git", "branch", "--show-current"]:
+            output, returncode = "main\n", 0
+        elif argv == ["git", "rev-parse", "HEAD"]:
+            output, returncode = f"{BASE_SHA}\n", 0
+        elif argv == ["git", "status", "--porcelain=v1"]:
+            output, returncode = "", 0
+        elif argv == ["git", "remote", "get-url", "origin"]:
+            output, returncode = (
+                "https://github.com/Phoenix-AI-Platform/phoenix-office.git\n",
+                0,
+            )
+        elif argv[:2] == ["git", "fetch"]:
+            output, returncode = "", 0
+        elif argv[:2] == ["git", "rev-list"]:
+            output, returncode = "0\t0\n", 0
+        elif argv[:2] == ["git", "show-ref"]:
+            output, returncode = "", 1
+        elif argv[:2] == ["git", "ls-remote"]:
+            output, returncode = "", 2
+        elif argv[:3] == ["gh", "pr", "list"]:
+            output, returncode = "[]", 0
+        else:
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, returncode, output, "")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    result = service.preclaim_repository_gate(authorization)
+
+    assert result == GateResult(True, "collision_gates_passed")
+    fetch_index = next(index for index, call in enumerate(calls) if call[:2] == ["git", "fetch"])
+    collision_index = next(
+        index for index, call in enumerate(calls) if call[:2] == ["git", "show-ref"]
+    )
+    assert fetch_index < collision_index
+    fetch = calls[fetch_index]
+    assert fetch[-1] == "+refs/heads/main:refs/remotes/origin/main"
+
+
+@pytest.mark.parametrize(
+    ("local_code", "remote_code", "pull_requests", "category"),
+    [
+        (0, 2, "[]", "local_branch_collision"),
+        (1, 0, "[]", "remote_branch_collision"),
+        (1, 2, '[{"number":400}]', "duplicate_active_pr"),
+    ],
+)
+def test_system_collision_gates_are_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    local_code: int,
+    remote_code: int,
+    pull_requests: str,
+    category: str,
+):
+    service = SystemCodexPilotServices(Path("repository"))
+
+    def fake_run(argv, *, cwd, timeout):
+        del cwd, timeout
+        if argv[:2] == ["git", "show-ref"]:
+            return subprocess.CompletedProcess(argv, local_code, "", "")
+        if argv[:2] == ["git", "ls-remote"]:
+            return subprocess.CompletedProcess(argv, remote_code, "", "")
+        if argv[:3] == ["gh", "pr", "list"]:
+            return subprocess.CompletedProcess(argv, 0, pull_requests, "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    result = service._collision_gate(_authorization())
+
+    assert result == GateResult(False, category)
+
+
+@pytest.mark.parametrize("failure_mode", ["nonzero", "timeout"])
+def test_phoenix_validation_runs_in_order_and_stops_on_first_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+):
+    worktree = WorktreeHandle(
+        tmp_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+        if len(calls) == 2 and failure_mode == "timeout":
+            raise subprocess.TimeoutExpired(argv, 1)
+        return subprocess.CompletedProcess(
+            argv,
+            1 if len(calls) == 2 else 0,
+            "raw output must not escape",
+            "raw failure must not escape",
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    result = SystemCodexPilotServices(tmp_path).run_validations(
+        worktree,
+        VALIDATION_COMMANDS,
+    )
+
+    assert result.passed is False
+    assert result.category == (
+        "validation_timed_out" if failure_mode == "timeout" else "validation_failed"
+    )
+    assert result.command_categories == (
+        "passed",
+        "timed_out" if failure_mode == "timeout" else "failed",
+    )
+    assert len(calls) == 2
+    assert calls[0][1:3] == ["-m", "pytest"]
+    assert calls[1][1:4] == ["-m", "ruff", "check"]
+    assert "raw" not in repr(result)
+
+
+def test_system_publication_rechecks_only_remote_state_and_uses_exact_branch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = SystemCodexPilotServices(Path("repository"))
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *, cwd, timeout):
+        del cwd, timeout
+        calls.append(list(argv))
+        if argv[:2] == ["git", "ls-remote"] and "--exit-code" in argv:
+            return subprocess.CompletedProcess(argv, 2, "", "")
+        if argv[:3] == ["gh", "pr", "list"]:
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        if "push" in argv and argv[0] == "git":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(argv, 0, f"{BASE_SHA}\n", "")
+        if argv[:2] == ["git", "ls-remote"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                f"{BASE_SHA}\trefs/heads/{BRANCH}\n",
+                "",
+            )
+        if argv[:3] == ["gh", "pr", "create"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                "https://github.com/Phoenix-AI-Platform/phoenix-office/pull/401\n",
+                "",
+            )
+        if argv[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps(
+                    {
+                        "number": 401,
+                        "headRefName": BRANCH,
+                        "baseRefName": "main",
+                        "title": authorization["expected_pr_title"],
+                        "isDraft": True,
+                        "state": "OPEN",
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    authorization = _authorization()
+    worktree = WorktreeHandle(
+        Path("worktree"),
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+
+    assert service.prepublication_gate(authorization).passed is True
+    assert service.push_authorized_branch(worktree).passed is True
+    publication = service.create_pull_request(
+        worktree,
+        authorization,
+        363,
+        tuple(_handoff()["required_pr_body_headings"]),
+        (ALLOWED_PATH,),
+        VALIDATION_COMMANDS,
+    )
+
+    assert publication.pull_request_identity == "pr-401"
+    assert not any(call[:2] == ["git", "show-ref"] for call in calls)
+    push = next(call for call in calls if call[0] == "git" and "push" in call)
+    assert f"HEAD:refs/heads/{BRANCH}" in push
+    assert f"--force-with-lease=refs/heads/{BRANCH}:" in push
+    create = next(call for call in calls if call[:3] == ["gh", "pr", "create"])
+    assert create[create.index("--base") + 1] == "main"
+    assert create[create.index("--head") + 1] == BRANCH
+    assert create[create.index("--title") + 1] == authorization["expected_pr_title"]
+    assert "--draft" in create
+    body = create[create.index("--body") + 1]
+    assert "Refs #363" in body
+    for heading in _handoff()["required_pr_body_headings"]:
+        assert f"## {heading}" in body
+
+
+def test_pull_request_body_is_bounded_and_contains_no_raw_worker_material():
+    body = _pull_request_body(
+        source_issue_number=363,
+        required_headings=tuple(_handoff()["required_pr_body_headings"]),
+        changed_paths=(ALLOWED_PATH,),
+        validation_commands=VALIDATION_COMMANDS,
+    )
+
+    assert "Refs #363" in body
+    assert "Apply the reviewed" not in body
+    assert "stdout" not in body
+    assert "stderr" not in body
+
+
+def test_cli_run_emits_only_bounded_result(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    paths = [tmp_path / name for name in ("handoff.json", "evidence.json", "auth.json")]
+    for path in paths:
+        path.write_text("{}", encoding="utf-8")
+    handoff = _handoff()
+    evidence = _evidence()
+    authorization = _authorization()
+    monkeypatch.setattr(
+        cli,
+        "_run_codex_pilot_authorization_inspection",
+        lambda **_kwargs: (
+            authorization,
+            {"authorization_packet_valid_for_one_attempt": True},
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_load_codex_invocation_preflight",
+        lambda _path: (
+            handoff,
+            {
+                "static_eligible": True,
+                "source_issue_number": 363,
+                "repository": handoff["repository"],
+                "base_branch": "main",
+                "declared_changed_files": [ALLOWED_PATH],
+                "external_checks_required": list(
+                    runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(cli, "_read_json_object_file", lambda _path: evidence)
+    monkeypatch.setattr(cli, "SystemCodexPilotServices", lambda _path: object())
+
+    class FakeRunner:
+        def __init__(self, *, system):
+            assert system is not None
+
+        def run(self, **kwargs):
+            assert kwargs["claim_store_path"] == tmp_path / "control.sqlite3"
+            return {
+                "schema_version": "codex-pilot-run-result.v1",
+                "status": "blocked",
+                "category": "workspace_write_capability_unproved",
+                "attempt_id": None,
+                "branch_identity": None,
+                "pull_request_identity": None,
+                "changed_paths": [],
+                "validation_categories": [],
+                "usage_category": "usage_unknown",
+                "timeout_category": "timeout_unknown",
+                "cancellation_category": "cancellation_unknown",
+            }
+
+    monkeypatch.setattr(cli, "SupervisedCodexPilotRunner", FakeRunner)
+
+    exit_code = main(
+        [
+            "dev",
+            "codex-pilot-run",
+            *(str(path) for path in paths),
+            "--claim-store",
+            str(tmp_path / "control.sqlite3"),
+            "--json",
+        ]
+    )
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert exit_code == 1
+    assert payload["category"] == "workspace_write_capability_unproved"
+    assert str(tmp_path) not in output
+    assert handoff["prompt"] not in output
+
+
+def test_cli_unexpected_runner_failure_is_sanitized(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    paths = [tmp_path / name for name in ("handoff.json", "evidence.json", "auth.json")]
+    for path in paths:
+        path.write_text("{}", encoding="utf-8")
+    handoff = _handoff()
+    monkeypatch.setattr(
+        cli,
+        "_run_codex_pilot_authorization_inspection",
+        lambda **_kwargs: (
+            _authorization(),
+            {"authorization_packet_valid_for_one_attempt": True},
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_load_codex_invocation_preflight",
+        lambda _path: (
+            handoff,
+            {
+                "static_eligible": True,
+                "source_issue_number": 363,
+                "repository": handoff["repository"],
+                "base_branch": "main",
+                "declared_changed_files": [ALLOWED_PATH],
+                "external_checks_required": list(
+                    runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(cli, "_read_json_object_file", lambda _path: _evidence())
+    monkeypatch.setattr(cli, "SystemCodexPilotServices", lambda _path: object())
+
+    class FailingRunner:
+        def __init__(self, *, system):
+            del system
+
+        def run(self, **_kwargs):
+            raise RuntimeError("raw private diagnostic must not escape")
+
+    monkeypatch.setattr(cli, "SupervisedCodexPilotRunner", FailingRunner)
+
+    exit_code = main(
+        [
+            "dev",
+            "codex-pilot-run",
+            *(str(path) for path in paths),
+            "--claim-store",
+            str(tmp_path / "control.sqlite3"),
+            "--json",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert json.loads(output)["category"] == "runner_internal_failure"
+    assert "raw private diagnostic" not in output
+    assert str(tmp_path) not in output
+
+
+def test_previous_invocation_prompt_renderer_remains_byte_for_byte_compatible():
+    handoff = _handoff()
+    prompt = _reviewed_prompt(handoff)
+
+    assert cli._render_codex_invocation_request_prompt(
+        package=handoff,
+        preflight_report={
+            "source_issue_number": 363,
+            "repository": handoff["repository"],
+            "base_branch": "main",
+            "declared_changed_files": [ALLOWED_PATH],
+            "external_checks_required": list(
+                runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+            ),
+        },
+    ) == prompt
