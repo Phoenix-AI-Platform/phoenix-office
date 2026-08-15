@@ -18,6 +18,12 @@ from phoenix_office.core import (
     codex_pilot_authorization_fingerprint,
     codex_pilot_authorization_structural_errors,
 )
+from phoenix_office.dev import (
+    SupervisedCodexPilotRunner,
+    SystemCodexPilotServices,
+    bounded_codex_pilot_run_result,
+    render_reviewed_codex_invocation_prompt,
+)
 from phoenix_office.dev_status import (
     DEFAULT_PROJECT_STATE_PATH,
     format_development_status,
@@ -236,6 +242,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the authorization fingerprint inspection report as JSON",
     )
     codex_pilot_fingerprint_parser.set_defaults(func=codex_pilot_fingerprint)
+    codex_pilot_run_parser = dev_subparsers.add_parser(
+        "codex-pilot-run",
+        help="Run one authorized supervised Codex docs-only attempt",
+    )
+    codex_pilot_run_parser.add_argument(
+        "handoff_json",
+        type=Path,
+        help="Path to CodexHandoffPackage JSON",
+    )
+    codex_pilot_run_parser.add_argument(
+        "evidence_json",
+        type=Path,
+        help="Path to Codex pilot evidence package JSON",
+    )
+    codex_pilot_run_parser.add_argument(
+        "authorization_json",
+        type=Path,
+        help="Path to Codex pilot authorization packet JSON",
+    )
+    codex_pilot_run_parser.add_argument(
+        "--claim-store",
+        type=Path,
+        required=True,
+        help="Explicit path to the dedicated Codex control-state SQLite database",
+    )
+    codex_pilot_run_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded supervised-run result as JSON",
+    )
+    codex_pilot_run_parser.set_defaults(func=codex_pilot_run)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -1111,6 +1148,74 @@ def codex_pilot_fingerprint(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_fingerprint_report(report)
     return 0 if report["authorization_fingerprint_valid"] else 1
+
+
+def codex_pilot_run(args: argparse.Namespace) -> int:
+    """Run exactly one reviewed docs-only authorization through safe boundaries."""
+
+    authorization, authorization_report = (
+        _run_codex_pilot_authorization_inspection(
+            handoff_path=args.handoff_json,
+            evidence_path=args.evidence_json,
+            authorization_path=args.authorization_json,
+        )
+    )
+    handoff, invocation_preflight = _load_codex_invocation_preflight(
+        args.handoff_json
+    )
+    try:
+        evidence: dict[str, Any] | None = _read_json_object_file(args.evidence_json)
+    except ValueError:
+        evidence = None
+
+    reviewed_prompt = ""
+    if handoff is not None and invocation_preflight.get("static_eligible"):
+        request = _build_codex_invocation_request_draft(
+            package=handoff,
+            preflight_report=invocation_preflight,
+        )
+        reviewed_prompt = str(request["rendered_prompt"])
+
+    runner = SupervisedCodexPilotRunner(
+        system=SystemCodexPilotServices(Path.cwd()),
+    )
+    try:
+        result = runner.run(
+            handoff=handoff,
+            evidence=evidence,
+            authorization=authorization,
+            reviewed_prompt=reviewed_prompt,
+            claim_store_path=args.claim_store,
+            static_preflight_passed=bool(
+                authorization_report.get(
+                    "authorization_packet_valid_for_one_attempt"
+                )
+            ),
+        )
+    except Exception:
+        result = bounded_codex_pilot_run_result(
+            "runner_internal_failure",
+            status="failed",
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_run_result(result)
+    return 0 if result.get("status") == "success" else 1
+
+
+def _print_codex_pilot_run_result(result: dict[str, object]) -> None:
+    print("Supervised Codex pilot run")
+    print(f"Status: {result['status']}")
+    print(f"Category: {result['category']}")
+    print(f"Attempt ID: {result['attempt_id']}")
+    print(f"Branch identity: {result['branch_identity']}")
+    print(f"Pull request identity: {result['pull_request_identity']}")
+    print(f"Usage category: {result['usage_category']}")
+    print(f"Timeout category: {result['timeout_category']}")
+    print(f"Cancellation category: {result['cancellation_category']}")
+    _print_list("Changed paths", result["changed_paths"])
+    _print_list("Validation categories", result["validation_categories"])
 
 
 def _load_codex_invocation_preflight(
@@ -3987,60 +4092,9 @@ def _render_codex_invocation_request_prompt(
     package: dict[str, Any],
     preflight_report: dict[str, Any],
 ) -> str:
-    task = _as_dict(package["task"])
-    return "\n".join(
-        [
-            "# Supervised Codex Invocation Request Draft",
-            "",
-            "## 1. Supervised Pilot Identity",
-            "This is a provider-neutral supervised invocation request draft.",
-            "The request is unsent and does not authorize Codex invocation.",
-            "",
-            "## 2. Source Issue And Handoff",
-            f"Source issue number: {preflight_report['source_issue_number']}",
-            f"Handoff ID: {package['handoff_id']}",
-            f"Task ID: {task['task_id']}",
-            f"Task title: {task['title']}",
-            "",
-            "## 3. Repository And Base Branch",
-            f"Repository: {preflight_report['repository']}",
-            f"Base branch: {preflight_report['base_branch']}",
-            "",
-            "## 4. Expected PR Title",
-            package["expected_pr_title"],
-            "",
-            "## 5. Allowed Changed Files",
-            *_format_prompt_bullets(preflight_report["declared_changed_files"]),
-            "",
-            "## 6. Original Reviewed Package Prompt",
-            package["prompt"],
-            "",
-            "## 7. Required Validation Commands",
-            *_format_prompt_bullets(CODEX_INVOCATION_REQUIRED_REPOSITORY_COMMANDS),
-            "",
-            "## 8. Required PR Body Headings",
-            *_format_prompt_bullets(package["required_pr_body_headings"]),
-            "",
-            "## 9. Mandatory Execution Boundaries",
-            "- one issue, one branch, one PR",
-            "- modify only the declared documentation files",
-            "- do not broaden scope",
-            "- do not use private customer data",
-            "- run and report every required validation",
-            "- open one PR and stop",
-            "- never approve or merge",
-            (
-                "- do not comment, label, dispatch workflows, automatically "
-                "retry, schedule, queue, or continue in the background"
-            ),
-            (
-                "- stop without mutation when any scope or identity binding "
-                "is ambiguous"
-            ),
-            "",
-            "## 10. External Checks Not Claimed",
-            *_format_prompt_bullets(preflight_report["external_checks_required"]),
-        ]
+    return render_reviewed_codex_invocation_prompt(
+        package=package,
+        preflight_report=preflight_report,
     )
 
 

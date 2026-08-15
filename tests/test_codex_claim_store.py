@@ -29,11 +29,15 @@ CLAIMS_TABLE = "codex_pilot_v1_initial_claims"
 EVENTS_TABLE = "codex_pilot_v1_initial_audit_events"
 SNAPSHOTS_TABLE = "codex_pilot_v1_initial_snapshots"
 UNIQUENESS_TABLE = "codex_pilot_v1_initial_uniqueness"
+LIFECYCLE_EVENTS_TABLE = "codex_pilot_v2_lifecycle_audit_events"
+CURRENT_SNAPSHOTS_TABLE = "codex_pilot_v2_current_snapshots"
 EXPECTED_TABLES = {
     CLAIMS_TABLE,
     EVENTS_TABLE,
     SNAPSHOTS_TABLE,
     UNIQUENESS_TABLE,
+    LIFECYCLE_EVENTS_TABLE,
+    CURRENT_SNAPSHOTS_TABLE,
 }
 
 
@@ -123,6 +127,8 @@ def _assert_empty_store(database_path: Path) -> None:
         EVENTS_TABLE: 0,
         SNAPSHOTS_TABLE: 0,
         UNIQUENESS_TABLE: 0,
+        LIFECYCLE_EVENTS_TABLE: 0,
+        CURRENT_SNAPSHOTS_TABLE: 0,
     }
 
 
@@ -192,7 +198,7 @@ def test_create_read_reopen_and_exact_canonical_bytes_round_trip(tmp_path: Path)
     assert tables == EXPECTED_TABLES
     assert "customers" not in tables
     assert "jobs" not in tables
-    assert user_version == 1
+    assert user_version == 2
     assert journal_mode == "delete"
     assert claim_bytes == prepared["claim_record_bytes"]
     assert event_bytes == prepared["sequence_zero_event_bytes"]
@@ -265,6 +271,18 @@ def test_failure_before_commit_rolls_back_every_row_and_allows_later_create(
             assert observer.execute(f"SELECT COUNT(*) FROM {EVENTS_TABLE}").fetchone()[0] == 0
             assert observer.execute(f"SELECT COUNT(*) FROM {SNAPSHOTS_TABLE}").fetchone()[0] == 0
             assert (
+                observer.execute(
+                    f"SELECT COUNT(*) FROM {CURRENT_SNAPSHOTS_TABLE}"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                observer.execute(
+                    f"SELECT COUNT(*) FROM {LIFECYCLE_EVENTS_TABLE}"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
                 observer.execute(f"SELECT COUNT(*) FROM {UNIQUENESS_TABLE}").fetchone()[0]
                 == 0
             )
@@ -319,6 +337,8 @@ def test_authorization_id_conflict_precedes_fingerprint_conflict(tmp_path: Path)
         EVENTS_TABLE: 1,
         SNAPSHOTS_TABLE: 1,
         UNIQUENESS_TABLE: 3,
+        LIFECYCLE_EVENTS_TABLE: 0,
+        CURRENT_SNAPSHOTS_TABLE: 1,
     }
 
 
@@ -350,6 +370,8 @@ def test_authorization_fingerprint_conflict_is_classified_independently(tmp_path
         EVENTS_TABLE: 0,
         SNAPSHOTS_TABLE: 0,
         UNIQUENESS_TABLE: 1,
+        LIFECYCLE_EVENTS_TABLE: 0,
+        CURRENT_SNAPSHOTS_TABLE: 0,
     }
 
 
@@ -391,6 +413,8 @@ def test_concurrent_competing_creates_have_exactly_one_winner(tmp_path: Path):
         EVENTS_TABLE: 1,
         SNAPSHOTS_TABLE: 1,
         UNIQUENESS_TABLE: 3,
+        LIFECYCLE_EVENTS_TABLE: 0,
+        CURRENT_SNAPSHOTS_TABLE: 1,
     }
 
 
@@ -699,3 +723,269 @@ def test_no_sqlite_sidecars_remain_after_create_read_and_reopen(tmp_path: Path):
     assert not Path(f"{database_path}-wal").exists()
     assert not Path(f"{database_path}-shm").exists()
     assert not Path(f"{database_path}-journal").exists()
+
+
+def test_lifecycle_append_is_contiguous_atomic_and_survives_reopen(tmp_path: Path):
+    database_path = tmp_path / "lifecycle.sqlite3"
+    store, authorization, preparation = _create_valid_unit(database_path)
+    initial_claim_bytes = preparation["prepared_commit"]["claim_record_bytes"]
+    initial_snapshot_bytes = preparation["prepared_commit"]["snapshot_bytes"]
+
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=0,
+        expected_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+    ) == {
+        "lifecycle_append_category": "appended",
+        "event_sequence": 1,
+        "lifecycle_state": "invocation_starting",
+    }
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=1,
+        expected_lifecycle_state="invocation_starting",
+        next_lifecycle_state="invocation_started",
+    )["lifecycle_append_category"] == "appended"
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=2,
+        expected_lifecycle_state="invocation_started",
+        next_lifecycle_state="pr_opened_and_stopped",
+        branch_identity="codex/supervised-pilot-authorization",
+        pull_request_identity="pr-400",
+        usage_category="within_budget",
+    )["lifecycle_append_category"] == "appended"
+
+    reopened = SQLiteCodexPilotInitialClaimStore(database_path)
+    lifecycle = reopened.read_lifecycle_state(VALID_ATTEMPT_ID, authorization)
+    assert lifecycle["lifecycle_read_category"] == "read_success"
+    assert [event["event_sequence"] for event in lifecycle["audit_events"]] == [
+        0,
+        1,
+        2,
+        3,
+    ]
+    assert lifecycle["snapshot"]["current_lifecycle_state"] == "pr_opened_and_stopped"
+    assert lifecycle["snapshot"]["latest_event_sequence"] == 3
+    assert lifecycle["snapshot"]["branch_identity"] == (
+        "codex/supervised-pilot-authorization"
+    )
+    assert lifecycle["snapshot"]["pull_request_identity"] == "pr-400"
+
+    with sqlite3.connect(database_path) as connection:
+        claim_bytes = connection.execute(
+            f"SELECT claim_record_bytes FROM {CLAIMS_TABLE} WHERE attempt_id = ?",
+            (VALID_ATTEMPT_ID,),
+        ).fetchone()[0]
+        stored_initial_snapshot = connection.execute(
+            f"SELECT snapshot_bytes FROM {SNAPSHOTS_TABLE} WHERE attempt_id = ?",
+            (VALID_ATTEMPT_ID,),
+        ).fetchone()[0]
+        later_count = connection.execute(
+            f"SELECT COUNT(*) FROM {LIFECYCLE_EVENTS_TABLE} WHERE attempt_id = ?",
+            (VALID_ATTEMPT_ID,),
+        ).fetchone()[0]
+    assert claim_bytes == initial_claim_bytes
+    assert stored_initial_snapshot == initial_snapshot_bytes
+    assert later_count == 3
+    assert reopened.read_initial_claim_bundle(VALID_ATTEMPT_ID, authorization) == {
+        "claim_store_read_category": "read_success"
+    }
+    assert not Path(f"{database_path}-wal").exists()
+    assert not Path(f"{database_path}-shm").exists()
+    assert not Path(f"{database_path}-journal").exists()
+
+
+def test_lifecycle_append_rollback_preserves_prior_event_and_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    database_path = tmp_path / "lifecycle-rollback.sqlite3"
+    store, authorization, _ = _create_valid_unit(database_path)
+    before = store.read_lifecycle_state(VALID_ATTEMPT_ID, authorization)
+    assert before["lifecycle_read_category"] == "read_success"
+
+    def _fail_before_commit(_connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected lifecycle failure")
+
+    monkeypatch.setattr(store, "_before_lifecycle_commit", _fail_before_commit)
+    result = store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=0,
+        expected_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+    )
+    assert result["lifecycle_append_category"] == "commit_incomplete"
+    after = store.read_lifecycle_state(VALID_ATTEMPT_ID, authorization)
+    assert after == before
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            f"SELECT COUNT(*) FROM {LIFECYCLE_EVENTS_TABLE}"
+        ).fetchone()[0] == 0
+
+
+def test_stale_and_terminal_lifecycle_appends_fail_closed(tmp_path: Path):
+    store, authorization, _ = _create_valid_unit(tmp_path / "lifecycle-terminal.sqlite3")
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=0,
+        expected_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+    )["lifecycle_append_category"] == "appended"
+
+    stale = store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=0,
+        expected_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+    )
+    assert stale["lifecycle_append_category"] == "stale_append_rejected"
+
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=1,
+        expected_lifecycle_state="invocation_starting",
+        next_lifecycle_state="failed",
+        recovery_category="operator_recovery",
+    )["lifecycle_append_category"] == "appended"
+    terminal = store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=2,
+        expected_lifecycle_state="failed",
+        next_lifecycle_state="invocation_starting",
+    )
+    assert terminal["lifecycle_append_category"] == "terminal_append_rejected"
+
+
+def _create_exact_v1_database(
+    database_path: Path,
+    authorization: dict[str, object],
+    preparation: dict[str, object],
+) -> None:
+    prepared = preparation["prepared_commit"]
+    claim = prepared["claim_record"]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = DELETE")
+        connection.execute("PRAGMA synchronous = FULL")
+        for statement in claim_store_module._V1_CREATE_STATEMENTS.values():
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            f"INSERT INTO {CLAIMS_TABLE} VALUES (?, ?)",
+            (VALID_ATTEMPT_ID, sqlite3.Binary(prepared["claim_record_bytes"])),
+        )
+        connection.execute(
+            f"INSERT INTO {EVENTS_TABLE} VALUES (?, 0, ?)",
+            (
+                VALID_ATTEMPT_ID,
+                sqlite3.Binary(prepared["sequence_zero_event_bytes"]),
+            ),
+        )
+        connection.execute(
+            f"INSERT INTO {SNAPSHOTS_TABLE} VALUES (?, ?)",
+            (VALID_ATTEMPT_ID, sqlite3.Binary(prepared["snapshot_bytes"])),
+        )
+        uniqueness_values = {
+            "attempt_id": VALID_ATTEMPT_ID,
+            "authorization_id": claim["authorization_id"],
+            "authorization_fingerprint": claim["authorization_fingerprint"],
+        }
+        connection.executemany(
+            f"INSERT INTO {UNIQUENESS_TABLE} VALUES (?, ?, ?)",
+            [
+                (key, value, VALID_ATTEMPT_ID)
+                for key, value in uniqueness_values.items()
+            ],
+        )
+        connection.commit()
+    del authorization
+
+
+def test_exact_task_059_v1_database_migrates_atomically_to_v2(tmp_path: Path):
+    database_path = tmp_path / "task-059-v1.sqlite3"
+    authorization = _authorization_packet()
+    preparation = _prepared_commit(authorization)
+    _create_exact_v1_database(database_path, authorization, preparation)
+
+    store = SQLiteCodexPilotInitialClaimStore(database_path)
+    assert store.read_initial_claim_bundle(VALID_ATTEMPT_ID, authorization) == {
+        "claim_store_read_category": "read_success"
+    }
+    lifecycle = store.read_lifecycle_state(VALID_ATTEMPT_ID, authorization)
+    assert lifecycle["lifecycle_read_category"] == "read_success"
+    assert lifecycle["snapshot"]["latest_event_sequence"] == 0
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            if not row[0].startswith("sqlite_")
+        }
+    assert tables == EXPECTED_TABLES
+
+
+def test_failed_v1_migration_rolls_back_to_exact_v1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    database_path = tmp_path / "task-059-v1-rollback.sqlite3"
+    authorization = _authorization_packet()
+    preparation = _prepared_commit(authorization)
+    _create_exact_v1_database(database_path, authorization, preparation)
+
+    def _fail_migration(_self, _connection: sqlite3.Connection) -> None:
+        raise RuntimeError("injected migration failure")
+
+    monkeypatch.setattr(
+        SQLiteCodexPilotInitialClaimStore,
+        "_before_migration_commit",
+        _fail_migration,
+    )
+    with pytest.raises(RuntimeError, match="claim store initialization failed"):
+        SQLiteCodexPilotInitialClaimStore(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+            if not row[0].startswith("sqlite_")
+        }
+    assert tables == set(claim_store_module._V1_CREATE_STATEMENTS)
+
+
+def test_lifecycle_corruption_is_detected_without_repair(tmp_path: Path):
+    database_path = tmp_path / "lifecycle-corrupt.sqlite3"
+    store, authorization, _ = _create_valid_unit(database_path)
+    assert store.append_lifecycle_event(
+        VALID_ATTEMPT_ID,
+        authorization,
+        expected_event_sequence=0,
+        expected_lifecycle_state="claim_created",
+        next_lifecycle_state="invocation_starting",
+    )["lifecycle_append_category"] == "appended"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE {LIFECYCLE_EVENTS_TABLE} SET event_bytes = ?",
+            (sqlite3.Binary(b"{}"),),
+        )
+        connection.commit()
+    before = _database_hash(database_path)
+
+    assert store.read_lifecycle_state(VALID_ATTEMPT_ID, authorization)[
+        "lifecycle_read_category"
+    ] == "committed_unit_invalid"
+    assert _database_hash(database_path) == before
