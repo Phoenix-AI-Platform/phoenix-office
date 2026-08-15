@@ -29,6 +29,7 @@ from phoenix_office.core import (
 from phoenix_office.dev.codex_claim_store import (
     SQLiteCodexPilotInitialClaimStore,
 )
+from phoenix_office.dev.codex_wsl import WslCodexWorker
 
 RUNNER_SCHEMA_VERSION: Final = "codex-pilot-run-result.v1"
 RUNNER_CLI: Final = "dev codex-pilot-run"
@@ -156,6 +157,7 @@ class WorktreeHandle:
     git_refs: tuple[str, ...]
     git_worktree_state: str
     local_git_config: str
+    allowed_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1063,12 +1065,14 @@ class SystemCodexPilotServices:
         self,
         repository_path: Path,
         *,
-        launch_spec_resolver: CodexLaunchSpecResolver = (
-            lambda: _resolve_codex_launch_spec()
-        ),
+        launch_spec_resolver: CodexLaunchSpecResolver | None = None,
+        wsl_worker: WslCodexWorker | None = None,
     ) -> None:
         self._repository_path = Path(repository_path)
-        self._launch_spec_resolver = launch_spec_resolver
+        self._wsl_worker = wsl_worker
+        if self._wsl_worker is None and launch_spec_resolver is None and os.name == "nt":
+            self._wsl_worker = WslCodexWorker(self._repository_path)
+        self._launch_spec_resolver = launch_spec_resolver or _resolve_codex_launch_spec
         self._launch_spec_resolution_attempted = False
         self._codex_launch_spec: CodexLaunchSpec | None = None
         self._runtime_preflight_result: GateResult | None = None
@@ -1077,8 +1081,22 @@ class SystemCodexPilotServices:
     @property
     def codex_launch_spec_kind(self) -> str | None:
         """Return only the bounded launch topology, never resolved paths."""
+        if self._wsl_worker is not None:
+            return self._wsl_worker.runtime_kind
         spec = self._codex_launch_spec
         return spec.kind if spec is not None else None
+
+    @property
+    def execution_backend_kind(self) -> str:
+        """Return the bounded backend kind selected before authorization."""
+        return "wsl2_linux" if self._wsl_worker is not None else "native_windows"
+
+    @property
+    def execution_backend_frozen(self) -> bool:
+        """Report whether the selected backend has an immutable runtime identity."""
+        if self._wsl_worker is not None:
+            return self._wsl_worker.runtime_frozen
+        return self._codex_launch_spec is not None
 
     def preclaim_repository_gate(self, authorization: dict[str, object]) -> GateResult:
         checks = [
@@ -1140,6 +1158,9 @@ class SystemCodexPilotServices:
         return self._collision_gate(authorization)
 
     def runtime_gate(self) -> GateResult:
+        if self._wsl_worker is not None:
+            result = self._wsl_worker.runtime_gate()
+            return GateResult(result.passed, result.category)
         if self._runtime_preflight_result is not None:
             return self._runtime_preflight_result
         if os.name not in {"nt", "posix"}:
@@ -1171,6 +1192,9 @@ class SystemCodexPilotServices:
         return _codex_authentication_preflight(spec, cwd=self._repository_path)
 
     def authentication_gate(self) -> GateResult:
+        if self._wsl_worker is not None:
+            result = self._wsl_worker.authentication_gate()
+            return GateResult(result.passed, result.category)
         if self._authentication_preflight_result is not None:
             return self._authentication_preflight_result
         runtime = self.runtime_gate()
@@ -1186,6 +1210,9 @@ class SystemCodexPilotServices:
         return result
 
     def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+        if self._wsl_worker is not None:
+            result = self._wsl_worker.capability_probe(timeout_seconds)
+            return CapabilityProbeResult(result.passed, result.category)
         authentication = self.authentication_gate()
         if not authentication.passed:
             return CapabilityProbeResult(False, authentication.category)
@@ -1322,6 +1349,7 @@ class SystemCodexPilotServices:
                 git_refs,
                 git_worktree_state,
                 local_git_config,
+                tuple(str(path) for path in authorization["allowed_paths"]),
             ),
         )
 
@@ -1332,6 +1360,20 @@ class SystemCodexPilotServices:
         timeout_seconds: int,
         on_started: Callable[[], None],
     ) -> CodexExecutionResult:
+        if self._wsl_worker is not None:
+            result = self._wsl_worker.invoke_codex(
+                windows_worktree=worktree.path,
+                base_commit_sha=worktree.base_commit_sha,
+                allowed_paths=worktree.allowed_paths,
+                prompt=prompt,
+                timeout_seconds=timeout_seconds,
+                on_started=on_started,
+            )
+            return CodexExecutionResult(
+                result.status,
+                result.category,
+                result.usage_tokens,
+            )
         runtime = self.runtime_gate()
         if not runtime.passed:
             return CodexExecutionResult("failed", runtime.category)
