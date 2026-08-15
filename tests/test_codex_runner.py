@@ -39,11 +39,50 @@ from phoenix_office.dev.codex_runner import (
     render_codex_worker_prompt,
     render_reviewed_codex_invocation_prompt,
 )
+from phoenix_office.dev.codex_wsl import (
+    WslCapabilityResult,
+    WslExecutionResult,
+    WslGateResult,
+)
 
 BASE_SHA = "0" * 40
 ATTEMPT_ID = "pilot-attempt-task060abc123"
 ALLOWED_PATH = "docs/process/supervised-codex-pilot-storage.md"
 BRANCH = "codex/pilot-060-runner"
+
+
+@dataclass
+class FakeWslWorker:
+    runtime_frozen: bool = False
+    runtime_kind: str = "native_linux_exe"
+    runtime_result: WslGateResult = WslGateResult(True, "wsl_codex_runtime_ready")
+    authentication_result: WslGateResult = WslGateResult(
+        True,
+        "wsl_codex_authenticated",
+    )
+    capability_result: WslCapabilityResult = WslCapabilityResult(
+        True,
+        "wsl_workspace_write_capability_proved",
+    )
+    execution_result: WslExecutionResult = WslExecutionResult(
+        "succeeded",
+        "wsl_codex_completed",
+        7,
+    )
+    invocations: list[dict[str, object]] = field(default_factory=list)
+
+    def runtime_gate(self) -> WslGateResult:
+        return self.runtime_result
+
+    def authentication_gate(self) -> WslGateResult:
+        return self.authentication_result
+
+    def capability_probe(self, _timeout_seconds: int) -> WslCapabilityResult:
+        return self.capability_result
+
+    def invoke_codex(self, **kwargs) -> WslExecutionResult:
+        self.invocations.append(kwargs)
+        return self.execution_result
 
 
 def _write_windows_executable(path: Path) -> None:
@@ -2252,6 +2291,113 @@ def test_structured_json_parser_is_bounded_and_classifies_usage():
     }
     assert fatal["fatal"] is True
     assert oversized["fatal"] is True
+
+
+def test_system_service_delegates_preclaim_runtime_auth_and_capability_to_wsl(
+    tmp_path: Path,
+):
+    worker = FakeWslWorker()
+    service = SystemCodexPilotServices(tmp_path, wsl_worker=worker)
+
+    assert service.runtime_gate() == GateResult(
+        True,
+        "wsl_codex_runtime_ready",
+    )
+    assert service.authentication_gate() == GateResult(
+        True,
+        "wsl_codex_authenticated",
+    )
+    assert service.capability_probe(30) == CapabilityProbeResult(
+        True,
+        "wsl_workspace_write_capability_proved",
+    )
+    assert service.execution_backend_kind == "wsl2_linux"
+    assert not service.execution_backend_frozen
+
+
+def test_system_service_invokes_wsl_shadow_with_exact_authorized_identity(
+    tmp_path: Path,
+):
+    worker = FakeWslWorker()
+    service = SystemCodexPilotServices(tmp_path / "canonical", wsl_worker=worker)
+    started: list[bool] = []
+    handle = WorktreeHandle(
+        tmp_path / "worktree",
+        BRANCH,
+        BASE_SHA,
+        b"git-control",
+        (),
+        "worktrees",
+        "config",
+        (ALLOWED_PATH,),
+    )
+
+    result = service.invoke_codex(
+        handle,
+        "exact reviewed prompt",
+        90,
+        lambda: started.append(True),
+    )
+
+    assert result == CodexExecutionResult("succeeded", "wsl_codex_completed", 7)
+    assert worker.invocations == [
+        {
+            "windows_worktree": handle.path,
+            "base_commit_sha": BASE_SHA,
+            "allowed_paths": (ALLOWED_PATH,),
+            "prompt": "exact reviewed prompt",
+            "timeout_seconds": 90,
+            "on_started": worker.invocations[0]["on_started"],
+        }
+    ]
+    worker.invocations[0]["on_started"]()
+    assert started == [True]
+
+
+def test_wsl_runtime_blocker_prevents_claim_and_task_worktree(tmp_path: Path):
+    worker = FakeWslWorker(
+        runtime_result=WslGateResult(
+            False,
+            "wsl_codex_qualified_runtime_unavailable",
+        )
+    )
+    system = FakeSystem()
+    service = SystemCodexPilotServices(tmp_path, wsl_worker=worker)
+    system.runtime = service.runtime_gate()
+    claims: list[Path] = []
+    result, _database = _run(
+        tmp_path,
+        system,
+        claim_store_factory=lambda path: claims.append(path),
+    )
+
+    assert result["category"] == "wsl_codex_qualified_runtime_unavailable"
+    assert claims == []
+    assert system.calls == ["preclaim", "runtime"]
+
+
+def test_wsl_capability_blocker_prevents_claim_and_task_worktree(tmp_path: Path):
+    worker = FakeWslWorker(
+        capability_result=WslCapabilityResult(
+            False,
+            "wsl_workspace_write_capability_unproved",
+        )
+    )
+    system = FakeSystem()
+    service = SystemCodexPilotServices(tmp_path, wsl_worker=worker)
+    system.runtime = service.runtime_gate()
+    system.auth = service.authentication_gate()
+    system.probe = service.capability_probe(30)
+    claims: list[Path] = []
+    result, _database = _run(
+        tmp_path,
+        system,
+        claim_store_factory=lambda path: claims.append(path),
+    )
+
+    assert result["category"] == "wsl_workspace_write_capability_unproved"
+    assert claims == []
+    assert "worktree" not in system.calls
 
 
 def _git(cwd: Path, *args: str) -> str:
