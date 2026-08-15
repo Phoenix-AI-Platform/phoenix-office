@@ -203,6 +203,7 @@ def _reviewed_prompt(handoff: dict[str, object]) -> str:
 class FakeSystem:
     preclaim: GateResult = GateResult(True, "preclaim_passed")
     runtime: GateResult = GateResult(True, "runtime_ready")
+    auth: GateResult = GateResult(True, "codex_authenticated")
     probe: CapabilityProbeResult = CapabilityProbeResult(True, "probe_passed")
     execution: CodexExecutionResult = CodexExecutionResult(
         "succeeded", "codex_completed", 100
@@ -243,6 +244,10 @@ class FakeSystem:
     def runtime_gate(self) -> GateResult:
         self.calls.append("runtime")
         return self.runtime
+
+    def authentication_gate(self) -> GateResult:
+        self.calls.append("auth")
+        return self.auth
 
     def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
         assert timeout_seconds == 180
@@ -391,6 +396,7 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
     assert system.calls == [
         "preclaim",
         "runtime",
+        "auth",
         "probe",
         "worktree",
         "invoke",
@@ -462,16 +468,28 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
             ["preclaim", "runtime"],
         ),
         (
-            "probe",
-            CapabilityProbeResult(False, "codex_authentication_unavailable"),
+            "auth",
+            GateResult(False, "codex_authentication_unavailable"),
             "codex_authentication_unavailable",
-            ["preclaim", "runtime", "probe"],
+            ["preclaim", "runtime", "auth"],
+        ),
+        (
+            "auth",
+            GateResult(False, "codex_auth_preflight_failed"),
+            "codex_auth_preflight_failed",
+            ["preclaim", "runtime", "auth"],
+        ),
+        (
+            "probe",
+            CapabilityProbeResult(False, "codex_transport_unavailable"),
+            "codex_transport_unavailable",
+            ["preclaim", "runtime", "auth", "probe"],
         ),
         (
             "probe",
             CapabilityProbeResult(False, "workspace_write_capability_unproved"),
             "workspace_write_capability_unproved",
-            ["preclaim", "runtime", "probe"],
+            ["preclaim", "runtime", "auth", "probe"],
         ),
     ],
 )
@@ -602,7 +620,7 @@ def test_preinvocation_terminal_append_failure_surfaces_storage_uncertainty(
     assert result["category"] == "lifecycle_storage_uncertain"
     assert result["attempt_id"] == ATTEMPT_ID
     assert store.terminal_append_attempts == 1
-    assert system.calls == ["preclaim", "runtime", "probe", "worktree"]
+    assert system.calls == ["preclaim", "runtime", "auth", "probe", "worktree"]
     lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
         ATTEMPT_ID,
         _authorization(),
@@ -1410,6 +1428,14 @@ def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marke
         return CodexExecutionResult("succeeded", "codex_completed", 1)
 
     monkeypatch.setattr(service, "_version_preflight", fake_version_preflight)
+    monkeypatch.setattr(
+        service,
+        "_authentication_preflight",
+        lambda launch_spec: GateResult(
+            launch_spec is spec,
+            "codex_authenticated",
+        ),
+    )
     monkeypatch.setattr(service, "_run_codex_process", fake_run_codex_process)
 
     result = service.capability_probe(30)
@@ -1438,6 +1464,14 @@ def test_capability_probe_without_marker_fails_closed(
         service,
         "_version_preflight",
         lambda launch_spec: GateResult(launch_spec is spec, "runtime_ready"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_authentication_preflight",
+        lambda launch_spec: GateResult(
+            launch_spec is spec,
+            "codex_authenticated",
+        ),
     )
     monkeypatch.setattr(
         service,
@@ -1489,6 +1523,368 @@ def test_safe_version_preflight_uses_exact_cached_launch_spec(
     assert kwargs["stdout"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.DEVNULL
     assert service.codex_launch_spec_kind == "native_exe"
+
+
+def test_authentication_preflight_is_shell_free_bounded_and_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    launches: list[tuple[list[str], dict[str, object]]] = []
+    private_output = f"authenticated using {tmp_path / 'private-auth.json'}"
+
+    def fake_run(argv, **kwargs):
+        launches.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=private_output,
+            stderr=private_output,
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_codex_worker_environment",
+        lambda **_kwargs: {"PATH": "bounded", "HTTPS_PROXY": "private-value"},
+    )
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+
+    assert service.runtime_gate() == GateResult(True, "runtime_ready")
+    first = service.authentication_gate()
+    second = service.authentication_gate()
+
+    assert first == GateResult(True, "codex_authenticated")
+    assert second is first
+    assert len(launches) == 2
+    version_argv, version_kwargs = launches[0]
+    auth_argv, auth_kwargs = launches[1]
+    assert version_argv == [*spec.argv_prefix, "--version"]
+    assert auth_argv == [*spec.argv_prefix, "login", "status"]
+    assert version_kwargs["shell"] is False
+    assert auth_kwargs["shell"] is False
+    assert auth_kwargs["stdin"] is subprocess.DEVNULL
+    assert auth_kwargs["stdout"] is subprocess.DEVNULL
+    assert auth_kwargs["stderr"] is subprocess.DEVNULL
+    assert private_output not in repr(first)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_category"),
+    [
+        ("not_authenticated", "codex_authentication_unavailable"),
+        ("launch", "codex_auth_preflight_failed"),
+        ("timeout", "codex_auth_preflight_failed"),
+    ],
+)
+def test_authentication_preflight_failures_are_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_category: str,
+):
+    spec = _native_launch_spec(tmp_path)
+    private_output = f"private auth detail at {tmp_path}"
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0)
+        if failure == "launch":
+            raise PermissionError(private_output)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, 30, stderr=private_output)
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout=private_output,
+            stderr=private_output,
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+
+    result = service.authentication_gate()
+
+    assert result == GateResult(False, expected_category)
+    assert private_output not in repr(result)
+    assert str(tmp_path) not in repr(result)
+
+
+def test_authentication_failure_blocks_model_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+    probe_calls: list[bool] = []
+    monkeypatch.setattr(
+        service,
+        "_version_preflight",
+        lambda launch_spec: GateResult(launch_spec is spec, "runtime_ready"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_authentication_preflight",
+        lambda launch_spec: GateResult(
+            False,
+            "codex_authentication_unavailable",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_capability_probe",
+        lambda *_args: probe_calls.append(True),
+    )
+
+    result = service.capability_probe(30)
+
+    assert result == CapabilityProbeResult(
+        False,
+        "codex_authentication_unavailable",
+    )
+    assert probe_calls == []
+
+
+def test_codex_worker_environment_allows_only_bounded_transport_context():
+    source = {
+        "PATH": "bounded-path",
+        "HOME": "bounded-home",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "http_proxy": "http://lowercase.invalid:8080",
+        "https_proxy": "https://secure.invalid:8443",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "all_proxy": "http://all.invalid:8080",
+        "OPENAI_API_KEY": "secret-openai",
+        "CODEX_THREAD_ID": "secret-thread",
+        "CODEX_SESSION_ID": "secret-session",
+        "CODEX_API_KEY": "secret-codex-key",
+        "CODEX_ACCESS_TOKEN": "secret-codex-token",
+        "OPENAI_IDENTITY_TOKEN_FILE": "private-token-path",
+        "OPENAI_FEDERATION_RULE_ID": "private-federation-rule",
+        "GH_TOKEN": "secret-github",
+        "GITHUB_TOKEN": "secret-github-2",
+        "AWS_SECRET_ACCESS_KEY": "secret-cloud",
+        "AZURE_CLIENT_SECRET": "secret-cloud-2",
+        "GOOGLE_APPLICATION_CREDENTIALS": "private-path",
+        "UNRELATED_AMBIENT_VALUE": "excluded",
+    }
+
+    environment = runner_module._codex_worker_environment(source)
+
+    assert environment == {
+        "PATH": "bounded-path",
+        "HOME": "bounded-home",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "HTTPS_PROXY": "https://secure.invalid:8443",
+        "NO_PROXY": "localhost,127.0.0.1",
+        "ALL_PROXY": "http://all.invalid:8080",
+    }
+    assert "http_proxy" not in environment
+    assert "https_proxy" not in environment
+    assert "no_proxy" not in environment
+    assert "all_proxy" not in environment
+    assert "OPENAI_API_KEY" not in environment
+    assert "CODEX_THREAD_ID" not in environment
+    assert "CODEX_SESSION_ID" not in environment
+    assert "CODEX_API_KEY" not in environment
+    assert "CODEX_ACCESS_TOKEN" not in environment
+    assert "OPENAI_IDENTITY_TOKEN_FILE" not in environment
+    assert "OPENAI_FEDERATION_RULE_ID" not in environment
+    assert "GH_TOKEN" not in environment
+    assert "GITHUB_TOKEN" not in environment
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "AZURE_CLIENT_SECRET" not in environment
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in environment
+    assert "UNRELATED_AMBIENT_VALUE" not in environment
+    assert runner_module._codex_worker_environment(
+        source,
+        include_transport=False,
+    ) == {"PATH": "bounded-path", "HOME": "bounded-home"}
+
+
+def test_windows_core_environment_is_complete_case_insensitive_and_bounded():
+    source = {
+        "Path": "value-path",
+        "pathext": "value-pathext",
+        "Shell": "value-shell",
+        "ComSpec": "value-comspec",
+        "systemroot": "value-systemroot",
+        "SystemDrive": "value-systemdrive",
+        "UserName": "value-username",
+        "userdomain": "value-userdomain",
+        "UserProfile": "value-userprofile",
+        "HomeDrive": "value-homedrive",
+        "homepath": "value-homepath",
+        "ProgramFiles": "value-programfiles",
+        "programfiles(x86)": "value-programfiles-x86",
+        "ProgramW6432": "value-programw6432",
+        "ProgramData": "value-programdata",
+        "LocalAppData": "value-localappdata",
+        "AppData": "value-appdata",
+        "Temp": "value-temp",
+        "tmp": "value-tmp",
+        "TmpDir": "value-tmpdir",
+        "PowerShell": "value-powershell",
+        "pwsh": "value-pwsh",
+        "hTtP_pRoXy": "http://proxy.invalid:8080",
+        "CODEX_THREAD_ID": "excluded-thread",
+        "CODEX_SESSION_ID": "excluded-session",
+        "CODEX_API_KEY": "excluded-codex-key",
+        "CODEX_ACCESS_TOKEN": "excluded-codex-token",
+        "OPENAI_API_KEY": "excluded-openai-key",
+        "OPENAI_IDENTITY_TOKEN_FILE": "excluded-token-path",
+        "OPENAI_FEDERATION_RULE_ID": "excluded-rule",
+        "UNRELATED_KEY": "excluded-generic-key",
+        "PRIVATE_SECRET": "excluded-generic-secret",
+        "ARBITRARY_TOKEN": "excluded-generic-token",
+        "UNRELATED_AMBIENT_VALUE": "excluded-arbitrary-value",
+    }
+
+    environment = runner_module._codex_worker_environment(
+        source,
+        platform_name="nt",
+    )
+
+    expected_core_names = {
+        "PATH",
+        "PATHEXT",
+        "SHELL",
+        "COMSPEC",
+        "SYSTEMROOT",
+        "SYSTEMDRIVE",
+        "USERNAME",
+        "USERDOMAIN",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "PROGRAMDATA",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "POWERSHELL",
+        "PWSH",
+    }
+    assert set(environment) == expected_core_names | {"HTTP_PROXY"}
+    assert environment["PATH"] == "value-path"
+    assert environment["COMSPEC"] == "value-comspec"
+    assert environment["PROGRAMFILES(X86)"] == "value-programfiles-x86"
+    assert environment["HTTP_PROXY"] == "http://proxy.invalid:8080"
+    for excluded in (
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CODEX_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+        "OPENAI_API_KEY",
+        "OPENAI_IDENTITY_TOKEN_FILE",
+        "OPENAI_FEDERATION_RULE_ID",
+        "UNRELATED_KEY",
+        "PRIVATE_SECRET",
+        "ARBITRARY_TOKEN",
+        "UNRELATED_AMBIENT_VALUE",
+    ):
+        assert excluded not in environment
+
+
+def test_windows_core_environment_values_never_enter_public_gate_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    private_values = (
+        "private-user-value",
+        "private-domain-value",
+        "private-program-path",
+    )
+    source = {
+        "USERNAME": private_values[0],
+        "USERDOMAIN": private_values[1],
+        "PROGRAMFILES": private_values[2],
+    }
+    build_environment = runner_module._codex_worker_environment
+
+    monkeypatch.setattr(
+        runner_module,
+        "_codex_worker_environment",
+        lambda **_kwargs: build_environment(
+            source,
+            platform_name="nt",
+        ),
+    )
+    monkeypatch.setattr(
+        runner_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1),
+    )
+
+    result = runner_module._codex_authentication_preflight(spec, cwd=tmp_path)
+
+    assert result == GateResult(False, "codex_authentication_unavailable")
+    assert all(value not in repr(result) for value in private_values)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("HTTP_PROXY", "http://proxy.invalid\x00secret"),
+        ("HTTPS_PROXY", "https://proxy.invalid\nsecret"),
+        ("ALL_PROXY", "socks5://proxy.invalid:1080"),
+        ("HTTP_PROXY", "not-a-url"),
+        ("NO_PROXY", "x" * (runner_module.MAX_PROXY_ENV_VALUE_BYTES + 1)),
+    ],
+)
+def test_codex_worker_environment_rejects_malformed_proxy_values(
+    name: str,
+    value: str,
+):
+    with pytest.raises(runner_module._TransportEnvironmentError):
+        runner_module._codex_worker_environment({name: value})
+
+
+def test_malformed_proxy_blocks_auth_preflight_without_exposure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    private_proxy = "https://proxy.invalid/private\ncredential"
+    launches: list[list[str]] = []
+    for canonical, lowercase, _requires_url in (
+        runner_module.CODEX_PROXY_ENVIRONMENT_NAMES
+    ):
+        monkeypatch.delenv(canonical, raising=False)
+        monkeypatch.delenv(lowercase, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", private_proxy)
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        launches.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+
+    result = service.authentication_gate()
+
+    assert result == GateResult(False, "codex_transport_environment_invalid")
+    assert private_proxy not in repr(result)
+    assert launches == [[*spec.argv_prefix, "--version"]]
 
 
 @pytest.mark.parametrize(
@@ -1545,6 +1941,10 @@ def test_preflight_probe_and_task_reuse_one_exact_launch_spec(
         observed_specs.append(launch_spec)
         return GateResult(True, "runtime_ready")
 
+    def fake_authentication_preflight(launch_spec):
+        observed_specs.append(launch_spec)
+        return GateResult(True, "codex_authenticated")
+
     def fake_probe(timeout_seconds, launch_spec):
         assert timeout_seconds == 30
         observed_specs.append(launch_spec)
@@ -1555,6 +1955,11 @@ def test_preflight_probe_and_task_reuse_one_exact_launch_spec(
         return CodexExecutionResult("succeeded", "codex_completed", 1)
 
     monkeypatch.setattr(service, "_version_preflight", fake_version_preflight)
+    monkeypatch.setattr(
+        service,
+        "_authentication_preflight",
+        fake_authentication_preflight,
+    )
     monkeypatch.setattr(service, "_capability_probe", fake_probe)
     monkeypatch.setattr(service, "_run_codex_process", fake_process)
     worktree = WorktreeHandle(tmp_path, BRANCH, BASE_SHA, b"git", (), "", "")
@@ -1565,7 +1970,7 @@ def test_preflight_probe_and_task_reuse_one_exact_launch_spec(
         "succeeded"
     )
     assert resolutions == [True]
-    assert observed_specs == [spec, spec, spec]
+    assert observed_specs == [spec, spec, spec, spec]
     assert all(observed is spec for observed in observed_specs)
 
 
@@ -1684,6 +2089,13 @@ def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
     spec = _native_launch_spec(tmp_path)
     process = SuccessfulProcess()
     launches: list[tuple[list[str], dict[str, object]]] = []
+    for canonical, lowercase, _requires_url in (
+        runner_module.CODEX_PROXY_ENVIRONMENT_NAMES
+    ):
+        monkeypatch.delenv(canonical, raising=False)
+        monkeypatch.delenv(lowercase, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "https://transport.invalid:8443")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-propagate")
 
     def fake_popen(argv, **kwargs):
         launches.append((list(argv), kwargs))
@@ -1709,6 +2121,8 @@ def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
     assert kwargs["cwd"] == tmp_path
     assert kwargs["shell"] is False
     assert kwargs["stderr"] is subprocess.PIPE
+    assert kwargs["env"]["HTTPS_PROXY"] == "https://transport.invalid:8443"
+    assert "OPENAI_API_KEY" not in kwargs["env"]
     assert process.stdin.captured == "exact reviewed worker prompt"
 
 
