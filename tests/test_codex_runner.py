@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +24,7 @@ from phoenix_office.dev.codex_runner import (
     VALIDATION_COMMANDS,
     CapabilityProbeResult,
     CodexExecutionResult,
+    CodexLaunchSpec,
     DiffGateResult,
     GateResult,
     PublicationResult,
@@ -41,6 +44,26 @@ BASE_SHA = "0" * 40
 ATTEMPT_ID = "pilot-attempt-task060abc123"
 ALLOWED_PATH = "docs/process/supervised-codex-pilot-storage.md"
 BRANCH = "codex/pilot-060-runner"
+
+
+def _write_windows_executable(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"MZ" + b"\0" * 32)
+
+
+def _native_launch_spec(tmp_path: Path) -> CodexLaunchSpec:
+    executable = tmp_path / "codex.exe"
+    _write_windows_executable(executable)
+    identity = runner_module._launch_file_identity(
+        executable,
+        require_windows_exe=True,
+    )
+    assert identity is not None
+    return CodexLaunchSpec(
+        (str(identity.path),),
+        "native_exe",
+        (identity,),
+    )
 
 
 def _authorization() -> dict[str, object]:
@@ -927,21 +950,424 @@ def test_pr_audit_and_terminal_append_uncertainty_never_republishes(tmp_path: Pa
     )
 
 
-def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority():
+def _configure_windows_candidate_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    local_app_data = tmp_path / "local-app-data"
+    program_files = tmp_path / "program-files"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    return local_app_data / "OpenAI" / "Codex" / "bin", program_files
+
+
+def _no_windows_path_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: None)
+
+
+def test_windowsapps_codex_is_never_selected_or_version_preflighted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _per_user_root, program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    packaged = (
+        program_files
+        / "WindowsApps"
+        / "OpenAI.Codex_package"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    _write_windows_executable(packaged)
+
+    def fake_which(name: str) -> str | None:
+        return str(packaged) if name in {"codex.exe", "codex"} else None
+
+    preflighted: list[CodexLaunchSpec] = []
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
+    )
+
+    assert spec is None
+    assert preflighted == []
+    assert runner_module._is_windows_apps_path(packaged)
+
+
+def test_windows_direct_per_user_codex_is_runnable_and_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = per_user_root / "codex.exe"
+    _write_windows_executable(native)
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
+    )
+
+    assert spec is not None
+    assert spec.kind == "native_exe"
+    assert spec.argv_prefix == (str(native.resolve()),)
+    assert runner_module._codex_launch_spec_is_current(spec)
+    assert preflighted == [spec]
+
+
+def test_windows_hashed_per_user_codex_is_runnable_and_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = per_user_root / "version-or-hash" / "codex.exe"
+    _write_windows_executable(native)
+    _no_windows_path_tools(monkeypatch)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
+
+    assert spec is not None
+    assert spec.kind == "native_exe"
+    assert spec.argv_prefix == (str(native.resolve()),)
+
+
+def test_unrunnable_direct_per_user_candidate_falls_back_to_hashed_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    direct = per_user_root / "codex.exe"
+    hashed = per_user_root / "working-child" / "codex.exe"
+    _write_windows_executable(direct)
+    _write_windows_executable(hashed)
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    def preflight(candidate: CodexLaunchSpec) -> GateResult:
+        preflighted.append(candidate)
+        return GateResult(
+            candidate.argv_prefix == (str(hashed.resolve()),),
+            "bounded",
+        )
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=preflight
+    )
+
+    assert spec is not None
+    assert spec.argv_prefix == (str(hashed.resolve()),)
+    assert [candidate.argv_prefix for candidate in preflighted] == [
+        (str(direct.resolve()),),
+        (str(hashed.resolve()),),
+    ]
+
+
+def test_broken_windowsapps_candidate_never_blocks_working_per_user_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    per_user = per_user_root / "codex.exe"
+    packaged = program_files / "WindowsApps" / "package" / "codex.exe"
+    _write_windows_executable(per_user)
+    _write_windows_executable(packaged)
+
+    def fake_which(name: str) -> str | None:
+        return str(packaged) if name in {"codex.exe", "codex"} else None
+
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+    selection_preflights: list[CodexLaunchSpec] = []
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            selection_preflights.append(candidate)
+            or GateResult(True, "runtime_ready")
+        )
+    )
+    assert spec is not None
+    assert spec.argv_prefix == (str(per_user.resolve()),)
+    assert selection_preflights == [spec]
+
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+    runtime_preflights: list[CodexLaunchSpec] = []
+    monkeypatch.setattr(
+        service,
+        "_version_preflight",
+        lambda candidate: (
+            runtime_preflights.append(candidate)
+            or GateResult(True, "runtime_ready")
+        ),
+    )
+    assert service.runtime_gate() == GateResult(True, "runtime_ready")
+    assert runtime_preflights == [spec]
+
+
+def test_multiple_hashed_per_user_candidates_choose_newest_then_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    older = per_user_root / "old" / "codex.exe"
+    newer_z = per_user_root / "z-new" / "codex.exe"
+    newer_a = per_user_root / "a-new" / "codex.exe"
+    for candidate in (older, newer_z, newer_a):
+        _write_windows_executable(candidate)
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer_z, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(newer_a, ns=(2_000_000_000, 2_000_000_000))
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
+    )
+
+    assert spec is not None
+    assert spec.argv_prefix == (str(newer_a.resolve()),)
+    assert preflighted == [spec]
+
+
+def test_safe_standalone_path_native_is_accepted_after_per_user_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = tmp_path / "standalone" / "codex.exe"
+    _write_windows_executable(native)
+
+    def fake_which(name: str) -> str | None:
+        return str(native) if name in {"codex.exe", "codex"} else None
+
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
+
+    assert spec is not None
+    assert spec.kind == "native_exe"
+    assert spec.argv_prefix == (str(native.resolve()),)
+
+
+def test_windows_npm_shim_derives_shell_free_node_launcher_without_parsing_shim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _configure_windows_candidate_roots(tmp_path, monkeypatch)
+    npm_root = tmp_path / "npm"
+    shim = npm_root / "codex.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("not a command that Phoenix executes or parses", encoding="utf-8")
+    launcher = npm_root / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    node = tmp_path / "node" / "node.exe"
+    _write_windows_executable(node)
+
+    def fake_which(name: str) -> str | None:
+        return {
+            "codex.exe": None,
+            "codex.cmd": str(shim),
+            "node.exe": str(node),
+        }.get(name)
+
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
+
+    assert spec is not None
+    assert spec.kind == "npm_node_launcher"
+    assert spec.argv_prefix == (str(node.resolve()), str(launcher.resolve()))
+    assert runner_module._codex_launch_spec_is_current(spec)
+
+
+@pytest.mark.parametrize("missing", ["launcher", "node"])
+def test_windows_npm_launch_rejects_missing_required_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+):
+    _configure_windows_candidate_roots(tmp_path, monkeypatch)
+    npm_root = tmp_path / "npm"
+    shim = npm_root / "codex.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("shim", encoding="utf-8")
+    launcher = npm_root / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    if missing != "launcher":
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("launcher", encoding="utf-8")
+    node = tmp_path / "node" / "node.exe"
+    if missing != "node":
+        _write_windows_executable(node)
+
+    def fake_which(name: str) -> str | None:
+        return {
+            "codex.exe": None,
+            "codex.cmd": str(shim),
+            "node.exe": None if missing == "node" else str(node),
+        }.get(name)
+
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    assert (
+        runner_module._resolve_windows_codex_launch_spec(
+            version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+        )
+        is None
+    )
+
+
+def test_all_per_user_candidates_fail_then_runnable_npm_fallback_is_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    per_user = per_user_root / "codex.exe"
+    _write_windows_executable(per_user)
+    npm_root = tmp_path / "npm"
+    shim = npm_root / "codex.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("never parsed", encoding="utf-8")
+    launcher = npm_root / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("launcher", encoding="utf-8")
+    node = tmp_path / "node" / "node.exe"
+    _write_windows_executable(node)
+
+    def fake_which(name: str) -> str | None:
+        return {"codex.cmd": str(shim), "node.exe": str(node)}.get(name)
+
+    preflighted_kinds: list[str] = []
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    def preflight(candidate: CodexLaunchSpec) -> GateResult:
+        preflighted_kinds.append(candidate.kind)
+        return GateResult(candidate.kind == "npm_node_launcher", "bounded")
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=preflight
+    )
+
+    assert spec is not None
+    assert spec.kind == "npm_node_launcher"
+    assert preflighted_kinds == ["native_exe", "npm_node_launcher"]
+
+
+def test_every_windows_candidate_preflight_failure_is_bounded_and_path_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    private_child_name = "private-hashed-child"
+    candidate = per_user_root / private_child_name / "codex.exe"
+    _write_windows_executable(candidate)
+    _no_windows_path_tools(monkeypatch)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: runner_module._resolve_windows_codex_launch_spec(
+            version_preflight=lambda _candidate: GateResult(
+                False,
+                "codex_launch_failed",
+            )
+        ),
+    )
+
+    result = service.runtime_gate()
+
+    assert result == GateResult(False, "codex_launch_spec_unavailable")
+    assert str(tmp_path) not in repr(result)
+    assert private_child_name not in repr(result)
+
+
+def test_launch_resolution_rejects_symlink_candidate(
+    tmp_path: Path,
+):
+    target = tmp_path / "target.exe"
+    _write_windows_executable(target)
+    link = tmp_path / "codex.exe"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("host does not permit file symlinks")
+
+    assert (
+        runner_module._launch_file_identity(link, require_windows_exe=True) is None
+    )
+
+
+def test_system_codex_launch_has_no_shell_or_wrapper_fallback():
+    source = inspect.getsource(runner_module.SystemCodexPilotServices)
+    resolver_source = inspect.getsource(
+        runner_module._resolve_windows_codex_launch_spec
+    )
+
+    assert "shell=True" not in source
+    assert "cmd.exe" not in source + resolver_source
+    assert "powershell" not in (source + resolver_source).casefold()
+    assert "os.system" not in source + resolver_source
+    assert "read_text" not in resolver_source
+
+
+def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority(
+    tmp_path: Path,
+):
     reviewed = _reviewed_prompt(_handoff())
     prompt = render_codex_worker_prompt(reviewed)
-    argv = _codex_exec_argv(Path("worktree"))
+    spec = _native_launch_spec(tmp_path)
+    argv = _codex_exec_argv(spec, Path("worktree"), platform_name="nt")
 
     assert "- open one PR and stop" not in prompt
     assert "Phoenix owns all Git and GitHub publication" in prompt
-    assert argv[:2] == ["codex", "exec"]
+    assert argv[:1] == list(spec.argv_prefix)
     assert "--ask-for-approval" in argv
     assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert argv.index("--ask-for-approval") < argv.index("exec")
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert "--ephemeral" in argv
     assert "--json" in argv
     assert "sandbox_workspace_write.network_access=false" in argv
     assert 'web_search="disabled"' in argv
+    assert "features.unified_exec=false" in argv
     joined = " ".join(argv)
     assert "danger-full-access" not in joined
     assert "dangerously-bypass" not in joined
@@ -952,14 +1378,29 @@ def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marke
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    del tmp_path
-    service = SystemCodexPilotServices(Path.cwd())
+    spec = _native_launch_spec(tmp_path)
+    service = SystemCodexPilotServices(
+        Path.cwd(),
+        launch_spec_resolver=lambda: spec,
+    )
     observed: dict[str, object] = {}
 
-    def fake_run_codex_process(*, workspace, prompt, timeout_seconds, on_started):
+    def fake_version_preflight(launch_spec):
+        observed["preflight_spec"] = launch_spec
+        return GateResult(True, "runtime_ready")
+
+    def fake_run_codex_process(
+        *,
+        workspace,
+        prompt,
+        timeout_seconds,
+        on_started,
+        launch_spec,
+    ):
         observed["workspace"] = workspace
         observed["prompt"] = prompt
         observed["timeout"] = timeout_seconds
+        observed["probe_spec"] = launch_spec
         assert (workspace / ".git").exists()
         on_started()
         (workspace / CAPABILITY_MARKER_NAME).write_text(
@@ -968,6 +1409,7 @@ def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marke
         )
         return CodexExecutionResult("succeeded", "codex_completed", 1)
 
+    monkeypatch.setattr(service, "_version_preflight", fake_version_preflight)
     monkeypatch.setattr(service, "_run_codex_process", fake_run_codex_process)
 
     result = service.capability_probe(30)
@@ -978,13 +1420,25 @@ def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marke
     )
     assert CAPABILITY_MARKER_NAME in str(observed["prompt"])
     assert observed["timeout"] == 30
+    assert observed["preflight_spec"] is spec
+    assert observed["probe_spec"] is spec
     assert not Path(observed["workspace"]).exists()
 
 
 def test_capability_probe_without_marker_fails_closed(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    service = SystemCodexPilotServices(Path.cwd())
+    spec = _native_launch_spec(tmp_path)
+    service = SystemCodexPilotServices(
+        Path.cwd(),
+        launch_spec_resolver=lambda: spec,
+    )
+    monkeypatch.setattr(
+        service,
+        "_version_preflight",
+        lambda launch_spec: GateResult(launch_spec is spec, "runtime_ready"),
+    )
     monkeypatch.setattr(
         service,
         "_run_codex_process",
@@ -999,10 +1453,157 @@ def test_capability_probe_without_marker_fails_closed(
     )
 
 
+def test_safe_version_preflight_uses_exact_cached_launch_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    resolutions: list[bool] = []
+    launches: list[tuple[list[str], dict[str, object]]] = []
+
+    def resolve() -> CodexLaunchSpec:
+        resolutions.append(True)
+        return spec
+
+    def fake_run(argv, **kwargs):
+        launches.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=resolve,
+    )
+
+    first = service.runtime_gate()
+    second = service.runtime_gate()
+
+    assert first == GateResult(True, "runtime_ready")
+    assert second is first
+    assert resolutions == [True]
+    assert len(launches) == 1
+    argv, kwargs = launches[0]
+    assert argv == [*spec.argv_prefix, "--version"]
+    assert kwargs["shell"] is False
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert service.codex_launch_spec_kind == "native_exe"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_category"),
+    [
+        ("launch", "codex_launch_failed"),
+        ("nonzero", "codex_version_check_failed"),
+    ],
+)
+def test_version_preflight_failures_are_bounded_and_hide_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_category: str,
+):
+    spec = _native_launch_spec(tmp_path)
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        if failure == "launch":
+            raise PermissionError(f"private executable path: {argv[0]}")
+        return subprocess.CompletedProcess(argv, 2)
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+
+    result = service.runtime_gate()
+
+    assert result == GateResult(False, expected_category)
+    assert str(tmp_path) not in repr(result)
+
+
+def test_preflight_probe_and_task_reuse_one_exact_launch_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    resolutions: list[bool] = []
+    observed_specs: list[CodexLaunchSpec] = []
+
+    def resolve() -> CodexLaunchSpec:
+        resolutions.append(True)
+        return spec
+
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=resolve,
+    )
+
+    def fake_version_preflight(launch_spec):
+        observed_specs.append(launch_spec)
+        return GateResult(True, "runtime_ready")
+
+    def fake_probe(timeout_seconds, launch_spec):
+        assert timeout_seconds == 30
+        observed_specs.append(launch_spec)
+        return CapabilityProbeResult(True, "workspace_write_capability_proved")
+
+    def fake_process(**kwargs):
+        observed_specs.append(kwargs["launch_spec"])
+        return CodexExecutionResult("succeeded", "codex_completed", 1)
+
+    monkeypatch.setattr(service, "_version_preflight", fake_version_preflight)
+    monkeypatch.setattr(service, "_capability_probe", fake_probe)
+    monkeypatch.setattr(service, "_run_codex_process", fake_process)
+    worktree = WorktreeHandle(tmp_path, BRANCH, BASE_SHA, b"git", (), "", "")
+
+    assert service.runtime_gate() == GateResult(True, "runtime_ready")
+    assert service.capability_probe(30).passed
+    assert service.invoke_codex(worktree, "prompt", 60, lambda: None).status == (
+        "succeeded"
+    )
+    assert resolutions == [True]
+    assert observed_specs == [spec, spec, spec]
+    assert all(observed is spec for observed in observed_specs)
+
+
+def test_verified_launch_spec_disappearance_fails_closed_without_reresolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+    resolutions: list[bool] = []
+
+    def resolve() -> CodexLaunchSpec:
+        resolutions.append(True)
+        return spec
+
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=resolve,
+    )
+    monkeypatch.setattr(
+        service,
+        "_version_preflight",
+        lambda launch_spec: GateResult(launch_spec is spec, "runtime_ready"),
+    )
+    assert service.runtime_gate().passed
+    spec.file_identities[0].path.unlink()
+    worktree = WorktreeHandle(tmp_path, BRANCH, BASE_SHA, b"git", (), "", "")
+
+    result = service.invoke_codex(worktree, "prompt", 60, lambda: None)
+
+    assert result == CodexExecutionResult("failed", "codex_launch_spec_changed")
+    assert resolutions == [True]
+
+
 class InterruptingProcess:
     def __init__(self, exception: BaseException):
         self.stdin = io.StringIO()
         self.stdout = io.StringIO("")
+        self.stderr = io.StringIO("")
         self.returncode = None
         self.pid = 999999
         self._exception = exception
@@ -1040,6 +1641,7 @@ class SuccessfulProcess:
             )
             + "\n"
         )
+        self.stderr = io.StringIO("")
         self.returncode = None
         self.pid = 999998
 
@@ -1055,10 +1657,31 @@ class SuccessfulProcess:
         self.returncode = -1
 
 
+class FailedProcess:
+    def __init__(self, *, stdout: str = "", stderr: str = ""):
+        self.stdin = CapturingInput()
+        self.stdout = io.StringIO(stdout)
+        self.stderr = io.StringIO(stderr)
+        self.returncode = None
+        self.pid = 999997
+
+    def wait(self, timeout=None):
+        assert timeout == 60
+        self.returncode = 2
+        return 2
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -1
+
+
 def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    spec = _native_launch_spec(tmp_path)
     process = SuccessfulProcess()
     launches: list[tuple[list[str], dict[str, object]]] = []
 
@@ -1075,17 +1698,81 @@ def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
         prompt="exact reviewed worker prompt",
         timeout_seconds=60,
         on_started=lambda: started.append(True),
+        launch_spec=spec,
     )
 
     assert result == CodexExecutionResult("succeeded", "codex_completed", 12)
     assert started == [True]
     assert len(launches) == 1
     argv, kwargs = launches[0]
-    assert argv == _codex_exec_argv(tmp_path)
+    assert argv == _codex_exec_argv(spec, tmp_path)
     assert kwargs["cwd"] == tmp_path
     assert kwargs["shell"] is False
-    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.PIPE
     assert process.stdin.captured == "exact reviewed worker prompt"
+
+
+def test_process_launch_failure_is_bounded_and_does_not_leak_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    spec = _native_launch_spec(tmp_path)
+
+    def fail_launch(*_args, **_kwargs):
+        raise PermissionError(f"cannot execute {spec.argv_prefix[0]}")
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", fail_launch)
+    service = SystemCodexPilotServices(tmp_path)
+
+    result = service._run_codex_process(
+        workspace=tmp_path,
+        prompt="reviewed prompt",
+        timeout_seconds=60,
+        on_started=lambda: None,
+        launch_spec=spec,
+    )
+
+    assert result == CodexExecutionResult("failed", "codex_launch_failed")
+    assert str(tmp_path) not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "expected_category"),
+    [
+        ("error: unexpected argument '--bad'", "codex_cli_argument_or_config_rejected"),
+        ("authentication required; login required", "codex_authentication_unavailable"),
+        ("Windows sandbox initialization failed", "windows_sandbox_failed"),
+        ("stream disconnected before completion", "codex_transport_unavailable"),
+        ("bounded generic failure", "codex_nonzero_exit"),
+    ],
+)
+def test_process_nonzero_exit_uses_only_bounded_diagnostic_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    diagnostic: str,
+    expected_category: str,
+):
+    spec = _native_launch_spec(tmp_path)
+    private_diagnostic = f"{diagnostic}: {tmp_path}"
+    process = FailedProcess(stderr=private_diagnostic)
+    monkeypatch.setattr(
+        runner_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    service = SystemCodexPilotServices(tmp_path)
+
+    result = service._run_codex_process(
+        workspace=tmp_path,
+        prompt="reviewed prompt",
+        timeout_seconds=60,
+        on_started=lambda: None,
+        launch_spec=spec,
+    )
+
+    assert result.category == expected_category
+    assert str(tmp_path) not in repr(result)
+    assert private_diagnostic not in repr(result)
 
 
 @pytest.mark.parametrize(
@@ -1096,11 +1783,13 @@ def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
     ],
 )
 def test_process_timeout_and_cancellation_terminate_child_tree(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     exception: BaseException,
     status: str,
     category: str,
 ):
+    spec = _native_launch_spec(tmp_path)
     process = InterruptingProcess(exception)
     terminated: list[object] = []
     monkeypatch.setattr(runner_module.subprocess, "Popen", lambda *_a, **_k: process)
@@ -1121,6 +1810,7 @@ def test_process_timeout_and_cancellation_terminate_child_tree(
         prompt="reviewed prompt",
         timeout_seconds=1,
         on_started=lambda: None,
+        launch_spec=spec,
     )
 
     assert result.status == status
@@ -1144,6 +1834,7 @@ def test_structured_json_parser_is_bounded_and_classifies_usage():
         "fatal": False,
         "turn_completed": True,
         "usage_tokens": 7,
+        "failure_category": None,
     }
     assert fatal["fatal"] is True
     assert oversized["fatal"] is True
