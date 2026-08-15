@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -949,52 +950,231 @@ def test_pr_audit_and_terminal_append_uncertainty_never_republishes(tmp_path: Pa
     )
 
 
-def test_windows_native_codex_executable_is_preferred_and_bound(
+def _configure_windows_candidate_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path]:
+    local_app_data = tmp_path / "local-app-data"
+    program_files = tmp_path / "program-files"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    return local_app_data / "OpenAI" / "Codex" / "bin", program_files
+
+
+def _no_windows_path_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: None)
+
+
+def test_windowsapps_codex_is_never_selected_or_version_preflighted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    native = tmp_path / "native" / "codex.exe"
-    _write_windows_executable(native)
-    shim = tmp_path / "npm" / "codex.cmd"
-    shim.parent.mkdir(parents=True)
-    shim.write_text("arbitrary shim text is never parsed", encoding="utf-8")
-    monkeypatch.setattr(
-        runner_module.shutil,
-        "which",
-        lambda name: str(native) if name == "codex.exe" else str(shim),
+    _per_user_root, program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
     )
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: pytest.fail("package discovery must not replace a safe PATH native"),
+    packaged = (
+        program_files
+        / "WindowsApps"
+        / "OpenAI.Codex_package"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    _write_windows_executable(packaged)
+
+    def fake_which(name: str) -> str | None:
+        return str(packaged) if name in {"codex.exe", "codex"} else None
+
+    preflighted: list[CodexLaunchSpec] = []
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
     )
 
-    spec = runner_module._resolve_windows_codex_launch_spec()
+    assert spec is None
+    assert preflighted == []
+    assert runner_module._is_windows_apps_path(packaged)
+
+
+def test_windows_direct_per_user_codex_is_runnable_and_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = per_user_root / "codex.exe"
+    _write_windows_executable(native)
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
+    )
 
     assert spec is not None
     assert spec.kind == "native_exe"
     assert spec.argv_prefix == (str(native.resolve()),)
     assert runner_module._codex_launch_spec_is_current(spec)
+    assert preflighted == [spec]
 
 
-def test_windows_bare_codex_lookup_result_is_reused_as_native_prefix(
+def test_windows_hashed_per_user_codex_is_runnable_and_selected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    native = tmp_path / "codex.exe"
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = per_user_root / "version-or-hash" / "codex.exe"
+    _write_windows_executable(native)
+    _no_windows_path_tools(monkeypatch)
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
+
+    assert spec is not None
+    assert spec.kind == "native_exe"
+    assert spec.argv_prefix == (str(native.resolve()),)
+
+
+def test_unrunnable_direct_per_user_candidate_falls_back_to_hashed_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    direct = per_user_root / "codex.exe"
+    hashed = per_user_root / "working-child" / "codex.exe"
+    _write_windows_executable(direct)
+    _write_windows_executable(hashed)
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    def preflight(candidate: CodexLaunchSpec) -> GateResult:
+        preflighted.append(candidate)
+        return GateResult(
+            candidate.argv_prefix == (str(hashed.resolve()),),
+            "bounded",
+        )
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=preflight
+    )
+
+    assert spec is not None
+    assert spec.argv_prefix == (str(hashed.resolve()),)
+    assert [candidate.argv_prefix for candidate in preflighted] == [
+        (str(direct.resolve()),),
+        (str(hashed.resolve()),),
+    ]
+
+
+def test_broken_windowsapps_candidate_never_blocks_working_per_user_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    per_user = per_user_root / "codex.exe"
+    packaged = program_files / "WindowsApps" / "package" / "codex.exe"
+    _write_windows_executable(per_user)
+    _write_windows_executable(packaged)
+
+    def fake_which(name: str) -> str | None:
+        return str(packaged) if name in {"codex.exe", "codex"} else None
+
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+    selection_preflights: list[CodexLaunchSpec] = []
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            selection_preflights.append(candidate)
+            or GateResult(True, "runtime_ready")
+        )
+    )
+    assert spec is not None
+    assert spec.argv_prefix == (str(per_user.resolve()),)
+    assert selection_preflights == [spec]
+
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: spec,
+    )
+    runtime_preflights: list[CodexLaunchSpec] = []
+    monkeypatch.setattr(
+        service,
+        "_version_preflight",
+        lambda candidate: (
+            runtime_preflights.append(candidate)
+            or GateResult(True, "runtime_ready")
+        ),
+    )
+    assert service.runtime_gate() == GateResult(True, "runtime_ready")
+    assert runtime_preflights == [spec]
+
+
+def test_multiple_hashed_per_user_candidates_choose_newest_then_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    older = per_user_root / "old" / "codex.exe"
+    newer_z = per_user_root / "z-new" / "codex.exe"
+    newer_a = per_user_root / "a-new" / "codex.exe"
+    for candidate in (older, newer_z, newer_a):
+        _write_windows_executable(candidate)
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer_z, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(newer_a, ns=(2_000_000_000, 2_000_000_000))
+    _no_windows_path_tools(monkeypatch)
+    preflighted: list[CodexLaunchSpec] = []
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda candidate: (
+            preflighted.append(candidate) or GateResult(True, "runtime_ready")
+        )
+    )
+
+    assert spec is not None
+    assert spec.argv_prefix == (str(newer_a.resolve()),)
+    assert preflighted == [spec]
+
+
+def test_safe_standalone_path_native_is_accepted_after_per_user_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
+    )
+    native = tmp_path / "standalone" / "codex.exe"
     _write_windows_executable(native)
 
     def fake_which(name: str) -> str | None:
-        return str(native) if name == "codex" else None
+        return str(native) if name in {"codex.exe", "codex"} else None
 
     monkeypatch.setattr(runner_module.shutil, "which", fake_which)
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: pytest.fail("bare native result must be reused before fallback"),
-    )
 
-    spec = runner_module._resolve_windows_codex_launch_spec()
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
 
     assert spec is not None
     assert spec.kind == "native_exe"
@@ -1005,6 +1185,7 @@ def test_windows_npm_shim_derives_shell_free_node_launcher_without_parsing_shim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    _configure_windows_candidate_roots(tmp_path, monkeypatch)
     npm_root = tmp_path / "npm"
     shim = npm_root / "codex.cmd"
     shim.parent.mkdir(parents=True)
@@ -1023,13 +1204,10 @@ def test_windows_npm_shim_derives_shell_free_node_launcher_without_parsing_shim(
         }.get(name)
 
     monkeypatch.setattr(runner_module.shutil, "which", fake_which)
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: (),
-    )
 
-    spec = runner_module._resolve_windows_codex_launch_spec()
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+    )
 
     assert spec is not None
     assert spec.kind == "npm_node_launcher"
@@ -1043,6 +1221,7 @@ def test_windows_npm_launch_rejects_missing_required_file(
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
 ):
+    _configure_windows_candidate_roots(tmp_path, monkeypatch)
     npm_root = tmp_path / "npm"
     shim = npm_root / "codex.cmd"
     shim.parent.mkdir(parents=True)
@@ -1063,53 +1242,81 @@ def test_windows_npm_launch_rejects_missing_required_file(
         }.get(name)
 
     monkeypatch.setattr(runner_module.shutil, "which", fake_which)
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: (),
+
+    assert (
+        runner_module._resolve_windows_codex_launch_spec(
+            version_preflight=lambda _candidate: GateResult(True, "runtime_ready")
+        )
+        is None
     )
 
-    assert runner_module._resolve_windows_codex_launch_spec() is None
 
-
-def test_windows_native_resolution_rejects_nonfile_and_ambiguous_packages(
+def test_all_per_user_candidates_fail_then_runnable_npm_fallback_is_selected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    nonfile = tmp_path / "codex.exe"
-    nonfile.mkdir()
-    monkeypatch.setattr(
-        runner_module.shutil,
-        "which",
-        lambda name: str(nonfile) if name == "codex.exe" else None,
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
     )
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: (),
-    )
-    assert runner_module._resolve_windows_codex_launch_spec() is None
+    per_user = per_user_root / "codex.exe"
+    _write_windows_executable(per_user)
+    npm_root = tmp_path / "npm"
+    shim = npm_root / "codex.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("never parsed", encoding="utf-8")
+    launcher = npm_root / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("launcher", encoding="utf-8")
+    node = tmp_path / "node" / "node.exe"
+    _write_windows_executable(node)
 
-    first = tmp_path / "package-one" / "codex.exe"
-    second = tmp_path / "package-two" / "codex.exe"
-    _write_windows_executable(first)
-    _write_windows_executable(second)
-    first_identity = runner_module._launch_file_identity(
-        first,
-        require_windows_exe=True,
+    def fake_which(name: str) -> str | None:
+        return {"codex.cmd": str(shim), "node.exe": str(node)}.get(name)
+
+    preflighted_kinds: list[str] = []
+    monkeypatch.setattr(runner_module.shutil, "which", fake_which)
+
+    def preflight(candidate: CodexLaunchSpec) -> GateResult:
+        preflighted_kinds.append(candidate.kind)
+        return GateResult(candidate.kind == "npm_node_launcher", "bounded")
+
+    spec = runner_module._resolve_windows_codex_launch_spec(
+        version_preflight=preflight
     )
-    second_identity = runner_module._launch_file_identity(
-        second,
-        require_windows_exe=True,
+
+    assert spec is not None
+    assert spec.kind == "npm_node_launcher"
+    assert preflighted_kinds == ["native_exe", "npm_node_launcher"]
+
+
+def test_every_windows_candidate_preflight_failure_is_bounded_and_path_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    per_user_root, _program_files = _configure_windows_candidate_roots(
+        tmp_path,
+        monkeypatch,
     )
-    assert first_identity is not None and second_identity is not None
-    monkeypatch.setattr(runner_module.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(
-        runner_module,
-        "_windows_packaged_codex_identities",
-        lambda: (first_identity, second_identity),
+    private_child_name = "private-hashed-child"
+    candidate = per_user_root / private_child_name / "codex.exe"
+    _write_windows_executable(candidate)
+    _no_windows_path_tools(monkeypatch)
+    service = SystemCodexPilotServices(
+        tmp_path,
+        launch_spec_resolver=lambda: runner_module._resolve_windows_codex_launch_spec(
+            version_preflight=lambda _candidate: GateResult(
+                False,
+                "codex_launch_failed",
+            )
+        ),
     )
-    assert runner_module._resolve_windows_codex_launch_spec() is None
+
+    result = service.runtime_gate()
+
+    assert result == GateResult(False, "codex_launch_spec_unavailable")
+    assert str(tmp_path) not in repr(result)
+    assert private_child_name not in repr(result)
 
 
 def test_launch_resolution_rejects_symlink_candidate(
@@ -1535,6 +1742,7 @@ def test_process_launch_failure_is_bounded_and_does_not_leak_path(
         ("error: unexpected argument '--bad'", "codex_cli_argument_or_config_rejected"),
         ("authentication required; login required", "codex_authentication_unavailable"),
         ("Windows sandbox initialization failed", "windows_sandbox_failed"),
+        ("stream disconnected before completion", "codex_transport_unavailable"),
         ("bounded generic failure", "codex_nonzero_exit"),
     ],
 )

@@ -20,11 +20,6 @@ from io import TextIOBase
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
 
-try:
-    import winreg
-except ImportError:  # pragma: no cover - unavailable outside Windows
-    winreg = None
-
 from phoenix_office.core import (
     compose_codex_pilot_initial_claim_bundle,
     prepare_codex_pilot_initial_claim_commit,
@@ -1121,28 +1116,7 @@ class SystemCodexPilotServices:
         return self._codex_launch_spec
 
     def _version_preflight(self, spec: CodexLaunchSpec) -> GateResult:
-        if not _codex_launch_spec_is_current(spec):
-            return GateResult(False, "codex_launch_spec_changed")
-        try:
-            completed = subprocess.run(
-                [*spec.argv_prefix, "--version"],
-                cwd=self._repository_path,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                shell=False,
-                timeout=30,
-                env=_codex_worker_environment(),
-            )
-        except OSError:
-            return GateResult(False, "codex_launch_failed")
-        except subprocess.TimeoutExpired:
-            return GateResult(False, "codex_version_check_failed")
-        if completed.returncode != 0:
-            return GateResult(False, "codex_version_check_failed")
-        if not _codex_launch_spec_is_current(spec):
-            return GateResult(False, "codex_launch_spec_changed")
-        return GateResult(True, "runtime_ready")
+        return _codex_version_preflight(spec, cwd=self._repository_path)
 
     def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
         runtime = self.runtime_gate()
@@ -1909,53 +1883,177 @@ def _resolve_codex_launch_spec() -> CodexLaunchSpec | None:
     )
 
 
-def _resolve_windows_codex_launch_spec() -> CodexLaunchSpec | None:
+def _codex_version_preflight(
+    spec: CodexLaunchSpec,
+    *,
+    cwd: Path | None,
+) -> GateResult:
+    if not _codex_launch_spec_is_current(spec):
+        return GateResult(False, "codex_launch_spec_changed")
+    try:
+        completed = subprocess.run(
+            [*spec.argv_prefix, "--version"],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            timeout=30,
+            env=_codex_worker_environment(),
+        )
+    except OSError:
+        return GateResult(False, "codex_launch_failed")
+    except subprocess.TimeoutExpired:
+        return GateResult(False, "codex_version_check_failed")
+    if completed.returncode != 0:
+        return GateResult(False, "codex_version_check_failed")
+    if not _codex_launch_spec_is_current(spec):
+        return GateResult(False, "codex_launch_spec_changed")
+    return GateResult(True, "runtime_ready")
+
+
+def _resolve_windows_codex_launch_spec(
+    *,
+    version_preflight: Callable[[CodexLaunchSpec], GateResult] | None = None,
+) -> CodexLaunchSpec | None:
+    """Select the first runnable spec in one deterministic candidate order.
+
+    The exact per-user ``bin/codex.exe`` wins when runnable. Otherwise direct
+    child candidates are ordered by newest executable mtime, then by stable
+    case-folded child name. A safe standalone PATH executable follows those
+    per-user candidates, and the shell-free npm/node topology is last.
+    """
+    preflight = version_preflight or (
+        lambda spec: _codex_version_preflight(spec, cwd=None)
+    )
     native_text = shutil.which("codex.exe")
-    bare_text = None if native_text is not None else shutil.which("codex")
+    bare_text = shutil.which("codex")
+    shim_text = shutil.which("codex.cmd")
+    node_text = shutil.which("node.exe")
+
+    candidates = list(
+        _windows_native_codex_launch_specs(
+            native_text=native_text,
+            bare_text=bare_text,
+        )
+    )
+    npm_spec = _windows_npm_codex_launch_spec(
+        shim_text=shim_text,
+        bare_text=bare_text,
+        node_text=node_text,
+    )
+    if npm_spec is not None:
+        candidates.append(npm_spec)
+
+    for candidate in candidates:
+        result = preflight(candidate)
+        if result.passed and _codex_launch_spec_is_current(candidate):
+            return candidate
+    return None
+
+
+def _windows_native_codex_launch_specs(
+    *,
+    native_text: str | None,
+    bare_text: str | None,
+) -> tuple[CodexLaunchSpec, ...]:
+    identities = list(_windows_per_user_codex_identities())
+    path_text = native_text
     if (
-        native_text is None
+        path_text is None
         and bare_text is not None
         and Path(bare_text).suffix.casefold() == ".exe"
     ):
-        native_text = bare_text
-    if native_text is not None:
-        native_path = Path(native_text)
-        if not _is_windows_app_execution_alias(native_path):
-            native_identity = _launch_file_identity(
-                native_path,
-                require_windows_exe=True,
-            )
-            if native_identity is None:
-                return None
-            return CodexLaunchSpec(
-                (str(native_identity.path),),
-                "native_exe",
-                (native_identity,),
-            )
-
-    packaged_identities = _windows_packaged_codex_identities()
-    if len(packaged_identities) > 1:
-        return None
-    if len(packaged_identities) == 1:
-        identity = packaged_identities[0]
-        return CodexLaunchSpec(
+        path_text = bare_text
+    if path_text is not None:
+        path_candidate = Path(path_text)
+        if not _is_windows_apps_path(path_candidate):
+            path_identity = _windows_codex_executable_identity(path_candidate)
+            if path_identity is not None:
+                known_paths = {str(item.path).casefold() for item in identities}
+                if str(path_identity.path).casefold() not in known_paths:
+                    identities.append(path_identity)
+    return tuple(
+        CodexLaunchSpec(
             (str(identity.path),),
             "native_exe",
             (identity,),
         )
+        for identity in identities
+    )
 
-    shim_text = shutil.which("codex.cmd")
+
+def _windows_per_user_codex_identities() -> tuple[CodexLaunchFileIdentity, ...]:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return ()
+    root = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+    if not root.is_absolute():
+        return ()
+
+    direct = _windows_codex_executable_identity(root / "codex.exe", root=root)
+    hashed: list[CodexLaunchFileIdentity] = []
+    try:
+        children = tuple(root.iterdir())
+    except OSError:
+        children = ()
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+        except OSError:
+            continue
+        identity = _windows_codex_executable_identity(
+            child / "codex.exe",
+            root=root,
+        )
+        if identity is not None:
+            hashed.append(identity)
+    hashed.sort(
+        key=lambda identity: (
+            -identity.modified_ns,
+            identity.path.parent.name.casefold(),
+            identity.path.parent.name,
+        )
+    )
+    return ((direct,) if direct is not None else ()) + tuple(hashed)
+
+
+def _windows_codex_executable_identity(
+    path: Path,
+    *,
+    root: Path | None = None,
+) -> CodexLaunchFileIdentity | None:
+    identity = _launch_file_identity(path, require_windows_exe=True)
+    if identity is None or identity.path.name.casefold() != "codex.exe":
+        return None
+    if root is not None and not _path_is_within(identity.path, root):
+        return None
+    if _is_windows_apps_path(identity.path):
+        return None
+    return identity
+
+
+def _windows_npm_codex_launch_spec(
+    *,
+    shim_text: str | None,
+    bare_text: str | None,
+    node_text: str | None,
+) -> CodexLaunchSpec | None:
     if (
         shim_text is None
         and bare_text is not None
         and Path(bare_text).suffix.casefold() == ".cmd"
     ):
         shim_text = bare_text
-    if shim_text is None:
+    if shim_text is None or node_text is None:
         return None
-    shim_path = Path(shim_text)
-    shim_identity = _launch_file_identity(shim_path)
-    if shim_identity is None or shim_identity.path.suffix.casefold() != ".cmd":
+    shim_identity = _launch_file_identity(Path(shim_text))
+    if (
+        shim_identity is None
+        or shim_identity.path.suffix.casefold() != ".cmd"
+        or _is_windows_apps_path(shim_identity.path)
+    ):
         return None
     launcher_path = (
         shim_identity.path.parent
@@ -1966,80 +2064,22 @@ def _resolve_windows_codex_launch_spec() -> CodexLaunchSpec | None:
         / "codex.js"
     )
     launcher_identity = _launch_file_identity(launcher_path)
-    if launcher_identity is None:
-        return None
-    try:
-        launcher_identity.path.relative_to(shim_identity.path.parent)
-    except ValueError:
-        return None
-    node_text = shutil.which("node.exe")
-    if node_text is None:
+    if launcher_identity is None or not _path_is_within(
+        launcher_identity.path,
+        shim_identity.path.parent,
+    ):
         return None
     node_identity = _launch_file_identity(
         Path(node_text),
         require_windows_exe=True,
     )
-    if node_identity is None or _is_windows_app_execution_alias(node_identity.path):
+    if node_identity is None or _is_windows_apps_path(node_identity.path):
         return None
     return CodexLaunchSpec(
         (str(node_identity.path), str(launcher_identity.path)),
         "npm_node_launcher",
         (node_identity, launcher_identity, shim_identity),
     )
-
-
-def _windows_packaged_codex_identities() -> tuple[CodexLaunchFileIdentity, ...]:
-    if os.name != "nt" or winreg is None:
-        return ()
-    program_files = os.environ.get("ProgramFiles")
-    if not program_files:
-        return ()
-    packages_root = Path(program_files) / "WindowsApps"
-    registry_path = (
-        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion"
-        r"\AppModel\Repository\Packages"
-    )
-    try:
-        repository_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path)
-    except OSError:
-        return ()
-    package_names: list[str] = []
-    with repository_key:
-        index = 0
-        while True:
-            try:
-                package_name = winreg.EnumKey(repository_key, index)
-            except OSError:
-                break
-            index += 1
-            if package_name.startswith("OpenAI.Codex_"):
-                package_names.append(package_name)
-    identities: dict[str, CodexLaunchFileIdentity] = {}
-    for package_name in sorted(package_names):
-        try:
-            package_key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                f"{registry_path}\\{package_name}",
-            )
-            with package_key:
-                package_root_value, _value_type = winreg.QueryValueEx(
-                    package_key,
-                    "PackageRootFolder",
-                )
-        except OSError:
-            continue
-        if not isinstance(package_root_value, str):
-            continue
-        package_root = Path(package_root_value)
-        if not _path_is_within(package_root, packages_root):
-            continue
-        identity = _launch_file_identity(
-            package_root / "app" / "resources" / "codex.exe",
-            require_windows_exe=True,
-        )
-        if identity is not None:
-            identities[str(identity.path).casefold()] = identity
-    return tuple(identities[key] for key in sorted(identities))
 
 
 def _launch_file_identity(
@@ -2107,14 +2147,22 @@ def _codex_launch_spec_is_current(spec: CodexLaunchSpec) -> bool:
     return spec.argv_prefix == expected_prefix
 
 
-def _is_windows_app_execution_alias(path: Path) -> bool:
+def _is_windows_apps_path(path: Path) -> bool:
+    folded_parts = tuple(part.casefold() for part in path.parts)
+    for index in range(1, len(folded_parts)):
+        if (
+            folded_parts[index] == "windowsapps"
+            and folded_parts[index - 1] in {"program files", "microsoft"}
+        ):
+            return True
+    roots: list[Path] = []
     local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return False
-    return _path_is_within(
-        path,
-        Path(local_app_data) / "Microsoft" / "WindowsApps",
-    )
+    if local_app_data:
+        roots.append(Path(local_app_data) / "Microsoft" / "WindowsApps")
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        roots.append(Path(program_files) / "WindowsApps")
+    return any(_path_is_within(path, root) for root in roots)
 
 
 def _path_is_within(path: Path, parent: Path) -> bool:
@@ -2329,6 +2377,18 @@ def _bounded_codex_diagnostic_category(value: str) -> str | None:
         )
     ):
         return "windows_sandbox_failed"
+    if any(
+        marker in lowered
+        for marker in (
+            "connection failed",
+            "failed to connect",
+            "network error",
+            "reconnecting",
+            "request failed",
+            "stream disconnected",
+        )
+    ):
+        return "codex_transport_unavailable"
     return None
 
 
@@ -2341,6 +2401,7 @@ def _codex_failure_category(
         "codex_cli_argument_or_config_rejected",
         "codex_authentication_unavailable",
         "windows_sandbox_failed",
+        "codex_transport_unavailable",
     ):
         if category in observed:
             return category
