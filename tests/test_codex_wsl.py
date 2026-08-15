@@ -25,13 +25,67 @@ from phoenix_office.dev.codex_wsl import (
     WslCodexWorker,
     WslExecutionResult,
     WslGateResult,
+    WslInvocationControl,
     WslPlatformSpec,
+    WslProcessStopResult,
     apply_shadow_patch,
     build_windows_snapshot,
     validate_snapshot_archive,
     validate_transfer_paths,
     windows_snapshot_matches,
 )
+
+
+class _FakeModelProcess:
+    def __init__(
+        self,
+        outcome: tuple[str, str] | BaseException,
+        *,
+        returncode: int = 0,
+    ) -> None:
+        self.outcome = outcome
+        self.returncode = returncode
+
+    def communicate(self, *_args, **_kwargs) -> tuple[str, str]:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.returncode = -15
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    def wait(self, timeout: int | None = None) -> int:
+        del timeout
+        return self.returncode
+
+
+def _controlled_model_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process: _FakeModelProcess,
+) -> tuple[WslCodexWorker, WslInvocationControl]:
+    worker = WslCodexWorker(tmp_path, host_popen=lambda *_args, **_kwargs: process)
+    worker._runtime_spec = _runtime(tmp_path / "runtime")
+    control = WslInvocationControl(
+        "a" * 32,
+        PurePosixPath("/home/worker/.local/share/phoenix/task-064-invocations/a"),
+        PurePosixPath(
+            "/home/worker/.local/share/phoenix/task-064-invocations/a/"
+            "invocation.json"
+        ),
+    )
+    monkeypatch.setattr(worker, "_runtime_is_current", lambda _spec: True)
+    monkeypatch.setattr(worker, "_prepare_invocation_control", lambda _platform: control)
+    monkeypatch.setattr(worker, "_await_invocation_ready", lambda _control: True)
+    monkeypatch.setattr(worker, "_prove_linux_invocation_exit", lambda _control: True)
+    monkeypatch.setattr(worker, "_cleanup_invocation_control", lambda _control: True)
+    return worker, control
 
 
 def _git(cwd: Path, *arguments: str) -> str:
@@ -499,6 +553,338 @@ def test_shadow_success_requires_cleanup(
     assert not worker.last_transfer_evidence.temp_cleanup
 
 
+def test_model_cancellation_terminates_target_and_proves_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    process = _FakeModelProcess(KeyboardInterrupt())
+    worker, control = _controlled_model_worker(tmp_path, monkeypatch, process)
+    observed: list[WslInvocationControl] = []
+
+    def stop_target(_process, selected):
+        observed.append(selected)
+        return WslProcessStopResult(True, True, True, True)
+
+    monkeypatch.setattr(worker, "_stop_targeted_linux_invocation", stop_target)
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result == WslExecutionResult("cancelled", "wsl_codex_cancelled")
+    assert result.worker_exit_proved
+    assert messages == ()
+    assert observed == [control]
+
+
+@pytest.mark.parametrize(
+    "stop_result",
+    [
+        pytest.param(
+            WslProcessStopResult(True, False, False, False),
+            id="target-termination-failed",
+        ),
+        pytest.param(
+            WslProcessStopResult(True, True, False, False),
+            id="target-exit-proof-failed",
+        ),
+    ],
+)
+def test_model_cancellation_fails_closed_when_process_control_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_result: WslProcessStopResult,
+):
+    worker, _control = _controlled_model_worker(
+        tmp_path,
+        monkeypatch,
+        _FakeModelProcess(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_stop_targeted_linux_invocation",
+        lambda *_args: stop_result,
+    )
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result.category == "wsl_process_control_uncertain"
+    assert result.status == "failed"
+    assert not result.worker_exit_proved
+    assert messages == ()
+
+
+def test_model_timeout_requires_target_exit_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    process = _FakeModelProcess(subprocess.TimeoutExpired("wsl", 30))
+    worker, _control = _controlled_model_worker(tmp_path, monkeypatch, process)
+    monkeypatch.setattr(
+        worker,
+        "_stop_targeted_linux_invocation",
+        lambda *_args: WslProcessStopResult(True, True, True, True),
+    )
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result == WslExecutionResult("timed_out", "wsl_codex_timed_out")
+    assert result.worker_exit_proved
+    assert messages == ()
+
+
+def test_model_timeout_fails_closed_when_target_exit_is_unproved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    process = _FakeModelProcess(subprocess.TimeoutExpired("wsl", 30))
+    worker, _control = _controlled_model_worker(tmp_path, monkeypatch, process)
+    monkeypatch.setattr(
+        worker,
+        "_stop_targeted_linux_invocation",
+        lambda *_args: WslProcessStopResult(True, True, False, False),
+    )
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result.category == "wsl_process_control_uncertain"
+    assert result.status == "failed"
+    assert not result.worker_exit_proved
+    assert messages == ()
+
+
+def test_invocation_start_audit_failure_terminates_and_proves_target_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker, _control = _controlled_model_worker(
+        tmp_path,
+        monkeypatch,
+        _FakeModelProcess(("", "")),
+    )
+    stops: list[bool] = []
+
+    def stop_target(*_args):
+        stops.append(True)
+        return WslProcessStopResult(True, True, True, True)
+
+    monkeypatch.setattr(worker, "_stop_targeted_linux_invocation", stop_target)
+
+    def audit_failure():
+        raise RuntimeError("bounded injected audit failure")
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=audit_failure,
+    )
+
+    assert result == WslExecutionResult("failed", "invocation_start_audit_failed")
+    assert result.worker_exit_proved
+    assert stops == [True]
+    assert messages == ()
+
+
+def test_model_success_still_requires_guest_exit_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stdout = '{"type":"turn.completed","usage":{"total_tokens":7}}\n'
+    worker, _control = _controlled_model_worker(
+        tmp_path,
+        monkeypatch,
+        _FakeModelProcess((stdout, "")),
+    )
+    proofs: list[bool] = []
+    cleanups: list[bool] = []
+    monkeypatch.setattr(
+        worker,
+        "_prove_linux_invocation_exit",
+        lambda _control: proofs.append(True) or True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_cleanup_invocation_control",
+        lambda _control: cleanups.append(True) or True,
+    )
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result == WslExecutionResult("succeeded", "wsl_codex_completed", 7)
+    assert proofs == [True]
+    assert cleanups == [True]
+    assert messages == ()
+
+
+def test_targeted_stop_uses_only_selected_invocation_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    process = _FakeModelProcess(("", ""))
+    worker, target = _controlled_model_worker(tmp_path, monkeypatch, process)
+    unrelated = WslInvocationControl(
+        "b" * 32,
+        PurePosixPath("/home/worker/.local/share/phoenix/task-064-invocations/b"),
+        PurePosixPath(
+            "/home/worker/.local/share/phoenix/task-064-invocations/b/"
+            "invocation.json"
+        ),
+    )
+    targeted: list[WslInvocationControl] = []
+    monkeypatch.setattr(wsl_module, "_terminate_process", lambda _process: True)
+    monkeypatch.setattr(
+        worker,
+        "_terminate_linux_invocation",
+        lambda control: targeted.append(control) or True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_prove_linux_invocation_exit",
+        lambda control: targeted.append(control) or True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_cleanup_invocation_control",
+        lambda control: targeted.append(control) or True,
+    )
+
+    result = worker._stop_targeted_linux_invocation(process, target)
+
+    assert result == WslProcessStopResult(True, True, True, True)
+    assert targeted == [target, target, target]
+    assert unrelated not in targeted
+
+
+def test_shadow_cleanup_is_withheld_when_worker_exit_is_unproved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, head = _repository(tmp_path)
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    worker = WslCodexWorker(canonical)
+    worker._runtime_spec = _runtime(tmp_path / "runtime")
+    worker._runtime_result = WslGateResult(True, "wsl_codex_runtime_ready")
+    worker._capability_result = WslCapabilityResult(
+        True,
+        "wsl_workspace_write_capability_proved",
+    )
+    monkeypatch.setattr(worker, "_runtime_is_current", lambda _spec: True)
+    monkeypatch.setattr(worker, "_create_native_workspace", lambda _purpose: "/home/w/shadow")
+    monkeypatch.setattr(worker, "_extract_snapshot", lambda *_args: True)
+    monkeypatch.setattr(worker, "_initialize_snapshot_git", lambda *_args: True)
+    monkeypatch.setattr(worker, "_shadow_git_control_state", lambda *_args: ("a", "b", "c"))
+    monkeypatch.setattr(
+        worker,
+        "_run_model",
+        lambda **_kwargs: (
+            WslExecutionResult(
+                "failed",
+                "wsl_process_control_uncertain",
+                worker_exit_proved=False,
+            ),
+            (),
+        ),
+    )
+    monkeypatch.setattr(
+        wsl_module,
+        "windows_snapshot_matches",
+        lambda *_args: pytest.fail("Windows diff checks must wait for worker exit"),
+    )
+    cleanups: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_cleanup_native_workspace",
+        lambda workspace: cleanups.append(workspace) or True,
+    )
+
+    result = worker.invoke_codex(
+        windows_worktree=repository,
+        base_commit_sha=head,
+        allowed_paths=("docs/status.md",),
+        prompt="bounded prompt",
+        timeout_seconds=30,
+        on_started=lambda: None,
+    )
+
+    assert result.category == "wsl_process_control_uncertain"
+    assert not result.worker_exit_proved
+    assert cleanups == []
+    assert not worker.last_transfer_evidence.temp_cleanup
+
+
+def test_transport_cleanup_and_git_status_wait_for_worker_exit_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    monkeypatch.setattr(
+        worker,
+        "authentication_gate",
+        lambda: WslGateResult(True, "wsl_codex_authenticated"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_create_native_workspace",
+        lambda _purpose: "/home/worker/transport",
+    )
+    monkeypatch.setattr(worker, "_initialize_shadow_git", lambda *_args: True)
+    monkeypatch.setattr(
+        worker,
+        "_run_model",
+        lambda **_kwargs: (
+            WslExecutionResult(
+                "failed",
+                "wsl_process_control_uncertain",
+                worker_exit_proved=False,
+            ),
+            (),
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_wsl_text",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Git status must not race an unproved worker exit"
+        ),
+    )
+    cleanups: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "_cleanup_native_workspace",
+        lambda workspace: cleanups.append(workspace) or True,
+    )
+
+    result = worker.transport_gate(30)
+
+    assert result == WslGateResult(False, "wsl_process_control_uncertain")
+    assert cleanups == []
+
+
 def test_worker_source_has_no_shell_wrappers_or_unsafe_fallbacks():
     source = inspect.getsource(wsl_module)
 
@@ -509,6 +895,10 @@ def test_worker_source_has_no_shell_wrappers_or_unsafe_fallbacks():
     assert "dangerously-bypass-approvals-and-sandbox" not in source
     assert "--yolo" not in source
     assert "wsl.exe --terminate" not in source
+    assert '"--terminate"' not in source
+    assert "pkill" not in source
+    assert "killall" not in source
+    assert "os.killpg(pgid" in source
     assert "0.147.0" not in inspect.getsource(WslCodexWorker)
     assert "shutil.which(\"codex\")" not in source
 
@@ -530,6 +920,72 @@ def test_fake_snapshot_cannot_expose_archive_in_repr():
     snapshot = WindowsSnapshot(b"private archive bytes", "bounded", ("docs/a.md",))
 
     assert "private archive bytes" not in repr(snapshot)
+
+
+@pytest.mark.skipif(
+    os.environ.get("PHOENIX_RUN_REAL_WSL_CANCELLATION_SMOKE") != "1",
+    reason="real targeted WSL cancellation smoke is opt-in",
+)
+def test_real_targeted_wsl_cancellation_preserves_unrelated_process(tmp_path: Path):
+    worker = WslCodexWorker(tmp_path)
+    runtime = worker.runtime_gate()
+    assert runtime.passed, runtime
+    spec = worker._runtime_spec
+    assert spec is not None
+    controls: list[tuple[WslInvocationControl, subprocess.Popen[str]]] = []
+
+    def launch_sleep() -> tuple[WslInvocationControl, subprocess.Popen[str]]:
+        control = worker._prepare_invocation_control(spec.platform)
+        assert control is not None
+        command = (
+            "/usr/bin/timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            "120s",
+            "/usr/bin/python3",
+            "-c",
+            "import time; time.sleep(120)",
+        )
+        argv = worker._wsl_argv(
+            spec.platform,
+            worker._supervised_linux_argv(control, command),
+        )
+        kwargs: dict[str, object] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "shell": False,
+            "env": wsl_module._sanitized_wsl_host_environment(),
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        process = subprocess.Popen(list(argv), **kwargs)
+        controls.append((control, process))
+        assert worker._await_invocation_ready(control)
+        return control, process
+
+    try:
+        target_control, target_process = launch_sleep()
+        unrelated_control, unrelated_process = launch_sleep()
+
+        stopped = worker._stop_targeted_linux_invocation(
+            target_process,
+            target_control,
+        )
+        unrelated_ready = worker._run_invocation_control(
+            "ready",
+            unrelated_control,
+        )
+
+        assert stopped == WslProcessStopResult(True, True, True, True)
+        assert unrelated_ready is not None
+        assert unrelated_ready.returncode == 0
+        assert unrelated_process.poll() is None
+    finally:
+        for control, process in reversed(controls):
+            if process.poll() is None:
+                stopped = worker._stop_targeted_linux_invocation(process, control)
+                assert stopped.exit_proved
 
 
 @pytest.mark.skipif(

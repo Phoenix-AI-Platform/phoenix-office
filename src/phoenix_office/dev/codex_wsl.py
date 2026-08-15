@@ -11,7 +11,9 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -25,6 +27,9 @@ WSL_RUNTIME_PREFIX: Final = PurePosixPath(
 WSL_RUNTIME_DESCRIPTOR: Final = "frozen-runtime.json"
 WSL_WORKSPACE_ROOT: Final = PurePosixPath(
     ".local/share/phoenix/task-064-workspaces"
+)
+WSL_INVOCATION_ROOT: Final = PurePosixPath(
+    ".local/share/phoenix/task-064-invocations"
 )
 CAPABILITY_MARKER_NAME: Final = "codex-workspace-write-marker.md"
 CAPABILITY_MARKER_CONTENT: Final = "PHOENIX_CODEX_WORKSPACE_WRITE_PROBE_V1\n"
@@ -74,6 +79,138 @@ _SENSITIVE_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:password|secret|token)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(?:[A-Z]:\\Users\\|/home/|/Users/)[^\s`]+"),
 )
+_LINUX_INVOCATION_SUPERVISOR: Final = """\
+import json
+import os
+import sys
+
+record_path, invocation_id, *command = sys.argv[1:]
+if not command or len(invocation_id) != 32:
+    raise SystemExit(70)
+pid = os.getpid()
+if os.getpgrp() != pid:
+    os.setsid()
+pgid = os.getpgrp()
+if pid != pgid:
+    raise SystemExit(71)
+with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+    fields = stream.read().rsplit(")", 1)[1].split()
+start_ticks = int(fields[19])
+payload = json.dumps(
+    {
+        "invocation_id": invocation_id,
+        "pid": pid,
+        "pgid": pgid,
+        "start_ticks": start_ticks,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("ascii")
+temporary = f"{record_path}.tmp"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+descriptor = os.open(temporary, flags, 0o600)
+try:
+    os.write(descriptor, payload)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, record_path)
+directory = os.open(os.path.dirname(record_path), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+os.execv(command[0], command)
+"""
+_LINUX_INVOCATION_CONTROL: Final = """\
+import json
+import os
+import signal
+import sys
+import time
+
+mode, record_path, expected_id = sys.argv[1:]
+
+def process_stat(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stream:
+            fields = stream.read().rsplit(")", 1)[1].split()
+        return int(fields[2]), int(fields[19])
+    except (FileNotFoundError, OSError, ValueError, IndexError):
+        return None
+
+def group_members(pgid):
+    members = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        raise SystemExit(21)
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        observed = process_stat(int(entry))
+        if observed is not None and observed[0] == pgid:
+            members.append(int(entry))
+    return members
+
+try:
+    with open(record_path, encoding="ascii") as stream:
+        record = json.load(stream)
+except FileNotFoundError:
+    raise SystemExit(22)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(21)
+try:
+    invocation_id = record["invocation_id"]
+    pid = int(record["pid"])
+    pgid = int(record["pgid"])
+    start_ticks = int(record["start_ticks"])
+except (ValueError, KeyError, TypeError):
+    raise SystemExit(21)
+if invocation_id != expected_id or pid <= 1 or pgid != pid or start_ticks <= 0:
+    raise SystemExit(21)
+
+leader = process_stat(pid)
+if leader is not None and leader != (pgid, start_ticks):
+    raise SystemExit(21)
+
+if mode == "ready":
+    raise SystemExit(0 if leader == (pgid, start_ticks) else 20)
+
+if mode == "terminate":
+    if group_members(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            raise SystemExit(20)
+        for _ in range(20):
+            if not group_members(pgid):
+                break
+            time.sleep(0.1)
+        if group_members(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                raise SystemExit(20)
+            for _ in range(30):
+                if not group_members(pgid):
+                    break
+                time.sleep(0.1)
+    raise SystemExit(0 if not group_members(pgid) else 20)
+
+if mode == "prove-exited":
+    for _ in range(30):
+        if not group_members(pgid):
+            raise SystemExit(0)
+        time.sleep(0.1)
+    raise SystemExit(20)
+
+raise SystemExit(21)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +236,31 @@ class WslExecutionResult:
     status: str
     category: str
     usage_tokens: int | None = None
+    worker_exit_proved: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class WslInvocationControl:
+    invocation_id: str = field(repr=False)
+    directory: PurePosixPath = field(repr=False)
+    record_path: PurePosixPath = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WslProcessStopResult:
+    client_stopped: bool
+    target_terminated: bool
+    exit_proved: bool
+    control_cleaned: bool
+
+
+def _targeted_stop_confirmed(result: WslProcessStopResult) -> bool:
+    return (
+        result.client_stopped
+        and result.target_terminated
+        and result.exit_proved
+        and result.control_cleaned
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +317,7 @@ class WslTransferEvidence:
 HostRun = Callable[..., subprocess.CompletedProcess[object]]
 HostPopen = Callable[..., subprocess.Popen[str]]
 WslExecutableResolver = Callable[[], Path | None]
+InvocationIdFactory = Callable[[], str]
 
 
 class WslCodexWorker:
@@ -167,6 +330,7 @@ class WslCodexWorker:
         wsl_executable_resolver: WslExecutableResolver | None = None,
         host_run: HostRun | None = None,
         host_popen: HostPopen | None = None,
+        invocation_id_factory: InvocationIdFactory | None = None,
     ) -> None:
         self._canonical_repository = Path(canonical_repository)
         self._wsl_executable_resolver = (
@@ -174,6 +338,7 @@ class WslCodexWorker:
         )
         self._host_run = host_run or subprocess.run
         self._host_popen = host_popen or subprocess.Popen
+        self._invocation_id_factory = invocation_id_factory or (lambda: uuid.uuid4().hex)
         self._resolution_attempted = False
         self._runtime_spec: WslCodexRuntimeSpec | None = None
         self._runtime_result: WslGateResult | None = None
@@ -274,6 +439,7 @@ class WslCodexWorker:
             self._transport_result = result
             return result
         cleanup = False
+        execution: WslExecutionResult | None = None
         try:
             if not self._initialize_shadow_git(
                 workspace,
@@ -292,26 +458,38 @@ class WslCodexWorker:
                     timeout_seconds=min(timeout_seconds, 120),
                     on_started=lambda: None,
                 )
-                status = self._run_wsl_text(
-                    self._require_platform(),
-                    ("/usr/bin/git", "-C", workspace, "status", "--porcelain=v1"),
-                    timeout=30,
-                )
-                passed = (
-                    execution.status == "succeeded"
-                    and "".join(messages).strip() == sentinel
-                    and status is not None
-                    and status.returncode == 0
-                    and not status.stdout.strip()
-                )
-                result = WslGateResult(
-                    passed,
-                    "wsl_codex_transport_ready"
-                    if passed
-                    else "wsl_codex_transport_unavailable",
-                )
+                if not execution.worker_exit_proved:
+                    result = WslGateResult(False, "wsl_process_control_uncertain")
+                else:
+                    status = self._run_wsl_text(
+                        self._require_platform(),
+                        (
+                            "/usr/bin/git",
+                            "-C",
+                            workspace,
+                            "status",
+                            "--porcelain=v1",
+                        ),
+                        timeout=30,
+                    )
+                    passed = (
+                        execution.status == "succeeded"
+                        and "".join(messages).strip() == sentinel
+                        and status is not None
+                        and status.returncode == 0
+                        and not status.stdout.strip()
+                    )
+                    result = WslGateResult(
+                        passed,
+                        "wsl_codex_transport_ready"
+                        if passed
+                        else "wsl_codex_transport_unavailable",
+                    )
         finally:
-            cleanup = self._cleanup_native_workspace(workspace)
+            if execution is None or execution.worker_exit_proved:
+                cleanup = self._cleanup_native_workspace(workspace)
+        if execution is not None and not execution.worker_exit_proved:
+            result = WslGateResult(False, "wsl_process_control_uncertain")
         if not cleanup and result.passed:
             result = WslGateResult(False, "wsl_temp_cleanup_failed")
         self._transport_result = result
@@ -334,13 +512,24 @@ class WslCodexWorker:
             self._capability_result = result
             return result
         cleanup = False
+        marker_exit_proved = True
         try:
-            marker_passed = self._model_marker_probe(
+            marker_passed, marker_exit_proved = self._model_marker_probe(
                 marker_workspace,
                 min(timeout_seconds, 180),
             )
         finally:
-            cleanup = self._cleanup_native_workspace(marker_workspace)
+            if marker_exit_proved:
+                cleanup = self._cleanup_native_workspace(marker_workspace)
+        if not marker_exit_proved:
+            result = WslCapabilityResult(
+                False,
+                "wsl_process_control_uncertain",
+                native_workspace=True,
+                temp_cleanup=False,
+            )
+            self._capability_result = result
+            return result
         if not marker_passed or not cleanup:
             result = WslCapabilityResult(
                 False,
@@ -426,6 +615,7 @@ class WslCodexWorker:
             return WslExecutionResult("failed", "wsl_shadow_workspace_unavailable")
         evidence = WslTransferEvidence(shadow_workspace_created=True)
         result = WslExecutionResult("failed", "wsl_shadow_transfer_failed")
+        execution: WslExecutionResult | None = None
         try:
             if not self._extract_snapshot(
                 shadow,
@@ -450,7 +640,9 @@ class WslCodexWorker:
                         timeout_seconds=timeout_seconds,
                         on_started=on_started,
                     )
-                    if not windows_snapshot_matches(
+                    if not execution.worker_exit_proved:
+                        result = execution
+                    elif not windows_snapshot_matches(
                         worktree,
                         base_commit_sha,
                         snapshot,
@@ -502,9 +694,13 @@ class WslCodexWorker:
                                         execution.usage_tokens,
                                     )
         finally:
-            cleanup = self._cleanup_native_workspace(shadow)
+            cleanup = False
+            if execution is None or execution.worker_exit_proved:
+                cleanup = self._cleanup_native_workspace(shadow)
             evidence = _replace_transfer_evidence(evidence, temp_cleanup=cleanup)
             self._last_transfer_evidence = evidence
+        if execution is not None and not execution.worker_exit_proved:
+            return execution
         if not cleanup:
             return WslExecutionResult(
                 "failed",
@@ -865,7 +1061,10 @@ class WslCodexWorker:
                 (),
             )
         timeout_value = max(1, int(timeout_seconds))
-        linux_argv = (
+        control = self._prepare_invocation_control(spec.platform)
+        if control is None:
+            return WslExecutionResult("failed", "wsl_codex_launch_failed"), ()
+        codex_argv = (
             "/usr/bin/timeout",
             "--signal=TERM",
             "--kill-after=5s",
@@ -894,6 +1093,7 @@ class WslCodexWorker:
             "never",
             "-",
         )
+        linux_argv = self._supervised_linux_argv(control, codex_argv)
         argv = self._wsl_argv(spec.platform, linux_argv)
         popen_kwargs: dict[str, object] = {
             "stdin": subprocess.PIPE,
@@ -909,29 +1109,152 @@ class WslCodexWorker:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             process = self._host_popen(list(argv), **popen_kwargs)
+        except KeyboardInterrupt:
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
         except (OSError, ValueError):
+            self._cleanup_invocation_control(control)
+            return WslExecutionResult("failed", "wsl_codex_launch_failed"), ()
+        try:
+            ready = self._await_invocation_ready(control)
+        except KeyboardInterrupt:
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("cancelled", "wsl_codex_cancelled"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
+        if not ready:
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if not _targeted_stop_confirmed(stopped):
+                return (
+                    WslExecutionResult(
+                        "failed",
+                        "wsl_process_control_uncertain",
+                        worker_exit_proved=False,
+                    ),
+                    (),
+                )
             return WslExecutionResult("failed", "wsl_codex_launch_failed"), ()
         try:
             on_started()
+        except KeyboardInterrupt:
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("cancelled", "wsl_codex_cancelled"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
         except Exception:
-            _terminate_process(process)
-            return WslExecutionResult("failed", "invocation_start_audit_failed"), ()
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return (
+                    WslExecutionResult(
+                        "failed",
+                        "invocation_start_audit_failed",
+                    ),
+                    (),
+                )
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
         try:
             stdout, stderr = process.communicate(
                 prompt,
                 timeout=timeout_value + 15,
             )
         except subprocess.TimeoutExpired:
-            _terminate_process(process)
-            return WslExecutionResult("failed", "wsl_process_control_uncertain"), ()
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("timed_out", "wsl_codex_timed_out"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
         except KeyboardInterrupt:
-            terminated = _terminate_process(process)
-            category = "wsl_codex_cancelled" if terminated else "wsl_process_control_uncertain"
-            status = "cancelled" if terminated else "failed"
-            return WslExecutionResult(status, category), ()
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("cancelled", "wsl_codex_cancelled"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
         except (BrokenPipeError, OSError):
-            _terminate_process(process)
-            return WslExecutionResult("failed", "wsl_codex_stream_failed"), ()
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("failed", "wsl_codex_stream_failed"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
+        try:
+            exit_proved = self._prove_linux_invocation_exit(control)
+        except KeyboardInterrupt:
+            stopped = self._stop_targeted_linux_invocation(process, control)
+            if _targeted_stop_confirmed(stopped):
+                return WslExecutionResult("cancelled", "wsl_codex_cancelled"), ()
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
+        if not exit_proved:
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_process_control_uncertain",
+                    worker_exit_proved=False,
+                ),
+                (),
+            )
+        try:
+            control_cleaned = self._cleanup_invocation_control(control)
+        except KeyboardInterrupt:
+            return WslExecutionResult("cancelled", "wsl_codex_cancelled"), ()
+        if not control_cleaned:
+            return (
+                WslExecutionResult(
+                    "failed",
+                    "wsl_invocation_control_cleanup_failed",
+                ),
+                (),
+            )
         if len(stdout.encode("utf-8")) > MAX_COMMAND_OUTPUT_BYTES:
             return WslExecutionResult("failed", "wsl_codex_output_too_large"), ()
         if len(stderr.encode("utf-8")) > MAX_COMMAND_OUTPUT_BYTES:
@@ -971,12 +1294,169 @@ class WslCodexWorker:
             tuple(parsed["messages"]),
         )
 
-    def _model_marker_probe(self, workspace: str, timeout_seconds: int) -> bool:
+    def _prepare_invocation_control(
+        self,
+        platform: WslPlatformSpec,
+    ) -> WslInvocationControl | None:
+        invocation_id = self._invocation_id_factory()
+        if not isinstance(invocation_id, str) or re.fullmatch(
+            r"[0-9a-f]{32}",
+            invocation_id,
+        ) is None:
+            return None
+        root = platform.linux_home / WSL_INVOCATION_ROOT
+        directory = root / invocation_id
+        if not _safe_native_linux_path(str(directory)):
+            return None
+        commands = (
+            ("/usr/bin/mkdir", "-p", str(root)),
+            ("/usr/bin/chmod", "700", str(root)),
+            ("/usr/bin/mkdir", "--mode=700", str(directory)),
+        )
+        for command in commands:
+            completed = self._run_wsl_text(platform, command, timeout=30)
+            if completed is None or completed.returncode != 0:
+                return None
+        return WslInvocationControl(
+            invocation_id,
+            directory,
+            directory / "invocation.json",
+        )
+
+    @staticmethod
+    def _supervised_linux_argv(
+        control: WslInvocationControl,
+        command: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return (
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "/usr/bin/python3",
+            "-c",
+            _LINUX_INVOCATION_SUPERVISOR,
+            str(control.record_path),
+            control.invocation_id,
+            *command,
+        )
+
+    def _await_invocation_ready(
+        self,
+        control: WslInvocationControl,
+    ) -> bool:
+        for _ in range(30):
+            completed = self._run_invocation_control("ready", control)
+            if completed is not None and completed.returncode == 0:
+                return True
+            if completed is not None and completed.returncode != 22:
+                return False
+            time.sleep(0.1)
+        return False
+
+    def _run_invocation_control(
+        self,
+        mode: str,
+        control: WslInvocationControl,
+    ) -> subprocess.CompletedProcess[str] | None:
+        if mode not in {"ready", "terminate", "prove-exited"}:
+            return None
+        return self._run_wsl_text(
+            self._require_platform(),
+            (
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "LANG=C.UTF-8",
+                "LC_ALL=C.UTF-8",
+                "/usr/bin/python3",
+                "-c",
+                _LINUX_INVOCATION_CONTROL,
+                mode,
+                str(control.record_path),
+                control.invocation_id,
+            ),
+            timeout=15,
+        )
+
+    def _terminate_linux_invocation(
+        self,
+        control: WslInvocationControl,
+    ) -> bool:
+        completed = self._run_invocation_control("terminate", control)
+        return completed is not None and completed.returncode == 0
+
+    def _prove_linux_invocation_exit(
+        self,
+        control: WslInvocationControl,
+    ) -> bool:
+        completed = self._run_invocation_control("prove-exited", control)
+        return completed is not None and completed.returncode == 0
+
+    def _stop_targeted_linux_invocation(
+        self,
+        process: subprocess.Popen[str],
+        control: WslInvocationControl,
+    ) -> WslProcessStopResult:
+        client_stopped = False
+        target_terminated = False
+        exit_proved = False
+        control_cleaned = False
+        try:
+            client_stopped = _terminate_process(process)
+            target_terminated = self._terminate_linux_invocation(control)
+            exit_proved = target_terminated and self._prove_linux_invocation_exit(
+                control
+            )
+            if not client_stopped and exit_proved:
+                client_stopped = _terminate_process(process)
+            control_cleaned = exit_proved and self._cleanup_invocation_control(control)
+        except KeyboardInterrupt:
+            pass
+        return WslProcessStopResult(
+            client_stopped,
+            target_terminated,
+            exit_proved,
+            control_cleaned,
+        )
+
+    def _cleanup_invocation_control(
+        self,
+        control: WslInvocationControl,
+    ) -> bool:
+        platform = self._require_platform()
+        root = str(platform.linux_home / WSL_INVOCATION_ROOT)
+        directory = str(control.directory)
+        if not _path_within_posix(directory, root):
+            return False
+        removed = self._run_wsl_text(
+            platform,
+            ("/usr/bin/rm", "-rf", "--", directory),
+            timeout=30,
+        )
+        exists = self._run_wsl_text(
+            platform,
+            ("/usr/bin/test", "-e", directory),
+            timeout=30,
+        )
+        return (
+            removed is not None
+            and removed.returncode == 0
+            and exists is not None
+            and exists.returncode != 0
+        )
+
+    def _model_marker_probe(
+        self,
+        workspace: str,
+        timeout_seconds: int,
+    ) -> tuple[bool, bool]:
         if not self._initialize_shadow_git(
             workspace,
             "Synthetic Phoenix Codex workspace-write probe.\n",
         ):
-            return False
+            return False, True
         prompt = (
             f"Create exactly one file named {CAPABILITY_MARKER_NAME} in the current "
             "repository. Its exact UTF-8 content must be "
@@ -990,7 +1470,7 @@ class WslCodexWorker:
             on_started=lambda: None,
         )
         if execution.status != "succeeded":
-            return False
+            return False, execution.worker_exit_proved
         marker = self._run_wsl_bytes(
             self._require_platform(),
             ("/usr/bin/cat", f"{workspace}/{CAPABILITY_MARKER_NAME}"),
@@ -1014,7 +1494,8 @@ class WslCodexWorker:
             and marker.stdout == CAPABILITY_MARKER_CONTENT.encode("utf-8")
             and status_result is not None
             and status_result.returncode == 0
-            and status_result.stdout.strip() == f"?? {CAPABILITY_MARKER_NAME}"
+            and status_result.stdout.strip() == f"?? {CAPABILITY_MARKER_NAME}",
+            True,
         )
 
     def _direct_marker_probe(self, workspace: str) -> bool:
