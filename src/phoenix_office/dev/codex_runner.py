@@ -15,10 +15,15 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import TextIOBase
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - unavailable outside Windows
+    winreg = None
 
 from phoenix_office.core import (
     compose_codex_pilot_initial_claim_bundle,
@@ -94,6 +99,22 @@ class GateResult:
 class CapabilityProbeResult:
     passed: bool
     category: str
+
+
+@dataclass(frozen=True, slots=True)
+class CodexLaunchFileIdentity:
+    path: Path = field(repr=False)
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class CodexLaunchSpec:
+    argv_prefix: tuple[str, ...] = field(repr=False)
+    kind: str
+    file_identities: tuple[CodexLaunchFileIdentity, ...] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +260,7 @@ class LifecycleClaimStore(Protocol):
 
 ClaimStoreFactory = Callable[[Path], LifecycleClaimStore]
 AttemptIdFactory = Callable[[], str]
+CodexLaunchSpecResolver = Callable[[], CodexLaunchSpec | None]
 
 
 def render_reviewed_codex_invocation_prompt(
@@ -994,8 +1016,25 @@ class _LifecycleStartFailure(RuntimeError):
 class SystemCodexPilotServices:
     """System Git, Codex, validation, and GitHub adapter."""
 
-    def __init__(self, repository_path: Path) -> None:
+    def __init__(
+        self,
+        repository_path: Path,
+        *,
+        launch_spec_resolver: CodexLaunchSpecResolver = (
+            lambda: _resolve_codex_launch_spec()
+        ),
+    ) -> None:
         self._repository_path = Path(repository_path)
+        self._launch_spec_resolver = launch_spec_resolver
+        self._launch_spec_resolution_attempted = False
+        self._codex_launch_spec: CodexLaunchSpec | None = None
+        self._runtime_preflight_result: GateResult | None = None
+
+    @property
+    def codex_launch_spec_kind(self) -> str | None:
+        """Return only the bounded launch topology, never resolved paths."""
+        spec = self._codex_launch_spec
+        return spec.kind if spec is not None else None
 
     def preclaim_repository_gate(self, authorization: dict[str, object]) -> GateResult:
         checks = [
@@ -1057,19 +1096,71 @@ class SystemCodexPilotServices:
         return self._collision_gate(authorization)
 
     def runtime_gate(self) -> GateResult:
-        if shutil.which("codex") is None:
-            return GateResult(False, "codex_unavailable")
+        if self._runtime_preflight_result is not None:
+            return self._runtime_preflight_result
         if os.name not in {"nt", "posix"}:
-            return GateResult(False, "process_control_unavailable")
+            result = GateResult(False, "process_control_unavailable")
+            self._runtime_preflight_result = result
+            return result
+        spec = self._resolved_codex_launch_spec()
+        if spec is None:
+            result = GateResult(False, "codex_launch_spec_unavailable")
+            self._runtime_preflight_result = result
+            return result
+        result = self._version_preflight(spec)
+        self._runtime_preflight_result = result
+        return result
+
+    def _resolved_codex_launch_spec(self) -> CodexLaunchSpec | None:
+        if not self._launch_spec_resolution_attempted:
+            self._launch_spec_resolution_attempted = True
+            try:
+                self._codex_launch_spec = self._launch_spec_resolver()
+            except Exception:
+                self._codex_launch_spec = None
+        return self._codex_launch_spec
+
+    def _version_preflight(self, spec: CodexLaunchSpec) -> GateResult:
+        if not _codex_launch_spec_is_current(spec):
+            return GateResult(False, "codex_launch_spec_changed")
+        try:
+            completed = subprocess.run(
+                [*spec.argv_prefix, "--version"],
+                cwd=self._repository_path,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                timeout=30,
+                env=_codex_worker_environment(),
+            )
+        except OSError:
+            return GateResult(False, "codex_launch_failed")
+        except subprocess.TimeoutExpired:
+            return GateResult(False, "codex_version_check_failed")
+        if completed.returncode != 0:
+            return GateResult(False, "codex_version_check_failed")
+        if not _codex_launch_spec_is_current(spec):
+            return GateResult(False, "codex_launch_spec_changed")
         return GateResult(True, "runtime_ready")
 
     def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+        runtime = self.runtime_gate()
+        if not runtime.passed:
+            return CapabilityProbeResult(False, runtime.category)
+        spec = self._codex_launch_spec
+        if spec is None:
+            return CapabilityProbeResult(False, "codex_launch_spec_unavailable")
         try:
-            return self._capability_probe(timeout_seconds)
+            return self._capability_probe(timeout_seconds, spec)
         except Exception:
             return CapabilityProbeResult(False, "capability_probe_unavailable")
 
-    def _capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+    def _capability_probe(
+        self,
+        timeout_seconds: int,
+        launch_spec: CodexLaunchSpec,
+    ) -> CapabilityProbeResult:
         with tempfile.TemporaryDirectory(prefix="phoenix-codex-capability-") as temporary:
             workspace = Path(temporary)
             setup_commands = [
@@ -1113,6 +1204,7 @@ class SystemCodexPilotServices:
                 prompt=prompt,
                 timeout_seconds=timeout_seconds,
                 on_started=lambda: None,
+                launch_spec=launch_spec,
             )
             if execution.status == "timed_out":
                 return CapabilityProbeResult(False, "capability_probe_timed_out")
@@ -1199,11 +1291,18 @@ class SystemCodexPilotServices:
         timeout_seconds: int,
         on_started: Callable[[], None],
     ) -> CodexExecutionResult:
+        runtime = self.runtime_gate()
+        if not runtime.passed:
+            return CodexExecutionResult("failed", runtime.category)
+        spec = self._codex_launch_spec
+        if spec is None:
+            return CodexExecutionResult("failed", "codex_launch_spec_unavailable")
         return self._run_codex_process(
             workspace=worktree.path,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
             on_started=on_started,
+            launch_spec=spec,
         )
 
     def inspect_diff(
@@ -1656,13 +1755,16 @@ class SystemCodexPilotServices:
         prompt: str,
         timeout_seconds: int,
         on_started: Callable[[], None],
+        launch_spec: CodexLaunchSpec,
     ) -> CodexExecutionResult:
-        argv = _codex_exec_argv(workspace)
+        if not _codex_launch_spec_is_current(launch_spec):
+            return CodexExecutionResult("failed", "codex_launch_spec_changed")
+        argv = _codex_exec_argv(launch_spec, workspace)
         popen_kwargs: dict[str, object] = {
             "cwd": workspace,
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
-            "stderr": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
             "text": True,
             "encoding": "utf-8",
             "errors": "replace",
@@ -1687,7 +1789,7 @@ class SystemCodexPilotServices:
                 else "process_tree_termination_uncertain"
             )
             return CodexExecutionResult("failed", category)
-        if process.stdin is None or process.stdout is None:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
             terminated = _terminate_process_tree(process)
             category = (
                 "codex_pipe_unavailable"
@@ -1695,13 +1797,18 @@ class SystemCodexPilotServices:
                 else "process_tree_termination_uncertain"
             )
             return CodexExecutionResult("failed", category)
-        with ThreadPoolExecutor(max_workers=1) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             reader = executor.submit(_consume_codex_jsonl_stream, process.stdout)
+            diagnostic_reader = executor.submit(
+                _consume_codex_diagnostic_stream,
+                process.stderr,
+            )
             try:
                 process.stdin.write(prompt)
                 process.stdin.close()
                 process.wait(timeout=timeout_seconds)
                 parsed = reader.result(timeout=10)
+                diagnostic_category = diagnostic_reader.result(timeout=10)
             except subprocess.TimeoutExpired:
                 if _terminate_process_tree(process):
                     return CodexExecutionResult("timed_out", "codex_timed_out")
@@ -1727,13 +1834,21 @@ class SystemCodexPilotServices:
         if process.returncode != 0:
             return CodexExecutionResult(
                 "failed",
-                "codex_nonzero_exit",
+                _codex_failure_category(
+                    parsed["failure_category"],
+                    diagnostic_category,
+                    fallback="codex_nonzero_exit",
+                ),
                 parsed["usage_tokens"],
             )
         if parsed["fatal"] or not parsed["turn_completed"]:
             return CodexExecutionResult(
                 "failed",
-                "codex_structured_failure",
+                _codex_failure_category(
+                    parsed["failure_category"],
+                    diagnostic_category,
+                    fallback="codex_structured_failure",
+                ),
                 parsed["usage_tokens"],
             )
         return CodexExecutionResult(
@@ -1778,12 +1893,251 @@ class SystemCodexPilotServices:
             return None
 
 
-def _codex_exec_argv(workspace: Path) -> list[str]:
-    return [
-        "codex",
-        "exec",
+def _resolve_codex_launch_spec() -> CodexLaunchSpec | None:
+    if os.name == "nt":
+        return _resolve_windows_codex_launch_spec()
+    candidate_text = shutil.which("codex")
+    if candidate_text is None:
+        return None
+    identity = _launch_file_identity(Path(candidate_text))
+    if identity is None:
+        return None
+    return CodexLaunchSpec(
+        (str(identity.path),),
+        "native_exe",
+        (identity,),
+    )
+
+
+def _resolve_windows_codex_launch_spec() -> CodexLaunchSpec | None:
+    native_text = shutil.which("codex.exe")
+    bare_text = None if native_text is not None else shutil.which("codex")
+    if (
+        native_text is None
+        and bare_text is not None
+        and Path(bare_text).suffix.casefold() == ".exe"
+    ):
+        native_text = bare_text
+    if native_text is not None:
+        native_path = Path(native_text)
+        if not _is_windows_app_execution_alias(native_path):
+            native_identity = _launch_file_identity(
+                native_path,
+                require_windows_exe=True,
+            )
+            if native_identity is None:
+                return None
+            return CodexLaunchSpec(
+                (str(native_identity.path),),
+                "native_exe",
+                (native_identity,),
+            )
+
+    packaged_identities = _windows_packaged_codex_identities()
+    if len(packaged_identities) > 1:
+        return None
+    if len(packaged_identities) == 1:
+        identity = packaged_identities[0]
+        return CodexLaunchSpec(
+            (str(identity.path),),
+            "native_exe",
+            (identity,),
+        )
+
+    shim_text = shutil.which("codex.cmd")
+    if (
+        shim_text is None
+        and bare_text is not None
+        and Path(bare_text).suffix.casefold() == ".cmd"
+    ):
+        shim_text = bare_text
+    if shim_text is None:
+        return None
+    shim_path = Path(shim_text)
+    shim_identity = _launch_file_identity(shim_path)
+    if shim_identity is None or shim_identity.path.suffix.casefold() != ".cmd":
+        return None
+    launcher_path = (
+        shim_identity.path.parent
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "bin"
+        / "codex.js"
+    )
+    launcher_identity = _launch_file_identity(launcher_path)
+    if launcher_identity is None:
+        return None
+    try:
+        launcher_identity.path.relative_to(shim_identity.path.parent)
+    except ValueError:
+        return None
+    node_text = shutil.which("node.exe")
+    if node_text is None:
+        return None
+    node_identity = _launch_file_identity(
+        Path(node_text),
+        require_windows_exe=True,
+    )
+    if node_identity is None or _is_windows_app_execution_alias(node_identity.path):
+        return None
+    return CodexLaunchSpec(
+        (str(node_identity.path), str(launcher_identity.path)),
+        "npm_node_launcher",
+        (node_identity, launcher_identity, shim_identity),
+    )
+
+
+def _windows_packaged_codex_identities() -> tuple[CodexLaunchFileIdentity, ...]:
+    if os.name != "nt" or winreg is None:
+        return ()
+    program_files = os.environ.get("ProgramFiles")
+    if not program_files:
+        return ()
+    packages_root = Path(program_files) / "WindowsApps"
+    registry_path = (
+        r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion"
+        r"\AppModel\Repository\Packages"
+    )
+    try:
+        repository_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path)
+    except OSError:
+        return ()
+    package_names: list[str] = []
+    with repository_key:
+        index = 0
+        while True:
+            try:
+                package_name = winreg.EnumKey(repository_key, index)
+            except OSError:
+                break
+            index += 1
+            if package_name.startswith("OpenAI.Codex_"):
+                package_names.append(package_name)
+    identities: dict[str, CodexLaunchFileIdentity] = {}
+    for package_name in sorted(package_names):
+        try:
+            package_key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                f"{registry_path}\\{package_name}",
+            )
+            with package_key:
+                package_root_value, _value_type = winreg.QueryValueEx(
+                    package_key,
+                    "PackageRootFolder",
+                )
+        except OSError:
+            continue
+        if not isinstance(package_root_value, str):
+            continue
+        package_root = Path(package_root_value)
+        if not _path_is_within(package_root, packages_root):
+            continue
+        identity = _launch_file_identity(
+            package_root / "app" / "resources" / "codex.exe",
+            require_windows_exe=True,
+        )
+        if identity is not None:
+            identities[str(identity.path).casefold()] = identity
+    return tuple(identities[key] for key in sorted(identities))
+
+
+def _launch_file_identity(
+    path: Path,
+    *,
+    require_windows_exe: bool = False,
+) -> CodexLaunchFileIdentity | None:
+    if not path.is_absolute():
+        return None
+    try:
+        if path.is_symlink():
+            return None
+        path_stat = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if os.path.normcase(str(path)) != os.path.normcase(str(resolved)):
+        return None
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or bool(file_attributes & reparse_attribute)
+        or path_stat.st_size <= 0
+    ):
+        return None
+    if require_windows_exe:
+        if resolved.suffix.casefold() != ".exe":
+            return None
+        try:
+            with resolved.open("rb") as executable:
+                if executable.read(2) != b"MZ":
+                    return None
+        except OSError:
+            return None
+    return CodexLaunchFileIdentity(
+        resolved,
+        path_stat.st_dev,
+        path_stat.st_ino,
+        path_stat.st_size,
+        path_stat.st_mtime_ns,
+    )
+
+
+def _codex_launch_spec_is_current(spec: CodexLaunchSpec) -> bool:
+    if spec.kind not in {"native_exe", "npm_node_launcher"}:
+        return False
+    if not spec.argv_prefix or not spec.file_identities:
+        return False
+    for identity in spec.file_identities:
+        current = _launch_file_identity(
+            identity.path,
+            require_windows_exe=identity.path.suffix.casefold() == ".exe",
+        )
+        if current != identity:
+            return False
+    expected_prefix = (
+        (str(spec.file_identities[0].path),)
+        if spec.kind == "native_exe"
+        else (
+            str(spec.file_identities[0].path),
+            str(spec.file_identities[1].path),
+        )
+    )
+    return spec.argv_prefix == expected_prefix
+
+
+def _is_windows_app_execution_alias(path: Path) -> bool:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return False
+    return _path_is_within(
+        path,
+        Path(local_app_data) / "Microsoft" / "WindowsApps",
+    )
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    if not path.is_absolute() or not parent.is_absolute():
+        return False
+    try:
+        common = os.path.commonpath((str(path), str(parent)))
+    except ValueError:
+        return False
+    return os.path.normcase(common) == os.path.normcase(str(parent))
+
+
+def _codex_exec_argv(
+    launch_spec: CodexLaunchSpec,
+    workspace: Path,
+    *,
+    platform_name: str | None = None,
+) -> list[str]:
+    argv = [
+        *launch_spec.argv_prefix,
         "--ask-for-approval",
         "never",
+        "exec",
         "--sandbox",
         "workspace-write",
         "--ephemeral",
@@ -1796,8 +2150,11 @@ def _codex_exec_argv(workspace: Path) -> list[str]:
         "sandbox_workspace_write.network_access=false",
         "-c",
         'web_search="disabled"',
-        "-",
     ]
+    if (platform_name or os.name) == "nt":
+        argv.extend(("-c", "features.unified_exec=false"))
+    argv.append("-")
+    return argv
 
 
 def _codex_worker_environment() -> dict[str, str]:
@@ -1866,17 +2223,53 @@ def _consume_codex_jsonl_stream(stream: TextIOBase) -> dict[str, object]:
     return _parse_codex_jsonl_lines(iter(stream.readline, ""))
 
 
+def _consume_codex_diagnostic_stream(stream: TextIOBase) -> str | None:
+    category: str | None = None
+    for line_number, line in enumerate(iter(stream.readline, ""), start=1):
+        if line_number > MAX_JSONL_LINES or not isinstance(line, str):
+            break
+        if len(line.encode("utf-8", errors="replace")) > MAX_JSONL_LINE_BYTES:
+            break
+        category = _codex_failure_category(
+            category,
+            _bounded_codex_diagnostic_category(line),
+            fallback=None,
+        )
+    return category
+
+
 def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
     fatal = False
     turn_completed = False
     usage_tokens: int | None = None
+    failure_category: str | None = None
     if not hasattr(lines, "__iter__"):
-        return {"fatal": True, "turn_completed": False, "usage_tokens": None}
+        return {
+            "fatal": True,
+            "turn_completed": False,
+            "usage_tokens": None,
+            "failure_category": None,
+        }
     for line_number, line in enumerate(lines, start=1):
         if line_number > MAX_JSONL_LINES or not isinstance(line, str):
-            return {"fatal": True, "turn_completed": False, "usage_tokens": None}
+            return {
+                "fatal": True,
+                "turn_completed": False,
+                "usage_tokens": None,
+                "failure_category": failure_category,
+            }
         if len(line.encode("utf-8", errors="replace")) > MAX_JSONL_LINE_BYTES:
-            return {"fatal": True, "turn_completed": False, "usage_tokens": None}
+            return {
+                "fatal": True,
+                "turn_completed": False,
+                "usage_tokens": None,
+                "failure_category": failure_category,
+            }
+        failure_category = _codex_failure_category(
+            failure_category,
+            _bounded_codex_diagnostic_category(line),
+            fallback=None,
+        )
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
@@ -1895,7 +2288,63 @@ def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
         "fatal": fatal,
         "turn_completed": turn_completed,
         "usage_tokens": usage_tokens,
+        "failure_category": failure_category,
     }
+
+
+def _bounded_codex_diagnostic_category(value: str) -> str | None:
+    lowered = value.casefold()
+    if any(
+        marker in lowered
+        for marker in (
+            "unexpected argument",
+            "unrecognized option",
+            "unknown option",
+            "invalid value",
+            "configuration error",
+            "config error",
+        )
+    ):
+        return "codex_cli_argument_or_config_rejected"
+    if any(
+        marker in lowered
+        for marker in (
+            "authentication required",
+            "authentication unavailable",
+            "not logged in",
+            "login required",
+            "missing api key",
+            "unauthorized",
+            "http 401",
+        )
+    ):
+        return "codex_authentication_unavailable"
+    if any(
+        marker in lowered
+        for marker in (
+            "windows sandbox",
+            "sandbox initialization failed",
+            "sandbox setup failed",
+            "workspace-write sandbox failed",
+        )
+    ):
+        return "windows_sandbox_failed"
+    return None
+
+
+def _codex_failure_category(
+    *categories: object,
+    fallback: str | None,
+) -> str | None:
+    observed = {category for category in categories if isinstance(category, str)}
+    for category in (
+        "codex_cli_argument_or_config_rejected",
+        "codex_authentication_unavailable",
+        "windows_sandbox_failed",
+    ):
+        if category in observed:
+            return category
+    return fallback
 
 
 def _usage_tokens(value: object) -> int | None:
