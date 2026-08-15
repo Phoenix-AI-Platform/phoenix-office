@@ -12,13 +12,14 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from io import TextIOBase
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
+from urllib.parse import urlsplit
 
 from phoenix_office.core import (
     compose_codex_pilot_initial_claim_bundle,
@@ -39,7 +40,41 @@ MAX_JSONL_LINES: Final = 10_000
 MAX_JSONL_LINE_BYTES: Final = 1_000_000
 MAX_MARKDOWN_BYTES: Final = 1_000_000
 MAX_SYSTEM_OUTPUT_BYTES: Final = 2_000_000
+MAX_PROXY_ENV_VALUE_BYTES: Final = 4096
 VALIDATION_TIMEOUT_SECONDS: Final = 1800
+CODEX_BASE_ENVIRONMENT_NAMES: Final = (
+    "PATH",
+    "PATHEXT",
+    "SHELL",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "USERNAME",
+    "USERDOMAIN",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "PROGRAMDATA",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "POWERSHELL",
+    "PWSH",
+    "CODEX_HOME",
+    "HOME",
+    "WINDIR",
+)
+CODEX_PROXY_ENVIRONMENT_NAMES: Final = (
+    ("HTTP_PROXY", "http_proxy", True),
+    ("HTTPS_PROXY", "https_proxy", True),
+    ("NO_PROXY", "no_proxy", False),
+    ("ALL_PROXY", "all_proxy", True),
+)
 REQUIRED_PR_BODY_HEADINGS: Final = (
     "Summary",
     "Scope",
@@ -165,6 +200,9 @@ class CodexPilotSystem(Protocol):
         ...
 
     def runtime_gate(self) -> GateResult:
+        ...
+
+    def authentication_gate(self) -> GateResult:
         ...
 
     def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
@@ -424,6 +462,12 @@ class SupervisedCodexPilotRunner:
             return bounded_codex_pilot_run_result("runtime_gate_unavailable")
         if not runtime_gate.passed:
             return bounded_codex_pilot_run_result(runtime_gate.category)
+        try:
+            authentication_gate = self._system.authentication_gate()
+        except Exception:
+            return bounded_codex_pilot_run_result("codex_auth_preflight_failed")
+        if not authentication_gate.passed:
+            return bounded_codex_pilot_run_result(authentication_gate.category)
         try:
             capability = self._system.capability_probe(
                 min(int(authorization_data["timeout_seconds"]), 180)
@@ -1008,6 +1052,10 @@ class _LifecycleStartFailure(RuntimeError):
     """Internal signal used only to terminate a just-launched Codex child."""
 
 
+class _TransportEnvironmentError(ValueError):
+    """Internal signal for a malformed approved transport variable."""
+
+
 class SystemCodexPilotServices:
     """System Git, Codex, validation, and GitHub adapter."""
 
@@ -1024,6 +1072,7 @@ class SystemCodexPilotServices:
         self._launch_spec_resolution_attempted = False
         self._codex_launch_spec: CodexLaunchSpec | None = None
         self._runtime_preflight_result: GateResult | None = None
+        self._authentication_preflight_result: GateResult | None = None
 
     @property
     def codex_launch_spec_kind(self) -> str | None:
@@ -1118,10 +1167,28 @@ class SystemCodexPilotServices:
     def _version_preflight(self, spec: CodexLaunchSpec) -> GateResult:
         return _codex_version_preflight(spec, cwd=self._repository_path)
 
-    def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+    def _authentication_preflight(self, spec: CodexLaunchSpec) -> GateResult:
+        return _codex_authentication_preflight(spec, cwd=self._repository_path)
+
+    def authentication_gate(self) -> GateResult:
+        if self._authentication_preflight_result is not None:
+            return self._authentication_preflight_result
         runtime = self.runtime_gate()
         if not runtime.passed:
-            return CapabilityProbeResult(False, runtime.category)
+            self._authentication_preflight_result = runtime
+            return runtime
+        spec = self._codex_launch_spec
+        if spec is None:
+            result = GateResult(False, "codex_launch_spec_unavailable")
+        else:
+            result = self._authentication_preflight(spec)
+        self._authentication_preflight_result = result
+        return result
+
+    def capability_probe(self, timeout_seconds: int) -> CapabilityProbeResult:
+        authentication = self.authentication_gate()
+        if not authentication.passed:
+            return CapabilityProbeResult(False, authentication.category)
         spec = self._codex_launch_spec
         if spec is None:
             return CapabilityProbeResult(False, "codex_launch_spec_unavailable")
@@ -1899,7 +1966,7 @@ def _codex_version_preflight(
             stderr=subprocess.DEVNULL,
             shell=False,
             timeout=30,
-            env=_codex_worker_environment(),
+            env=_codex_worker_environment(include_transport=False),
         )
     except OSError:
         return GateResult(False, "codex_launch_failed")
@@ -1910,6 +1977,36 @@ def _codex_version_preflight(
     if not _codex_launch_spec_is_current(spec):
         return GateResult(False, "codex_launch_spec_changed")
     return GateResult(True, "runtime_ready")
+
+
+def _codex_authentication_preflight(
+    spec: CodexLaunchSpec,
+    *,
+    cwd: Path,
+) -> GateResult:
+    if not _codex_launch_spec_is_current(spec):
+        return GateResult(False, "codex_launch_spec_changed")
+    try:
+        environment = _codex_worker_environment()
+        completed = subprocess.run(
+            [*spec.argv_prefix, "login", "status"],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            timeout=30,
+            env=environment,
+        )
+    except _TransportEnvironmentError:
+        return GateResult(False, "codex_transport_environment_invalid")
+    except (OSError, subprocess.TimeoutExpired):
+        return GateResult(False, "codex_auth_preflight_failed")
+    if completed.returncode != 0:
+        return GateResult(False, "codex_authentication_unavailable")
+    if not _codex_launch_spec_is_current(spec):
+        return GateResult(False, "codex_launch_spec_changed")
+    return GateResult(True, "codex_authenticated")
 
 
 def _resolve_windows_codex_launch_spec(
@@ -2205,23 +2302,99 @@ def _codex_exec_argv(
     return argv
 
 
-def _codex_worker_environment() -> dict[str, str]:
-    allowed = {
-        "APPDATA",
-        "CODEX_HOME",
-        "HOME",
-        "LOCALAPPDATA",
-        "PATH",
-        "PATHEXT",
-        "SystemDrive",
-        "SystemRoot",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    return {key: value for key, value in os.environ.items() if key in allowed}
+def _codex_worker_environment(
+    source: Mapping[str, str] | None = None,
+    *,
+    include_transport: bool = True,
+    platform_name: str | None = None,
+) -> dict[str, str]:
+    ambient = os.environ if source is None else source
+    case_insensitive = (platform_name or os.name) == "nt"
+    environment: dict[str, str] = {}
+    for canonical in CODEX_BASE_ENVIRONMENT_NAMES:
+        observed = _matching_environment_values(
+            ambient,
+            canonical,
+            case_insensitive=case_insensitive,
+        )
+        if observed:
+            environment[canonical] = observed[0][1]
+    if not include_transport:
+        return environment
+
+    for canonical, lowercase, requires_url in CODEX_PROXY_ENVIRONMENT_NAMES:
+        observed = _matching_environment_values(
+            ambient,
+            canonical,
+            lowercase,
+            case_insensitive=case_insensitive,
+        )
+        for _name, value in observed:
+            _validate_transport_environment_value(
+                value,
+                requires_url=requires_url,
+            )
+        if not observed:
+            continue
+        environment[canonical] = observed[0][1]
+    return environment
+
+
+def _matching_environment_values(
+    ambient: Mapping[str, str],
+    canonical: str,
+    *aliases: str,
+    case_insensitive: bool,
+) -> list[tuple[str, str]]:
+    accepted = {canonical, *aliases}
+    accepted_folded = {name.casefold() for name in accepted}
+    observed = [
+        (name, value)
+        for name, value in ambient.items()
+        if name in accepted
+        or (case_insensitive and name.casefold() in accepted_folded)
+    ]
+    return sorted(
+        observed,
+        key=lambda item: (
+            item[0] != canonical,
+            item[0].casefold(),
+            item[0],
+        ),
+    )
+
+
+def _validate_transport_environment_value(
+    value: object,
+    *,
+    requires_url: bool,
+) -> None:
+    if not isinstance(value, str):
+        raise _TransportEnvironmentError
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as exc:
+        raise _TransportEnvironmentError from exc
+    if (
+        not value
+        or len(encoded) > MAX_PROXY_ENV_VALUE_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise _TransportEnvironmentError
+    if not requires_url:
+        return
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise _TransportEnvironmentError from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or any(character.isspace() for character in value)
+    ):
+        raise _TransportEnvironmentError
 
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> bool:
