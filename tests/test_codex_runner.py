@@ -429,6 +429,10 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
         "changed_paths": [ALLOWED_PATH],
         "validation_categories": ["passed", "passed", "passed"],
         "usage_category": "within_budget",
+        "observed_usage_tokens": 100,
+        "authorized_budget_tokens": 50_000,
+        "usage_overage_tokens": 0,
+        "usage_ratio_basis_points": 20,
         "timeout_category": "timeout_unknown",
         "cancellation_category": "cancellation_unknown",
     }
@@ -742,7 +746,7 @@ def test_process_failures_terminalize_without_publication(
 
 def test_observed_budget_excess_blocks_commit_push_and_pr(tmp_path: Path):
     system = FakeSystem(
-        execution=CodexExecutionResult("succeeded", "codex_completed", 50_001)
+        execution=CodexExecutionResult("succeeded", "codex_completed", 75_000)
     )
 
     result, database_path = _run(tmp_path, system)
@@ -750,12 +754,137 @@ def test_observed_budget_excess_blocks_commit_push_and_pr(tmp_path: Path):
     assert result["status"] == "failed"
     assert result["category"] == "budget_exceeded"
     assert result["usage_category"] == "budget_exceeded"
+    assert result["observed_usage_tokens"] == 75_000
+    assert result["authorized_budget_tokens"] == 50_000
+    assert result["usage_overage_tokens"] == 25_000
+    assert result["usage_ratio_basis_points"] == 15_000
     assert "diff" not in system.calls
+    assert "validation" not in system.calls
+    assert "commit" not in system.calls
+    assert "push" not in system.calls
+    assert "pull_request" not in system.calls
     lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
         ATTEMPT_ID,
         _authorization(),
     )
     assert lifecycle["snapshot"]["current_lifecycle_state"] == "failed"
+
+
+def test_known_within_budget_usage_reports_exact_bounded_telemetry(tmp_path: Path):
+    system = FakeSystem(
+        execution=CodexExecutionResult("succeeded", "codex_completed", 25_000)
+    )
+
+    result, _database_path = _run(tmp_path, system)
+
+    assert result["status"] == "success"
+    assert result["usage_category"] == "within_budget"
+    assert result["observed_usage_tokens"] == 25_000
+    assert result["authorized_budget_tokens"] == 50_000
+    assert result["usage_overage_tokens"] == 0
+    assert result["usage_ratio_basis_points"] == 5_000
+    assert all(
+        type(result[field]) is int
+        for field in (
+            "observed_usage_tokens",
+            "authorized_budget_tokens",
+            "usage_overage_tokens",
+            "usage_ratio_basis_points",
+        )
+    )
+    assert system.calls.count("invoke") == 1
+    assert system.calls.count("pull_request") == 1
+
+
+def test_usage_ratio_uses_deterministic_integer_floor_math(tmp_path: Path):
+    authorization = _authorization()
+    authorization["budget_ceiling"] = 3
+    system = FakeSystem(
+        execution=CodexExecutionResult("succeeded", "codex_completed", 1)
+    )
+
+    result, _database_path = _run(
+        tmp_path,
+        system,
+        authorization=authorization,
+    )
+
+    assert result["observed_usage_tokens"] == 1
+    assert result["authorized_budget_tokens"] == 3
+    assert result["usage_overage_tokens"] == 0
+    assert result["usage_ratio_basis_points"] == 3_333
+
+
+def test_unknown_usage_reports_only_null_numeric_telemetry(tmp_path: Path):
+    system = FakeSystem(
+        execution=CodexExecutionResult("succeeded", "codex_completed", None)
+    )
+
+    result, _database_path = _run(tmp_path, system)
+
+    assert result["usage_category"] == "usage_unknown"
+    assert result["observed_usage_tokens"] is None
+    assert result["authorized_budget_tokens"] is None
+    assert result["usage_overage_tokens"] is None
+    assert result["usage_ratio_basis_points"] is None
+
+
+@pytest.mark.parametrize(
+    "budget_ceiling",
+    [0, -1, True, runner_module.MAX_AUTHORIZED_BUDGET_TOKENS + 1],
+)
+def test_invalid_budget_fails_before_usage_ratio_math(
+    tmp_path: Path,
+    budget_ceiling: object,
+):
+    authorization = _authorization()
+    authorization["budget_ceiling"] = budget_ceiling
+    system = FakeSystem()
+
+    result, _database_path = _run(
+        tmp_path,
+        system,
+        authorization=authorization,
+    )
+
+    assert result["category"] == "preclaim_static_preflight_failed"
+    assert result["observed_usage_tokens"] is None
+    assert result["authorized_budget_tokens"] is None
+    assert result["usage_overage_tokens"] is None
+    assert result["usage_ratio_basis_points"] is None
+    assert system.calls == []
+
+
+def test_absurd_usage_is_sanitized_without_public_or_durable_expansion(
+    tmp_path: Path,
+):
+    absurd_usage = runner_module.MAX_OBSERVED_USAGE_TOKENS + 1
+    system = FakeSystem(
+        execution=CodexExecutionResult(
+            "succeeded",
+            "codex_completed",
+            absurd_usage,
+        )
+    )
+
+    result, database_path = _run(tmp_path, system)
+    serialized = json.dumps(result, sort_keys=True)
+
+    assert result["usage_category"] == "usage_unknown"
+    assert result["observed_usage_tokens"] is None
+    assert result["authorized_budget_tokens"] is None
+    assert result["usage_overage_tokens"] is None
+    assert result["usage_ratio_basis_points"] is None
+    assert str(absurd_usage) not in serialized
+    assert _handoff()["prompt"] not in serialized
+    assert "synthetic-worktree" not in serialized
+    assert "OPENAI_API_KEY" not in serialized
+    lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
+        ATTEMPT_ID,
+        _authorization(),
+    )
+    assert lifecycle["lifecycle_read_category"] == "read_success"
+    assert "observed_usage_tokens" not in lifecycle["snapshot"]
 
 
 @pytest.mark.parametrize(
@@ -2879,6 +3008,10 @@ def test_cli_run_emits_only_bounded_result(
                 "changed_paths": [],
                 "validation_categories": [],
                 "usage_category": "usage_unknown",
+                "observed_usage_tokens": None,
+                "authorized_budget_tokens": None,
+                "usage_overage_tokens": None,
+                "usage_ratio_basis_points": None,
                 "timeout_category": "timeout_unknown",
                 "cancellation_category": "cancellation_unknown",
             }
@@ -2900,6 +3033,10 @@ def test_cli_run_emits_only_bounded_result(
 
     assert exit_code == 1
     assert payload["category"] == "workspace_write_capability_unproved"
+    assert payload["observed_usage_tokens"] is None
+    assert payload["authorized_budget_tokens"] is None
+    assert payload["usage_overage_tokens"] is None
+    assert payload["usage_ratio_basis_points"] is None
     assert str(tmp_path) not in output
     assert handoff["prompt"] not in output
 
