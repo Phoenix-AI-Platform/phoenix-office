@@ -518,15 +518,16 @@ def test_codex_pilot_fingerprint_payload_uncertainty_fails_closed(mutation):
 
 
 @pytest.mark.parametrize(
-    ("runtime_kwargs", "expected"),
+    "runtime_kwargs",
     [
-        ({"executable_found": False}, "composite preflight blocked"),
-        ({"timeout_argv": ["codex", "--version"]}, "composite preflight blocked"),
-        ({"help_stdout": ""}, "composite preflight blocked"),
+        {"executable_found": False},
+        {"timeout_argv": ["codex", "--version"]},
+        {"help_stdout": ""},
+        {"help_stdout": SUPPORTED_HELP.replace("  --token-budget <TOKENS>\n", "")},
     ],
 )
-def test_codex_pilot_fingerprint_authorization_failure_is_sanitized(
-    tmp_path, capsys, monkeypatch, runtime_kwargs, expected
+def test_codex_pilot_fingerprint_ignores_informational_runtime_failures(
+    tmp_path, capsys, monkeypatch, runtime_kwargs
 ):
     _install_runtime_mocks(monkeypatch, **runtime_kwargs)
     handoff_path, evidence_path, authorization_path = _write_all(tmp_path)
@@ -538,12 +539,12 @@ def test_codex_pilot_fingerprint_authorization_failure_is_sanitized(
         handoff_path, evidence_path, authorization_path, capsys
     )
 
-    assert exit_code == 1
-    assert text_exit == 1
-    assert report["authorization_inspection_passed"] is False
-    assert report["authorization_fingerprint_valid"] is False
-    assert report["authorization_fingerprint"] is None
-    assert expected in report["blockers_by_source"]["authorization"]
+    assert exit_code == 0
+    assert text_exit == 0
+    assert report["authorization_inspection_passed"] is True
+    assert report["authorization_fingerprint_valid"] is True
+    assert len(report["authorization_fingerprint"]) == 64
+    assert report["blockers_by_source"]["authorization"] == []
     _assert_false_flags(report)
     _assert_no_leakage(json_output)
     _assert_no_leakage(text_output)

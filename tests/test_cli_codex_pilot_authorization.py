@@ -320,6 +320,12 @@ def test_codex_pilot_authorization_success_json_text_and_determinism(
     assert report["budget_ceiling"] == 50000
     assert report["timeout_seconds"] == 1800
     assert report["composite_preflight_passed"] is True
+    assert report["runtime_probe_blocks_authorization"] is False
+    assert report["runtime_probe_informational"] is True
+    assert report["runtime_gate_execution_owner"] == (
+        "supervised_runner_preclaim"
+    )
+    assert report["runtime_live_checks_deferred"] is True
     assert report["authorization_structural_valid"] is True
     assert report["authorization_binding_passed"] is True
     assert report["authorization_packet_valid_for_one_attempt"] is True
@@ -344,15 +350,16 @@ def test_codex_pilot_authorization_success_json_text_and_determinism(
 
 
 @pytest.mark.parametrize(
-    ("runtime_kwargs", "expected"),
+    "runtime_kwargs",
     [
-        ({"executable_found": False}, "composite runtime preflight blocked"),
-        ({"timeout_argv": ["codex", "--version"]}, "composite runtime preflight blocked"),
-        ({"help_stdout": ""}, "composite runtime preflight blocked"),
+        {"executable_found": False},
+        {"timeout_argv": ["codex", "--version"]},
+        {"help_stdout": ""},
+        {"help_stdout": SUPPORTED_HELP.replace("  --token-budget <TOKENS>\n", "")},
     ],
 )
-def test_codex_pilot_authorization_composite_runtime_failures_are_sanitized(
-    tmp_path, capsys, monkeypatch, runtime_kwargs, expected
+def test_codex_pilot_authorization_legacy_runtime_failures_are_informational(
+    tmp_path, capsys, monkeypatch, runtime_kwargs
 ):
     _install_runtime_mocks(monkeypatch, **runtime_kwargs)
     handoff_path, evidence_path, authorization_path = _write_all(tmp_path)
@@ -361,10 +368,19 @@ def test_codex_pilot_authorization_composite_runtime_failures_are_sanitized(
         handoff_path, evidence_path, authorization_path, capsys
     )
 
-    assert exit_code == 1
-    assert report["composite_preflight_passed"] is False
-    assert report["authorization_packet_valid_for_one_attempt"] is False
-    assert expected in report["blockers_by_source"]["composite_preflight"]
+    assert exit_code == 0
+    assert report["composite_preflight_passed"] is True
+    assert report["authorization_packet_valid_for_one_attempt"] is True
+    assert report["runtime_local_cli_ready"] is False
+    assert report["runtime_probe_blocks_authorization"] is False
+    assert report["runtime_probe_informational"] is True
+    assert report["runtime_gate_execution_owner"] == (
+        "supervised_runner_preclaim"
+    )
+    assert report["runtime_live_checks_deferred"] is True
+    assert report["blockers_by_source"]["composite_preflight"] == []
+    assert report["budget_metric"] == "tokens"
+    assert report["budget_ceiling"] == 50000
     _assert_no_unsafe_output(output)
 
 
