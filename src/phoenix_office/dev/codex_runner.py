@@ -42,6 +42,12 @@ MAX_JSONL_LINE_BYTES: Final = 1_000_000
 MAX_MARKDOWN_BYTES: Final = 1_000_000
 MAX_SYSTEM_OUTPUT_BYTES: Final = 2_000_000
 MAX_PROXY_ENV_VALUE_BYTES: Final = 4096
+MAX_AUTHORIZED_BUDGET_TOKENS: Final = 1_000_000
+MAX_OBSERVED_USAGE_TOKENS: Final = 1_000_000_000
+USAGE_RATIO_BASIS_POINTS_SCALE: Final = 10_000
+MAX_USAGE_RATIO_BASIS_POINTS: Final = (
+    MAX_OBSERVED_USAGE_TOKENS * USAGE_RATIO_BASIS_POINTS_SCALE
+)
 VALIDATION_TIMEOUT_SECONDS: Final = 1800
 CODEX_BASE_ENVIRONMENT_NAMES: Final = (
     "PATH",
@@ -412,6 +418,10 @@ def bounded_codex_pilot_run_result(
         "changed_paths": [],
         "validation_categories": [],
         "usage_category": "usage_unknown",
+        "observed_usage_tokens": None,
+        "authorized_budget_tokens": None,
+        "usage_overage_tokens": None,
+        "usage_ratio_basis_points": None,
         "timeout_category": "timeout_unknown",
         "cancellation_category": "cancellation_unknown",
     }
@@ -568,9 +578,16 @@ class SupervisedCodexPilotRunner:
             )
         except Exception:
             execution = CodexExecutionResult("failed", "runner_internal_failure")
-        usage_category = _usage_category(
+        budget_ceiling = int(authorization_data["budget_ceiling"])
+        usage_telemetry = _bounded_usage_telemetry(
             execution.usage_tokens,
-            int(authorization_data["budget_ceiling"]),
+            budget_ceiling,
+        )
+        result.update(usage_telemetry)
+        observed_usage = usage_telemetry["observed_usage_tokens"]
+        usage_category = _usage_category(
+            observed_usage if type(observed_usage) is int else None,
+            budget_ceiling,
         )
         result["usage_category"] = usage_category
 
@@ -1024,6 +1041,41 @@ def _source_issue_number(value: object) -> int | None:
         value,
     )
     return int(match.group(1)) if match is not None else None
+
+
+def _bounded_usage_telemetry(
+    observed: object,
+    authorized: object,
+) -> dict[str, int | None]:
+    telemetry: dict[str, int | None] = {
+        "observed_usage_tokens": None,
+        "authorized_budget_tokens": None,
+        "usage_overage_tokens": None,
+        "usage_ratio_basis_points": None,
+    }
+    observed_tokens = _bounded_usage_token_count(observed)
+    if (
+        observed_tokens is None
+        or type(authorized) is not int
+        or authorized < 1
+        or authorized > MAX_AUTHORIZED_BUDGET_TOKENS
+    ):
+        return telemetry
+    overage = max(observed_tokens - authorized, 0)
+    ratio_basis_points = (
+        observed_tokens * USAGE_RATIO_BASIS_POINTS_SCALE // authorized
+    )
+    if ratio_basis_points > MAX_USAGE_RATIO_BASIS_POINTS:
+        return telemetry
+    telemetry.update(
+        {
+            "observed_usage_tokens": observed_tokens,
+            "authorized_budget_tokens": authorized,
+            "usage_overage_tokens": overage,
+            "usage_ratio_basis_points": ratio_basis_points,
+        }
+    )
+    return telemetry
 
 
 def _usage_category(observed: int | None, ceiling: int) -> str:
@@ -2626,18 +2678,22 @@ def _codex_failure_category(
 def _usage_tokens(value: object) -> int | None:
     if not isinstance(value, dict):
         return None
-    total = value.get("total_tokens")
-    if type(total) is int and total >= 0:
+    total = _bounded_usage_token_count(value.get("total_tokens"))
+    if total is not None:
         return total
-    input_tokens = value.get("input_tokens")
-    output_tokens = value.get("output_tokens")
+    input_tokens = _bounded_usage_token_count(value.get("input_tokens"))
+    output_tokens = _bounded_usage_token_count(value.get("output_tokens"))
+    if input_tokens is not None and output_tokens is not None:
+        return _bounded_usage_token_count(input_tokens + output_tokens)
+    return None
+
+
+def _bounded_usage_token_count(value: object) -> int | None:
     if (
-        type(input_tokens) is int
-        and input_tokens >= 0
-        and type(output_tokens) is int
-        and output_tokens >= 0
+        type(value) is int
+        and 0 <= value <= MAX_OBSERVED_USAGE_TOKENS
     ):
-        return input_tokens + output_tokens
+        return value
     return None
 
 
