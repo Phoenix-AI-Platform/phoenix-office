@@ -2376,6 +2376,29 @@ def test_wsl_runtime_blocker_prevents_claim_and_task_worktree(tmp_path: Path):
     assert system.calls == ["preclaim", "runtime"]
 
 
+def test_wsl_auth_blocker_prevents_claim_and_task_worktree(tmp_path: Path):
+    worker = FakeWslWorker(
+        authentication_result=WslGateResult(
+            False,
+            "wsl_codex_authentication_unavailable",
+        )
+    )
+    system = FakeSystem()
+    service = SystemCodexPilotServices(tmp_path, wsl_worker=worker)
+    system.runtime = service.runtime_gate()
+    system.auth = service.authentication_gate()
+    claims: list[Path] = []
+    result, _database = _run(
+        tmp_path,
+        system,
+        claim_store_factory=lambda path: claims.append(path),
+    )
+
+    assert result["category"] == "wsl_codex_authentication_unavailable"
+    assert claims == []
+    assert system.calls == ["preclaim", "runtime", "auth"]
+
+
 def test_wsl_capability_blocker_prevents_claim_and_task_worktree(tmp_path: Path):
     worker = FakeWslWorker(
         capability_result=WslCapabilityResult(

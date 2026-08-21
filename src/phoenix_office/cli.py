@@ -2634,7 +2634,6 @@ def _run_codex_pilot_preflight(
             handoff_filename is not None,
             evidence_filename is not None,
             handoff_static_preflight_passed,
-            runtime_local_cli_ready,
             evidence_structural_valid,
             evidence_package_complete,
             binding_passed,
@@ -2668,7 +2667,11 @@ def _run_codex_pilot_preflight(
         "pilot_ready": False,
         "pull_request_created": False,
         "repository": repository,
+        "runtime_gate_execution_owner": "supervised_runner_preclaim",
+        "runtime_live_checks_deferred": True,
         "runtime_local_cli_ready": runtime_local_cli_ready,
+        "runtime_probe_blocks_authorization": False,
+        "runtime_probe_informational": True,
         "schema_version": CODEX_PILOT_PREFLIGHT_SCHEMA_VERSION,
     }
 
@@ -2735,8 +2738,17 @@ def _print_codex_pilot_preflight_report(report: dict[str, Any]) -> None:
         f"{_format_yes_no(report['handoff_static_preflight_passed'])}"
     )
     print(
-        "Runtime local CLI ready: "
+        "Legacy local CLI diagnostic ready: "
         f"{_format_yes_no(report['runtime_local_cli_ready'])}"
+    )
+    print("Legacy local CLI diagnostic blocks authorization: no")
+    print(
+        "Live runtime gate owner: "
+        f"{report['runtime_gate_execution_owner']}"
+    )
+    print(
+        "Live runtime checks deferred: "
+        f"{_format_yes_no(report['runtime_live_checks_deferred'])}"
     )
     print(
         "Evidence structural valid: "
@@ -2852,6 +2864,21 @@ def _run_codex_pilot_authorization_inspection(
         "pilot_ready": False,
         "prompt_submitted": False,
         "pull_request_created": False,
+        "runtime_gate_execution_owner": preflight_report.get(
+            "runtime_gate_execution_owner"
+        ),
+        "runtime_live_checks_deferred": preflight_report.get(
+            "runtime_live_checks_deferred"
+        ),
+        "runtime_local_cli_ready": preflight_report.get(
+            "runtime_local_cli_ready"
+        ),
+        "runtime_probe_blocks_authorization": preflight_report.get(
+            "runtime_probe_blocks_authorization"
+        ),
+        "runtime_probe_informational": preflight_report.get(
+            "runtime_probe_informational"
+        ),
         "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
     }
     return package if authorization_packet_valid_for_one_attempt else None, report
@@ -2931,7 +2958,7 @@ def _codex_pilot_authorization_composite_blockers(
     if preflight_report.get("eligible_for_authorization_review"):
         return []
     blockers: list[str] = []
-    for source in ["handoff", "runtime", "evidence", "binding"]:
+    for source in ["handoff", "evidence", "binding"]:
         if preflight_report.get("blockers_by_source", {}).get(source):
             blockers.append(f"composite {source} preflight blocked")
     if not blockers:

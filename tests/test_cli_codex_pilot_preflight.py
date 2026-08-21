@@ -201,6 +201,12 @@ def test_codex_pilot_preflight_all_checks_passing_json_and_text(
     assert report["handoff_id"] == "codex-handoff-issue-259"
     assert report["handoff_static_preflight_passed"] is True
     assert report["runtime_local_cli_ready"] is True
+    assert report["runtime_probe_blocks_authorization"] is False
+    assert report["runtime_probe_informational"] is True
+    assert report["runtime_gate_execution_owner"] == (
+        "supervised_runner_preclaim"
+    )
+    assert report["runtime_live_checks_deferred"] is True
     assert report["evidence_structural_valid"] is True
     assert report["evidence_complete"] is True
     assert report["binding_passed"] is True
@@ -215,6 +221,9 @@ def test_codex_pilot_preflight_all_checks_passing_json_and_text(
     assert report["pull_request_created"] is False
     assert all(not blockers for blockers in report["blockers_by_source"].values())
     assert "Eligible for authorization review: yes" in text_output
+    assert "Legacy local CLI diagnostic blocks authorization: no" in text_output
+    assert "Live runtime gate owner: supervised_runner_preclaim" in text_output
+    assert "Live runtime checks deferred: yes" in text_output
     assert "Pilot ready: no" in text_output
     assert "Rendered prompt" not in text_output
     assert _valid_handoff_package()["prompt"] not in json_output
@@ -435,7 +444,7 @@ def test_codex_pilot_preflight_repository_or_pilot_kind_mismatch_fails_closed(
         ),
     ],
 )
-def test_codex_pilot_preflight_runtime_failures_fail_closed(
+def test_codex_pilot_preflight_runtime_failures_are_informational(
     tmp_path, capsys, monkeypatch, runtime_kwargs, expected_source
 ):
     _install_runtime_mocks(monkeypatch, **runtime_kwargs)
@@ -443,9 +452,15 @@ def test_codex_pilot_preflight_runtime_failures_fail_closed(
 
     exit_code, report, output = _run_json(handoff_path, evidence_path, capsys)
 
-    assert exit_code == 1
+    assert exit_code == 0
     assert report["runtime_local_cli_ready"] is False
-    assert report["eligible_for_authorization_review"] is False
+    assert report["runtime_probe_blocks_authorization"] is False
+    assert report["runtime_probe_informational"] is True
+    assert report["runtime_gate_execution_owner"] == (
+        "supervised_runner_preclaim"
+    )
+    assert report["runtime_live_checks_deferred"] is True
+    assert report["eligible_for_authorization_review"] is True
     assert any(expected_source in blocker for blocker in report["blockers_by_source"]["runtime"])
     assert "codex-cli 1.2.3" not in output
 
