@@ -9,7 +9,6 @@ import shutil
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping
@@ -51,6 +50,24 @@ MAX_USAGE_RATIO_BASIS_POINTS: Final = (
     MAX_OBSERVED_USAGE_TOKENS * USAGE_RATIO_BASIS_POINTS_SCALE
 )
 VALIDATION_TIMEOUT_SECONDS: Final = 1800
+VALIDATION_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS: Final = 30
+VALIDATION_ENVIRONMENT_NAMES: Final = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "APPDATA",
+)
 CODEX_BASE_ENVIRONMENT_NAMES: Final = (
     "PATH",
     "PATHEXT",
@@ -154,6 +171,11 @@ class CodexLaunchSpec:
     argv_prefix: tuple[str, ...] = field(repr=False)
     kind: str
     file_identities: tuple[CodexLaunchFileIdentity, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationRuntimeSpec:
+    python_identity: CodexLaunchFileIdentity = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +326,7 @@ class LifecycleClaimStore(Protocol):
 ClaimStoreFactory = Callable[[Path], LifecycleClaimStore]
 AttemptIdFactory = Callable[[], str]
 CodexLaunchSpecResolver = Callable[[], CodexLaunchSpec | None]
+ValidationRuntimeResolver = Callable[[Path], ValidationRuntimeSpec | None]
 
 
 def render_reviewed_codex_invocation_prompt(
@@ -1162,6 +1185,7 @@ class SystemCodexPilotServices:
         repository_path: Path,
         *,
         launch_spec_resolver: CodexLaunchSpecResolver | None = None,
+        validation_runtime_resolver: ValidationRuntimeResolver | None = None,
         wsl_worker: WslCodexWorker | None = None,
     ) -> None:
         self._repository_path = Path(repository_path)
@@ -1173,6 +1197,12 @@ class SystemCodexPilotServices:
         self._codex_launch_spec: CodexLaunchSpec | None = None
         self._runtime_preflight_result: GateResult | None = None
         self._authentication_preflight_result: GateResult | None = None
+        self._validation_runtime_resolver = (
+            validation_runtime_resolver or _resolve_validation_runtime_spec
+        )
+        self._validation_runtime_resolution_attempted = False
+        self._validation_runtime_spec: ValidationRuntimeSpec | None = None
+        self._validation_runtime_preflight_result: GateResult | None = None
 
     @property
     def codex_launch_spec_kind(self) -> str | None:
@@ -1193,6 +1223,16 @@ class SystemCodexPilotServices:
         if self._wsl_worker is not None:
             return self._wsl_worker.runtime_frozen
         return self._codex_launch_spec is not None
+
+    @property
+    def validation_runtime_frozen(self) -> bool:
+        """Report qualification without exposing the canonical interpreter path."""
+        return (
+            self._validation_runtime_spec is not None
+            and self._validation_runtime_preflight_result
+            == GateResult(True, "validation_runtime_ready")
+            and _validation_runtime_is_current(self._validation_runtime_spec)
+        )
 
     def preclaim_repository_gate(self, authorization: dict[str, object]) -> GateResult:
         checks = [
@@ -1251,7 +1291,71 @@ class SystemCodexPilotServices:
             return GateResult(False, "synchronization_gate_failed")
         if status is None or status.returncode != 0 or status.stdout.strip():
             return GateResult(False, "clean_repo_gate_failed")
-        return self._collision_gate(authorization)
+        collision = self._collision_gate(authorization)
+        if not collision.passed:
+            return collision
+        validation_runtime = self._validation_runtime_gate()
+        if not validation_runtime.passed:
+            return validation_runtime
+        return collision
+
+    def _validation_runtime_gate(self) -> GateResult:
+        if self._validation_runtime_preflight_result is not None:
+            if (
+                self._validation_runtime_preflight_result.passed
+                and self._validation_runtime_spec is not None
+                and not _validation_runtime_is_current(self._validation_runtime_spec)
+            ):
+                self._validation_runtime_preflight_result = GateResult(
+                    False,
+                    "validation_runtime_changed",
+                )
+            return self._validation_runtime_preflight_result
+        if not self._validation_runtime_resolution_attempted:
+            self._validation_runtime_resolution_attempted = True
+            try:
+                self._validation_runtime_spec = self._validation_runtime_resolver(
+                    self._repository_path
+                )
+            except Exception:
+                self._validation_runtime_spec = None
+        spec = self._validation_runtime_spec
+        if spec is None:
+            result = GateResult(False, "validation_runtime_unavailable")
+            self._validation_runtime_preflight_result = result
+            return result
+        environment = _validation_environment()
+        for module in ("pytest", "ruff"):
+            if not _validation_runtime_is_current(spec):
+                result = GateResult(False, "validation_runtime_changed")
+                self._validation_runtime_preflight_result = result
+                return result
+            try:
+                module_environment = dict(environment)
+                if module == "pytest":
+                    module_environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+                completed = subprocess.run(
+                    [str(spec.python_identity.path), "-m", module, "--version"],
+                    cwd=self._repository_path,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    shell=False,
+                    timeout=VALIDATION_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS,
+                    env=module_environment,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                completed = None
+            if completed is None or completed.returncode != 0:
+                result = GateResult(False, "validation_runtime_unavailable")
+                self._validation_runtime_preflight_result = result
+                return result
+        if not _validation_runtime_is_current(spec):
+            result = GateResult(False, "validation_runtime_changed")
+        else:
+            result = GateResult(True, "validation_runtime_ready")
+        self._validation_runtime_preflight_result = result
+        return result
 
     def runtime_gate(self) -> GateResult:
         if self._wsl_worker is not None:
@@ -1590,9 +1694,24 @@ class SystemCodexPilotServices:
     ) -> ValidationGateResult:
         if commands != VALIDATION_COMMANDS:
             return ValidationGateResult(False, "validation_command_mismatch")
+        spec = self._validation_runtime_spec
+        if spec is None or self._validation_runtime_preflight_result != GateResult(
+            True,
+            "validation_runtime_ready",
+        ):
+            return ValidationGateResult(False, "validation_runtime_unavailable")
         categories: list[str] = []
         for command in commands:
-            argv, environment = _validation_command(command)
+            if command != VALIDATION_COMMANDS[2] and not _validation_runtime_is_current(
+                spec
+            ):
+                categories.append("runtime_changed")
+                return ValidationGateResult(
+                    False,
+                    "validation_runtime_changed",
+                    tuple(categories),
+                )
+            argv, environment = _validation_command(command, spec)
             try:
                 completed = subprocess.run(
                     argv,
@@ -2086,6 +2205,57 @@ def _resolve_codex_launch_spec() -> CodexLaunchSpec | None:
         "native_exe",
         (identity,),
     )
+
+
+def _resolve_validation_runtime_spec(
+    repository_path: Path,
+) -> ValidationRuntimeSpec | None:
+    try:
+        repository_root = Path(repository_path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    venv_root = repository_root / ".venv"
+    scripts_directory = venv_root / ("Scripts" if os.name == "nt" else "bin")
+    if not _safe_runtime_directory(venv_root, parent=repository_root):
+        return None
+    if not _safe_runtime_directory(scripts_directory, parent=venv_root):
+        return None
+    python_path = scripts_directory / ("python.exe" if os.name == "nt" else "python")
+    identity = _launch_file_identity(
+        python_path,
+        require_windows_exe=os.name == "nt",
+    )
+    if identity is None or not _path_is_within(identity.path, venv_root):
+        return None
+    return ValidationRuntimeSpec(identity)
+
+
+def _safe_runtime_directory(path: Path, *, parent: Path) -> bool:
+    if not path.is_absolute() or not parent.is_absolute():
+        return False
+    try:
+        path_stat = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    return (
+        stat.S_ISDIR(path_stat.st_mode)
+        and not path.is_symlink()
+        and not bool(file_attributes & reparse_attribute)
+        and os.path.normcase(str(path)) == os.path.normcase(str(resolved))
+        and _path_is_within(resolved, parent)
+    )
+
+
+def _validation_runtime_is_current(spec: ValidationRuntimeSpec) -> bool:
+    identity = spec.python_identity
+    current = _launch_file_identity(
+        identity.path,
+        require_windows_exe=identity.path.suffix.casefold() == ".exe",
+    )
+    return current == identity
 
 
 def _codex_version_preflight(
@@ -2741,15 +2911,33 @@ def _bounded_usage_token_count(value: object) -> int | None:
     return None
 
 
-def _validation_command(command: str) -> tuple[list[str], dict[str, str] | None]:
+def _validation_environment() -> dict[str, str]:
+    environment: dict[str, str] = {}
+    case_insensitive = os.name == "nt"
+    for canonical in VALIDATION_ENVIRONMENT_NAMES:
+        observed = _matching_environment_values(
+            os.environ,
+            canonical,
+            case_insensitive=case_insensitive,
+        )
+        if observed:
+            environment[canonical] = observed[0][1]
+    return environment
+
+
+def _validation_command(
+    command: str,
+    runtime: ValidationRuntimeSpec,
+) -> tuple[list[str], dict[str, str]]:
+    environment = _validation_environment()
+    python = str(runtime.python_identity.path)
     if command == VALIDATION_COMMANDS[0]:
-        environment = dict(os.environ)
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        return [sys.executable, "-m", "pytest", "--basetemp", ".pytest_tmp"], environment
+        return [python, "-m", "pytest", "--basetemp", ".pytest_tmp"], environment
     if command == VALIDATION_COMMANDS[1]:
-        return [sys.executable, "-m", "ruff", "check", ".", "--no-cache"], None
+        return [python, "-m", "ruff", "check", ".", "--no-cache"], environment
     if command == VALIDATION_COMMANDS[2]:
-        return ["git", "diff", "--check"], None
+        return ["git", "diff", "--check"], environment
     raise ValueError("validation command is not authorized")
 
 
