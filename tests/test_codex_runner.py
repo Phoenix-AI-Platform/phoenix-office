@@ -453,7 +453,8 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
     ]
     assert len(system.prompts) == 1
     assert "- open one PR and stop" not in system.prompts[0]
-    assert "Do not stage, commit, push, open a PR" in system.prompts[0]
+    assert "Do not stage, commit, push, open a pull request" in system.prompts[0]
+    assert all(command not in system.prompts[0] for command in VALIDATION_COMMANDS)
     lifecycle = SQLiteCodexPilotInitialClaimStore(database_path).read_lifecycle_state(
         ATTEMPT_ID,
         _authorization(),
@@ -1537,13 +1538,29 @@ def test_system_codex_launch_has_no_shell_or_wrapper_fallback():
 def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority(
     tmp_path: Path,
 ):
-    reviewed = _reviewed_prompt(_handoff())
-    prompt = render_codex_worker_prompt(reviewed)
+    handoff = _handoff()
+    prompt = render_codex_worker_prompt(
+        package=handoff,
+        allowed_paths=(ALLOWED_PATH,),
+    )
     spec = _native_launch_spec(tmp_path)
     argv = _codex_exec_argv(spec, Path("worktree"), platform_name="nt")
 
-    assert "- open one PR and stop" not in prompt
-    assert "Phoenix owns all Git and GitHub publication" in prompt
+    task = handoff["task"]
+    assert isinstance(task, dict)
+    assert f"Task ID: {task['task_id']}" in prompt
+    assert f"Task title: {task['title']}" in prompt
+    assert f"Reviewed objective: {task['objective']}" in prompt
+    assert handoff["prompt"] in prompt
+    assert f"- {ALLOWED_PATH}" in prompt
+    assert "Required Validation Commands" not in prompt
+    assert "Required PR Body Headings" not in prompt
+    assert handoff["expected_pr_title"] not in prompt
+    assert all(command not in prompt for command in VALIDATION_COMMANDS)
+    assert all(
+        heading not in prompt for heading in handoff["required_pr_body_headings"]
+    )
+    assert "Do not stage, commit, push, open a pull request" in prompt
     assert argv[:1] == list(spec.argv_prefix)
     assert "--ask-for-approval" in argv
     assert argv[argv.index("--ask-for-approval") + 1] == "never"
@@ -1558,6 +1575,37 @@ def test_worker_prompt_and_codex_argv_have_no_publication_or_bypass_authority(
     assert "danger-full-access" not in joined
     assert "dangerously-bypass" not in joined
     assert "--yolo" not in joined
+
+
+def test_worker_prompt_is_deterministically_bound_to_reviewed_task_content():
+    handoff = _handoff()
+    first = render_codex_worker_prompt(
+        package=handoff,
+        allowed_paths=(ALLOWED_PATH,),
+    )
+    second = render_codex_worker_prompt(
+        package=handoff,
+        allowed_paths=(ALLOWED_PATH,),
+    )
+    changed = _handoff()
+    changed["prompt"] = "Apply a different reviewed clarification and stop."
+
+    assert first == second
+    assert first != render_codex_worker_prompt(
+        package=changed,
+        allowed_paths=(ALLOWED_PATH,),
+    )
+
+
+def test_worker_prompt_rejects_phoenix_validation_commands():
+    handoff = _handoff()
+    handoff["prompt"] = f"Update the document. Then run {VALIDATION_COMMANDS[0]}."
+
+    with pytest.raises(ValueError, match="validation commands"):
+        render_codex_worker_prompt(
+            package=handoff,
+            allowed_paths=(ALLOWED_PATH,),
+        )
 
 
 def test_capability_probe_uses_disposable_git_workspace_and_requires_exact_marker(
