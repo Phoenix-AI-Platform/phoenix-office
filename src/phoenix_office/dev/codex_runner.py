@@ -42,6 +42,8 @@ MAX_JSONL_LINE_BYTES: Final = 1_000_000
 MAX_MARKDOWN_BYTES: Final = 1_000_000
 MAX_SYSTEM_OUTPUT_BYTES: Final = 2_000_000
 MAX_PROXY_ENV_VALUE_BYTES: Final = 4096
+MAX_WORKER_TASK_FACTS_CHARACTERS: Final = 24_000
+MAX_WORKER_PROMPT_CHARACTERS: Final = 32_000
 MAX_AUTHORIZED_BUDGET_TOKENS: Final = 1_000_000
 MAX_OBSERVED_USAGE_TOKENS: Final = 1_000_000_000
 USAGE_RATIO_BASIS_POINTS_SCALE: Final = 10_000
@@ -373,26 +375,65 @@ def render_reviewed_codex_invocation_prompt(
     )
 
 
-def render_codex_worker_prompt(reviewed_prompt: str) -> str:
-    """Bind the reviewed prompt to the narrower worker-only authority."""
+def render_codex_worker_prompt(
+    *,
+    package: dict[str, object],
+    allowed_paths: tuple[str, ...],
+) -> str:
+    """Render only deterministic, reviewed facts and worker edit authority."""
 
-    if not isinstance(reviewed_prompt, str) or not reviewed_prompt.strip():
-        raise ValueError("reviewed prompt is invalid")
-    worker_prompt = reviewed_prompt.replace(
-        "- open one PR and stop",
-        "- do not open a PR; Phoenix publishes after independent validation",
+    task = package.get("task")
+    if type(task) is not dict:
+        raise ValueError("handoff task is invalid")
+    task_id = _bounded_worker_prompt_text(task.get("task_id"), 512)
+    title = _bounded_worker_prompt_text(task.get("title"), 512)
+    objective = _bounded_worker_prompt_text(task.get("objective"), 2_000)
+    facts = _bounded_worker_prompt_text(
+        package.get("prompt"),
+        MAX_WORKER_TASK_FACTS_CHARACTERS,
     )
-    return "\n".join(
+    if not allowed_paths or any(
+        type(path) is not str or not path for path in allowed_paths
+    ):
+        raise ValueError("worker writable paths are invalid")
+    if any(command in facts for command in VALIDATION_COMMANDS):
+        raise ValueError("worker facts contain Phoenix validation commands")
+    prompt = "\n".join(
         [
-            worker_prompt,
+            "# Supervised Codex Worker Edit",
             "",
-            "## 11. Phoenix Publication Ownership",
-            "For this execution, Phoenix owns all Git and GitHub publication.",
-            "This section supersedes any earlier Git or GitHub publication instruction.",
-            "Do not stage, commit, push, open a PR, or access GitHub or the network.",
-            "Edit only the authorized Markdown files and then stop.",
+            f"Task ID: {task_id}",
+            f"Task title: {title}",
+            f"Reviewed objective: {objective}",
+            "",
+            "## Reviewed task facts",
+            facts,
+            "",
+            "## Authorized writable files",
+            *_prompt_bullets(allowed_paths),
+            "",
+            "## Worker boundaries",
+            "- Edit only the authorized writable files listed above.",
+            "- Do not inspect or mutate unrelated repository state.",
+            "- Do not access the network or GitHub.",
+            "- Do not stage, commit, push, open a pull request, approve, or merge.",
+            "- Stop after completing the authorized edit.",
         ]
     )
+    if len(prompt) > MAX_WORKER_PROMPT_CHARACTERS:
+        raise ValueError("worker prompt is too large")
+    return prompt
+
+
+def _bounded_worker_prompt_text(value: object, maximum: int) -> str:
+    if type(value) is not str:
+        raise ValueError("worker prompt text is invalid")
+    text = value.strip()
+    if not text or len(text) > maximum or "\r" in text:
+        raise ValueError("worker prompt text is invalid")
+    if any(ord(character) < 32 and character not in {"\n", "\t"} for character in text):
+        raise ValueError("worker prompt text is invalid")
+    return text
 
 
 def _prompt_bullets(values: object) -> list[str]:
@@ -1021,7 +1062,10 @@ def _validated_run_context(
     if reviewed_prompt != expected_reviewed_prompt:
         return None
     try:
-        worker_prompt = render_codex_worker_prompt(reviewed_prompt)
+        worker_prompt = render_codex_worker_prompt(
+            package=handoff,
+            allowed_paths=tuple(str(path) for path in allowed_paths),
+        )
     except ValueError:
         return None
     return (

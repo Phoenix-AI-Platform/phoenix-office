@@ -295,6 +295,7 @@ class WindowsSnapshot:
     archive: bytes = field(repr=False)
     digest: str
     tracked_paths: tuple[str, ...]
+    source_state_digest: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,7 +608,11 @@ class WslCodexWorker:
         if worktree == canonical:
             return WslExecutionResult("failed", "canonical_worktree_rejected")
         try:
-            snapshot = build_windows_snapshot(worktree, base_commit_sha)
+            snapshot = build_windows_snapshot(
+                worktree,
+                base_commit_sha,
+                allowed_paths,
+            )
         except (OSError, ValueError, subprocess.SubprocessError):
             return WslExecutionResult("failed", "windows_snapshot_rejected")
         shadow = self._create_native_workspace("shadow")
@@ -2224,8 +2229,9 @@ def validate_transfer_paths(paths: Iterable[str]) -> tuple[str, ...]:
 def build_windows_snapshot(
     worktree: Path,
     base_commit_sha: str,
+    visible_paths: tuple[str, ...],
 ) -> WindowsSnapshot:
-    """Create a deterministic tar snapshot from regular tracked files only."""
+    """Create a deterministic tar snapshot of explicitly worker-visible files."""
 
     root = Path(worktree).resolve(strict=True)
     head = _run_git(root, "rev-parse", "HEAD")
@@ -2236,32 +2242,55 @@ def build_windows_snapshot(
     entries = _parse_index_entries(tracked_result.stdout)
     if not entries or len(entries) > MAX_SNAPSHOT_FILES:
         raise ValueError("Windows snapshot file count is invalid")
-    included_entries = tuple(
+    source_entries = tuple(
         (mode, path)
         for mode, path in entries
         if not path.casefold().endswith(_CONTROL_STATE_SUFFIXES)
     )
-    paths = validate_transfer_paths(path for _mode, path in included_entries)
-    entry_by_path = {path: mode for mode, path in included_entries}
+    source_paths = validate_transfer_paths(path for _mode, path in source_entries)
+    paths = validate_transfer_paths(visible_paths)
+    if not paths or any(not path.casefold().endswith(".md") for path in paths):
+        raise ValueError("worker-visible paths are invalid")
+    entry_by_path = {path: mode for mode, path in source_entries}
+    if any(path not in entry_by_path for path in paths):
+        raise ValueError("worker-visible source is unavailable")
+
+    source_digest = hashlib.sha256()
+    selected_payloads: dict[str, bytes] = {}
+    source_total = 0
+    for path_text in source_paths:
+        mode = entry_by_path[path_text]
+        if mode not in {"100644", "100755"}:
+            raise ValueError("unsupported tracked object")
+        path = root.joinpath(*PurePosixPath(path_text).parts)
+        path_stat = path.lstat()
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or path.is_symlink()
+            or path_stat.st_nlink != 1
+        ):
+            raise ValueError("unsafe tracked file")
+        payload = path.read_bytes()
+        source_total += len(payload)
+        if source_total > MAX_SNAPSHOT_BYTES:
+            raise ValueError("Windows source state is too large")
+        source_digest.update(path_text.encode("utf-8"))
+        source_digest.update(b"\0")
+        source_digest.update(mode.encode("ascii"))
+        source_digest.update(b"\0")
+        source_digest.update(payload)
+        if path_text in paths:
+            selected_payloads[path_text] = payload
+
     buffer = io.BytesIO()
     digest = hashlib.sha256()
     total = 0
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
         for path_text in paths:
             mode = entry_by_path[path_text]
-            if mode not in {"100644", "100755"}:
-                raise ValueError("unsupported tracked object")
-            path = root.joinpath(*PurePosixPath(path_text).parts)
-            path_stat = path.lstat()
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(root)
-            if (
-                not stat.S_ISREG(path_stat.st_mode)
-                or path.is_symlink()
-                or path_stat.st_nlink != 1
-            ):
-                raise ValueError("unsafe tracked file")
-            payload = path.read_bytes()
+            payload = selected_payloads[path_text]
             total += len(payload)
             if total > MAX_SNAPSHOT_BYTES:
                 raise ValueError("Windows snapshot is too large")
@@ -2279,7 +2308,12 @@ def build_windows_snapshot(
             digest.update(mode.encode("ascii"))
             digest.update(b"\0")
             digest.update(payload)
-    return WindowsSnapshot(buffer.getvalue(), digest.hexdigest(), paths)
+    return WindowsSnapshot(
+        buffer.getvalue(),
+        digest.hexdigest(),
+        paths,
+        source_digest.hexdigest(),
+    )
 
 
 def validate_snapshot_archive(
@@ -2319,12 +2353,17 @@ def windows_snapshot_matches(
     expected: WindowsSnapshot,
 ) -> bool:
     try:
-        current = build_windows_snapshot(worktree, base_commit_sha)
+        current = build_windows_snapshot(
+            worktree,
+            base_commit_sha,
+            expected.tracked_paths,
+        )
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return (
         current.digest == expected.digest
         and current.tracked_paths == expected.tracked_paths
+        and current.source_state_digest == expected.source_state_digest
     )
 
 

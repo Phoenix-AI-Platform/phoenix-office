@@ -381,7 +381,7 @@ def test_transfer_path_validation_is_sorted_and_deterministic():
     )
 
 
-def test_windows_snapshot_is_deterministic_and_excludes_control_state(tmp_path: Path):
+def test_windows_snapshot_contains_only_explicit_worker_visible_paths(tmp_path: Path):
     repository, head = _repository(tmp_path)
     control = repository / "claim-state.sqlite3"
     control.write_bytes(b"not business data")
@@ -389,15 +389,25 @@ def test_windows_snapshot_is_deterministic_and_excludes_control_state(tmp_path: 
     _git(repository, "commit", "--amend", "--quiet", "--no-edit")
     head = _git(repository, "rev-parse", "HEAD")
 
-    first = build_windows_snapshot(repository, head)
-    second = build_windows_snapshot(repository, head)
+    visible = ("docs/status.md",)
+    first = build_windows_snapshot(repository, head, visible)
+    second = build_windows_snapshot(repository, head, visible)
 
     assert first == second
-    assert "claim-state.sqlite3" not in first.tracked_paths
+    assert first.tracked_paths == visible
     with tarfile.open(fileobj=io.BytesIO(first.archive), mode="r:") as archive:
         names = tuple(archive.getnames())
-    assert names == first.tracked_paths
+    assert names == visible
+    assert "src/safe.py" not in names
+    assert "claim-state.sqlite3" not in names
     assert all(not name.startswith(".git") for name in names)
+
+
+def test_windows_snapshot_requires_each_visible_path_at_reviewed_base(tmp_path: Path):
+    repository, head = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="source is unavailable"):
+        build_windows_snapshot(repository, head, ("docs/missing.md",))
 
 
 def test_windows_snapshot_rejects_symlink_or_hardlink(tmp_path: Path):
@@ -413,7 +423,7 @@ def test_windows_snapshot_rejects_symlink_or_hardlink(tmp_path: Path):
     head = _git(repository, "rev-parse", "HEAD")
 
     with pytest.raises(ValueError, match="unsafe tracked file"):
-        build_windows_snapshot(repository, head)
+        build_windows_snapshot(repository, head, ("docs/status.md",))
 
 
 def test_windows_snapshot_rejects_submodule_index_entry(tmp_path: Path):
@@ -430,7 +440,7 @@ def test_windows_snapshot_rejects_submodule_index_entry(tmp_path: Path):
     _git(repository, "reset", "--hard", commit)
 
     with pytest.raises(ValueError, match="unsupported tracked object"):
-        build_windows_snapshot(repository, commit)
+        build_windows_snapshot(repository, commit, ("docs/status.md",))
 
 
 @pytest.mark.parametrize(
@@ -463,12 +473,38 @@ def test_snapshot_archive_rejects_traversal_links_and_special_files(
 
 def test_snapshot_match_detects_windows_change_during_worker(tmp_path: Path):
     repository, head = _repository(tmp_path)
-    snapshot = build_windows_snapshot(repository, head)
+    snapshot = build_windows_snapshot(repository, head, ("docs/status.md",))
     assert windows_snapshot_matches(repository, head, snapshot)
 
-    (repository / "docs" / "status.md").write_text("Changed.\n", encoding="utf-8")
+    (repository / "src" / "safe.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     assert not windows_snapshot_matches(repository, head, snapshot)
+
+
+def test_shadow_patch_rejects_unlisted_changed_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    worker._runtime_spec = _runtime(tmp_path / "runtime")
+    baseline = ("head", "refs", "config")
+    monkeypatch.setattr(worker, "_shadow_git_control_state", lambda _shadow: baseline)
+
+    def fake_run(_platform, argv, **_kwargs):
+        if "status" in argv:
+            return _completed(list(argv), stdout="?? docs/unlisted.md\0")
+        if "diff" in argv and "--quiet" in argv:
+            return _completed(list(argv))
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(worker, "_run_wsl_text", fake_run)
+
+    assert worker._validated_shadow_patch(
+        "/home/worker/shadow",
+        ("docs/status.md",),
+        ("docs/status.md",),
+        baseline,
+    ) is None
 
 
 def test_validated_patch_applies_only_to_disposable_windows_worktree(tmp_path: Path):
@@ -522,7 +558,15 @@ def test_shadow_success_requires_cleanup(
     )
     monkeypatch.setattr(worker, "_runtime_is_current", lambda _spec: True)
     monkeypatch.setattr(worker, "_create_native_workspace", lambda _purpose: "/home/w/shadow")
-    monkeypatch.setattr(worker, "_extract_snapshot", lambda *_args: True)
+    extracted_paths: list[tuple[str, ...]] = []
+
+    def extract(_shadow, archive, paths):
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as payload:
+            assert tuple(payload.getnames()) == ("docs/status.md",)
+        extracted_paths.append(paths)
+        return True
+
+    monkeypatch.setattr(worker, "_extract_snapshot", extract)
     monkeypatch.setattr(worker, "_initialize_snapshot_git", lambda *_args: True)
     monkeypatch.setattr(worker, "_shadow_git_control_state", lambda *_args: ("a", "b", "c"))
     monkeypatch.setattr(
@@ -549,6 +593,7 @@ def test_shadow_success_requires_cleanup(
     )
 
     assert result == WslExecutionResult("failed", "wsl_temp_cleanup_failed", 3)
+    assert extracted_paths == [("docs/status.md",)]
     assert worker.last_transfer_evidence.patch_applied
     assert not worker.last_transfer_evidence.temp_cleanup
 
@@ -905,15 +950,21 @@ def test_worker_source_has_no_shell_wrappers_or_unsafe_fallbacks():
 
 def test_snapshot_digest_is_content_bound(tmp_path: Path):
     repository, head = _repository(tmp_path)
-    snapshot = build_windows_snapshot(repository, head)
+    snapshot = build_windows_snapshot(repository, head, ("docs/status.md",))
 
     expected = hashlib.sha256()
-    for relative in ("docs/status.md", "src/safe.py"):
-        expected.update(relative.encode("utf-8"))
-        expected.update(b"\0")
-        expected.update(b"100644\0")
-        expected.update((repository / relative).read_bytes())
+    expected.update(b"docs/status.md\0")
+    expected.update(b"100644\0")
+    expected.update((repository / "docs" / "status.md").read_bytes())
     assert snapshot.digest == expected.hexdigest()
+
+    expected_source = hashlib.sha256()
+    for relative in ("docs/status.md", "src/safe.py"):
+        expected_source.update(relative.encode("utf-8"))
+        expected_source.update(b"\0")
+        expected_source.update(b"100644\0")
+        expected_source.update((repository / relative).read_bytes())
+    assert snapshot.source_state_digest == expected_source.hexdigest()
 
 
 def test_fake_snapshot_cannot_expose_archive_in_repr():
@@ -1017,7 +1068,7 @@ def test_real_pinned_wsl_shadow_transfer_smoke(tmp_path: Path):
     assert worktree_result.passed
     assert worktree_result.handle is not None
     worktree = worktree_result.handle
-    canonical_before = build_windows_snapshot(canonical, head)
+    canonical_before = build_windows_snapshot(canonical, head, allowed)
     started: list[bool] = []
     try:
         execution = service.invoke_codex(
