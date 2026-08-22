@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -51,6 +53,14 @@ MAX_USAGE_RATIO_BASIS_POINTS: Final = (
 )
 VALIDATION_TIMEOUT_SECONDS: Final = 1800
 VALIDATION_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS: Final = 30
+MAX_VALIDATION_TOOL_DISCOVERY_OUTPUT_BYTES: Final = 65_536
+MAX_VALIDATION_TOOL_FILES: Final = 512
+MAX_VALIDATION_TOOL_TREE_ENTRIES: Final = 4096
+MAX_VALIDATION_TOOL_FILE_BYTES: Final = 64 * 1024 * 1024
+MAX_VALIDATION_TOOL_TOTAL_BYTES: Final = 256 * 1024 * 1024
+VALIDATION_TOOL_CODE_SUFFIXES: Final = frozenset(
+    {".py", ".pyi", ".pyd", ".so", ".dll", ".exe"}
+)
 VALIDATION_ENVIRONMENT_NAMES: Final = (
     "PATH",
     "PATHEXT",
@@ -137,6 +147,36 @@ VALIDATION_COMMANDS: Final = (
     "python -m ruff check . --no-cache",
     "git diff --check",
 )
+VALIDATION_TOOL_DISCOVERY_SCRIPT: Final = """
+import importlib.util
+import json
+import os
+import sys
+import sysconfig
+
+tool = sys.argv[1]
+names = {"pytest": ("pytest", "_pytest"), "ruff": ("ruff",)}.get(tool)
+if names is None:
+    raise SystemExit(2)
+modules = {}
+for name in names:
+    spec = importlib.util.find_spec(name)
+    if spec is None or not isinstance(spec.origin, str):
+        raise SystemExit(3)
+    modules[name] = {
+        "origin": spec.origin,
+        "locations": list(spec.submodule_search_locations or ()),
+    }
+executable = None
+if tool == "ruff":
+    scripts = sysconfig.get_path("scripts")
+    executable = os.path.join(scripts, "ruff" + (sysconfig.get_config_var("EXE") or ""))
+print(json.dumps(
+    {"modules": modules, "executable": executable},
+    sort_keys=True,
+    separators=(",", ":"),
+))
+""".strip()
 SENSITIVE_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,})\b"),
     re.compile(r"(?i)\bgithub_pat_[A-Za-z0-9_]{8,}\b"),
@@ -176,6 +216,27 @@ class CodexLaunchSpec:
 @dataclass(frozen=True, slots=True)
 class ValidationRuntimeSpec:
     python_identity: CodexLaunchFileIdentity = field(repr=False)
+    venv_root: Path = field(repr=False)
+    pytest_identity: ValidationToolIdentity = field(repr=False)
+    ruff_identity: ValidationToolIdentity = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationToolFileIdentity:
+    path: Path = field(repr=False)
+    relative_path: str = field(repr=False)
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+    digest: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationToolIdentity:
+    name: str
+    files: tuple[ValidationToolFileIdentity, ...] = field(repr=False)
+    manifest_digest: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1350,7 +1411,19 @@ class SystemCodexPilotServices:
                 result = GateResult(False, "validation_runtime_unavailable")
                 self._validation_runtime_preflight_result = result
                 return result
-        if not _validation_runtime_is_current(spec):
+        if (
+            not _validation_runtime_is_current(spec)
+            or not _validation_tool_identity_is_current(
+                spec,
+                spec.pytest_identity,
+                cwd=self._repository_path,
+            )
+            or not _validation_tool_identity_is_current(
+                spec,
+                spec.ruff_identity,
+                cwd=self._repository_path,
+            )
+        ):
             result = GateResult(False, "validation_runtime_changed")
         else:
             result = GateResult(True, "validation_runtime_ready")
@@ -1702,15 +1775,25 @@ class SystemCodexPilotServices:
             return ValidationGateResult(False, "validation_runtime_unavailable")
         categories: list[str] = []
         for command in commands:
-            if command != VALIDATION_COMMANDS[2] and not _validation_runtime_is_current(
-                spec
-            ):
-                categories.append("runtime_changed")
-                return ValidationGateResult(
-                    False,
-                    "validation_runtime_changed",
-                    tuple(categories),
+            if command != VALIDATION_COMMANDS[2]:
+                tool_identity = (
+                    spec.pytest_identity
+                    if command == VALIDATION_COMMANDS[0]
+                    else spec.ruff_identity
                 )
+                if not _validation_runtime_is_current(
+                    spec
+                ) or not _validation_tool_identity_is_current(
+                    spec,
+                    tool_identity,
+                    cwd=worktree.path,
+                ):
+                    categories.append("runtime_changed")
+                    return ValidationGateResult(
+                        False,
+                        "validation_runtime_changed",
+                        tuple(categories),
+                    )
             argv, environment = _validation_command(command, spec)
             try:
                 completed = subprocess.run(
@@ -2227,7 +2310,292 @@ def _resolve_validation_runtime_spec(
     )
     if identity is None or not _path_is_within(identity.path, venv_root):
         return None
-    return ValidationRuntimeSpec(identity)
+    try:
+        resolved_venv_root = venv_root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    pytest_identity = _discover_validation_tool_identity(
+        identity,
+        resolved_venv_root,
+        "pytest",
+    )
+    ruff_identity = _discover_validation_tool_identity(
+        identity,
+        resolved_venv_root,
+        "ruff",
+    )
+    if pytest_identity is None or ruff_identity is None:
+        return None
+    if not _validation_runtime_python_is_current(identity):
+        return None
+    return ValidationRuntimeSpec(
+        identity,
+        resolved_venv_root,
+        pytest_identity,
+        ruff_identity,
+    )
+
+
+def _discover_validation_tool_identity(
+    python_identity: CodexLaunchFileIdentity,
+    venv_root: Path,
+    tool: str,
+    *,
+    cwd: Path | None = None,
+) -> ValidationToolIdentity | None:
+    expected_modules = {
+        "pytest": ("pytest", "_pytest"),
+        "ruff": ("ruff",),
+    }.get(tool)
+    if expected_modules is None or not _validation_runtime_python_is_current(
+        python_identity
+    ):
+        return None
+    payload = _validation_tool_discovery_payload(
+        python_identity.path,
+        venv_root.parent if cwd is None else cwd,
+        tool,
+    )
+    if payload is None or set(payload) != {"modules", "executable"}:
+        return None
+    modules = payload.get("modules")
+    if not isinstance(modules, dict) or set(modules) != set(expected_modules):
+        return None
+    roots: list[Path] = []
+    origins: list[Path] = []
+    for module_name in expected_modules:
+        module = modules.get(module_name)
+        if not isinstance(module, dict) or set(module) != {"origin", "locations"}:
+            return None
+        origin = module.get("origin")
+        locations = module.get("locations")
+        if not isinstance(origin, str) or not isinstance(locations, list):
+            return None
+        if len(locations) != 1 or not isinstance(locations[0], str):
+            return None
+        origins.append(Path(origin))
+        roots.append(Path(locations[0]))
+    executable_value = payload.get("executable")
+    executable: Path | None = None
+    if tool == "ruff":
+        if not isinstance(executable_value, str):
+            return None
+        executable = Path(executable_value)
+    elif executable_value is not None:
+        return None
+    identity = _validation_tool_identity_from_paths(
+        tool=tool,
+        venv_root=venv_root,
+        roots=tuple(roots),
+        origins=tuple(origins),
+        executable=executable,
+    )
+    if not _validation_runtime_python_is_current(python_identity):
+        return None
+    return identity
+
+
+def _validation_tool_discovery_payload(
+    python_path: Path,
+    cwd: Path,
+    tool: str,
+) -> dict[str, object] | None:
+    try:
+        with tempfile.TemporaryFile() as stdout:
+            completed = subprocess.run(
+                [
+                    str(python_path),
+                    "-c",
+                    VALIDATION_TOOL_DISCOVERY_SCRIPT,
+                    tool,
+                ],
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                timeout=VALIDATION_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS,
+                env=_validation_environment(),
+            )
+            if (
+                completed.returncode != 0
+                or stdout.tell() > MAX_VALIDATION_TOOL_DISCOVERY_OUTPUT_BYTES
+            ):
+                return None
+            stdout.seek(0)
+            raw = stdout.read(MAX_VALIDATION_TOOL_DISCOVERY_OUTPUT_BYTES + 1)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if len(raw) > MAX_VALIDATION_TOOL_DISCOVERY_OUTPUT_BYTES:
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _validation_tool_identity_from_paths(
+    *,
+    tool: str,
+    venv_root: Path,
+    roots: tuple[Path, ...],
+    origins: tuple[Path, ...],
+    executable: Path | None,
+) -> ValidationToolIdentity | None:
+    if tool not in {"pytest", "ruff"} or not roots or not origins:
+        return None
+    candidates: list[Path] = []
+    for root in roots:
+        if not _safe_runtime_directory(root, parent=venv_root):
+            return None
+        tree_files = _validation_tool_tree_files(root)
+        if tree_files is None:
+            return None
+        candidates.extend(tree_files)
+    candidates.extend(origins)
+    if executable is not None:
+        candidates.append(executable)
+
+    by_path: dict[str, ValidationToolFileIdentity] = {}
+    file_nodes: set[tuple[int, int]] = set()
+    total_bytes = 0
+    for candidate in sorted(candidates, key=lambda path: (str(path).casefold(), str(path))):
+        identity = _validation_tool_file_identity(candidate, venv_root)
+        if identity is None:
+            return None
+        normalized = unicodedata.normalize(
+            "NFC",
+            identity.relative_path,
+        ).casefold()
+        existing = by_path.get(normalized)
+        if existing is not None:
+            if existing.path != identity.path:
+                return None
+            continue
+        node = (identity.device, identity.inode)
+        if node in file_nodes:
+            return None
+        file_nodes.add(node)
+        by_path[normalized] = identity
+        total_bytes += identity.size
+        if (
+            len(by_path) > MAX_VALIDATION_TOOL_FILES
+            or total_bytes > MAX_VALIDATION_TOOL_TOTAL_BYTES
+        ):
+            return None
+    if not by_path:
+        return None
+    files = tuple(
+        sorted(
+            by_path.values(),
+            key=lambda identity: (
+                identity.relative_path.casefold(),
+                identity.relative_path,
+            ),
+        )
+    )
+    manifest = hashlib.sha256()
+    for identity in files:
+        manifest.update(identity.relative_path.encode("utf-8"))
+        manifest.update(b"\0")
+        manifest.update(str(identity.size).encode("ascii"))
+        manifest.update(b"\0")
+        manifest.update(identity.digest.encode("ascii"))
+        manifest.update(b"\n")
+    return ValidationToolIdentity(tool, files, manifest.hexdigest())
+
+
+def _validation_tool_tree_files(root: Path) -> tuple[Path, ...] | None:
+    files: list[Path] = []
+    directories = [root]
+    observed_entries = 0
+    while directories:
+        directory = directories.pop()
+        try:
+            entries = sorted(
+                os.scandir(directory),
+                key=lambda entry: (entry.name.casefold(), entry.name),
+            )
+        except OSError:
+            return None
+        for entry in entries:
+            observed_entries += 1
+            if observed_entries > MAX_VALIDATION_TOOL_TREE_ENTRIES:
+                return None
+            if entry.name == "__pycache__":
+                continue
+            path = Path(entry.path)
+            try:
+                path_stat = path.lstat()
+            except OSError:
+                return None
+            reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            file_attributes = getattr(path_stat, "st_file_attributes", 0)
+            if path.is_symlink() or bool(file_attributes & reparse_attribute):
+                return None
+            if stat.S_ISDIR(path_stat.st_mode):
+                directories.append(path)
+            elif stat.S_ISREG(path_stat.st_mode):
+                if path.suffix.casefold() in VALIDATION_TOOL_CODE_SUFFIXES:
+                    files.append(path)
+            else:
+                return None
+    return tuple(files)
+
+
+def _validation_tool_file_identity(
+    path: Path,
+    venv_root: Path,
+) -> ValidationToolFileIdentity | None:
+    if not path.is_absolute() or not venv_root.is_absolute():
+        return None
+    try:
+        before = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(before, "st_file_attributes", 0)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or path.is_symlink()
+        or bool(file_attributes & reparse_attribute)
+        or before.st_size > MAX_VALIDATION_TOOL_FILE_BYTES
+        or os.path.normcase(str(path)) != os.path.normcase(str(resolved))
+        or not _path_is_within(resolved, venv_root)
+    ):
+        return None
+    digest = hashlib.sha256()
+    try:
+        with resolved.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        after = resolved.lstat()
+        relative = resolved.relative_to(venv_root).as_posix()
+    except (OSError, ValueError):
+        return None
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        return None
+    return ValidationToolFileIdentity(
+        resolved,
+        unicodedata.normalize("NFC", relative),
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        digest.hexdigest(),
+    )
 
 
 def _safe_runtime_directory(path: Path, *, parent: Path) -> bool:
@@ -2250,12 +2618,40 @@ def _safe_runtime_directory(path: Path, *, parent: Path) -> bool:
 
 
 def _validation_runtime_is_current(spec: ValidationRuntimeSpec) -> bool:
-    identity = spec.python_identity
+    return _validation_runtime_python_is_current(spec.python_identity)
+
+
+def _validation_runtime_python_is_current(
+    identity: CodexLaunchFileIdentity,
+) -> bool:
     current = _launch_file_identity(
         identity.path,
         require_windows_exe=identity.path.suffix.casefold() == ".exe",
     )
     return current == identity
+
+
+def _validation_tool_identity_is_current(
+    runtime: ValidationRuntimeSpec,
+    expected: ValidationToolIdentity,
+    *,
+    cwd: Path,
+) -> bool:
+    if expected.name not in {"pytest", "ruff"}:
+        return False
+    for identity in expected.files:
+        current = _validation_tool_file_identity(identity.path, runtime.venv_root)
+        if current != identity:
+            return False
+    if not _validation_runtime_is_current(runtime):
+        return False
+    discovered = _discover_validation_tool_identity(
+        runtime.python_identity,
+        runtime.venv_root,
+        expected.name,
+        cwd=cwd,
+    )
+    return discovered == expected and _validation_runtime_is_current(runtime)
 
 
 def _codex_version_preflight(
