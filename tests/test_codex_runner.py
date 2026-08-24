@@ -31,6 +31,7 @@ from phoenix_office.dev.codex_runner import (
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
     ValidationGateResult,
+    ValidationRuntimeSpec,
     WorktreeHandle,
     WorktreeResult,
     _codex_exec_argv,
@@ -102,6 +103,65 @@ def _native_launch_spec(tmp_path: Path) -> CodexLaunchSpec:
         (str(identity.path),),
         "native_exe",
         (identity,),
+    )
+
+
+def _validation_runtime_spec(repository: Path) -> ValidationRuntimeSpec:
+    venv_root = repository / ".venv"
+    executable = venv_root
+    if os.name == "nt":
+        executable = executable / "Scripts" / "python.exe"
+        _write_windows_executable(executable)
+        ruff_executable = venv_root / "Scripts" / "ruff.exe"
+        _write_windows_executable(ruff_executable)
+    else:
+        executable = executable / "bin" / "python"
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"#!/usr/bin/env python3\n")
+        executable.chmod(0o755)
+        ruff_executable = venv_root / "bin" / "ruff"
+        ruff_executable.write_text("synthetic ruff binary\n", encoding="utf-8")
+        ruff_executable.chmod(0o755)
+    site_packages = venv_root / "Lib" / "site-packages"
+    pytest_root = site_packages / "pytest"
+    internal_pytest_root = site_packages / "_pytest"
+    ruff_root = site_packages / "ruff"
+    for path, content in (
+        (pytest_root / "__init__.py", "pytest package\n"),
+        (internal_pytest_root / "__init__.py", "internal pytest package\n"),
+        (internal_pytest_root / "main.py", "pytest implementation\n"),
+        (ruff_root / "__init__.py", "ruff package\n"),
+        (ruff_root / "__main__.py", "ruff module entrypoint\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    identity = runner_module._launch_file_identity(
+        executable,
+        require_windows_exe=os.name == "nt",
+    )
+    assert identity is not None
+    resolved_venv = venv_root.resolve(strict=True)
+    pytest_identity = runner_module._validation_tool_identity_from_paths(
+        tool="pytest",
+        venv_root=resolved_venv,
+        roots=(pytest_root, internal_pytest_root),
+        origins=(pytest_root / "__init__.py", internal_pytest_root / "__init__.py"),
+        executable=None,
+    )
+    ruff_identity = runner_module._validation_tool_identity_from_paths(
+        tool="ruff",
+        venv_root=resolved_venv,
+        roots=(ruff_root,),
+        origins=(ruff_root / "__init__.py",),
+        executable=ruff_executable,
+    )
+    assert pytest_identity is not None
+    assert ruff_identity is not None
+    return ValidationRuntimeSpec(
+        identity,
+        resolved_venv,
+        pytest_identity,
+        ruff_identity,
     )
 
 
@@ -497,6 +557,18 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
             "preclaim",
             GateResult(False, "duplicate_active_pr"),
             "duplicate_active_pr",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "validation_runtime_unavailable"),
+            "validation_runtime_unavailable",
+            ["preclaim"],
+        ),
+        (
+            "preclaim",
+            GateResult(False, "validation_runtime_changed"),
+            "validation_runtime_changed",
             ["preclaim"],
         ),
         (
@@ -2802,6 +2874,11 @@ def test_system_preclaim_fetches_exact_main_and_checks_all_collisions(
         return subprocess.CompletedProcess(argv, returncode, output, "")
 
     monkeypatch.setattr(service, "_run", fake_run)
+    monkeypatch.setattr(
+        service,
+        "_validation_runtime_gate",
+        lambda: GateResult(True, "validation_runtime_ready"),
+    )
 
     result = service.preclaim_repository_gate(authorization)
 
@@ -2849,14 +2926,436 @@ def test_system_collision_gates_are_fail_closed(
     assert result == GateResult(False, category)
 
 
+def test_validation_runtime_preclaim_qualifies_exact_canonical_venv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0, "private output", "private error")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-propagate")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-propagate")
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    service = SystemCodexPilotServices(
+        canonical,
+        validation_runtime_resolver=lambda _path: runtime,
+        wsl_worker=FakeWslWorker(),
+    )
+
+    result = service._validation_runtime_gate()
+
+    assert result == GateResult(True, "validation_runtime_ready")
+    assert service.validation_runtime_frozen
+    assert service._validation_runtime_spec == runtime
+    assert [call[0][1:] for call in calls] == [
+        ["-m", "pytest", "--version"],
+        ["-m", "ruff", "--version"],
+    ]
+    assert all(call[0][0] == str(runtime.python_identity.path) for call in calls)
+    assert all(call[1]["cwd"] == canonical for call in calls)
+    assert all(call[1]["shell"] is False for call in calls)
+    assert calls[0][1]["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in calls[1][1]["env"]
+    assert all("OPENAI_API_KEY" not in call[1]["env"] for call in calls)
+    assert all("UNRELATED_SECRET" not in call[1]["env"] for call in calls)
+    assert str(runtime.python_identity.path) not in repr(result)
+
+
+def test_missing_canonical_venv_fails_validation_runtime_preclaim(tmp_path: Path):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    service = SystemCodexPilotServices(canonical, wsl_worker=FakeWslWorker())
+
+    result = service._validation_runtime_gate()
+
+    assert result == GateResult(False, "validation_runtime_unavailable")
+    assert not service.validation_runtime_frozen
+    assert str(canonical) not in repr(result)
+
+
+@pytest.mark.parametrize("missing_module", ["pytest", "ruff"])
+def test_missing_validation_module_fails_preclaim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_module: str,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv,
+            1 if argv[2] == missing_module else 0,
+            "private output",
+            "private error",
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(
+        canonical,
+        validation_runtime_resolver=lambda _path: runtime,
+        wsl_worker=FakeWslWorker(),
+    )
+
+    result = service._validation_runtime_gate()
+
+    assert result == GateResult(False, "validation_runtime_unavailable")
+    assert not service.validation_runtime_frozen
+    assert calls[-1][2] == missing_module
+    assert str(runtime.python_identity.path) not in repr(result)
+
+
+def test_validation_uses_frozen_python_minimal_environment_and_worktree_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-propagate")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-not-propagate")
+    monkeypatch.setenv("ARBITRARY_AMBIENT_VALUE", "must-not-propagate")
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        True,
+        "validation_passed",
+        ("passed", "passed", "passed"),
+    )
+    assert calls[0][0] == [
+        str(runtime.python_identity.path),
+        "-m",
+        "pytest",
+        "--basetemp",
+        ".pytest_tmp",
+    ]
+    assert calls[1][0] == [
+        str(runtime.python_identity.path),
+        "-m",
+        "ruff",
+        "check",
+        ".",
+        "--no-cache",
+    ]
+    assert calls[2][0] == ["git", "diff", "--check"]
+    assert all(call[1]["cwd"] == worktree.path for call in calls)
+    assert all(call[1]["shell"] is False for call in calls)
+    assert calls[0][1]["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in calls[1][1]["env"]
+    for _argv, kwargs in calls:
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert "GITHUB_TOKEN" not in kwargs["env"]
+        assert "ARBITRARY_AMBIENT_VALUE" not in kwargs["env"]
+    assert not (worktree.path / ".venv").exists()
+
+
+def test_validation_runtime_identity_change_fails_closed_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+    runtime.python_identity.path.write_bytes(b"MZchanged-runtime-identity")
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_runtime_changed",
+        ("runtime_changed",),
+    )
+    assert calls == []
+    assert str(runtime.python_identity.path) not in repr(result)
+
+
+def test_pytest_tool_identity_change_fails_closed_before_pytest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    changed = next(
+        identity.path
+        for identity in runtime.pytest_identity.files
+        if identity.relative_path.endswith("_pytest/main.py")
+    )
+    changed.write_text("changed pytest implementation\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_runtime_changed",
+        ("runtime_changed",),
+    )
+    assert calls == []
+    assert str(changed) not in repr(result)
+
+
+def test_ruff_tool_identity_change_fails_closed_before_ruff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    changed = next(
+        identity.path
+        for identity in runtime.ruff_identity.files
+        if identity.relative_path.endswith("ruff/__main__.py")
+    )
+    changed.write_text("changed ruff implementation\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    real_identity_check = runner_module._validation_tool_identity_is_current
+
+    def identity_check(runtime_spec, identity, **kwargs):
+        if identity.name == "pytest":
+            return True
+        return real_identity_check(runtime_spec, identity, **kwargs)
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        identity_check,
+    )
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_runtime_changed",
+        ("passed", "runtime_changed"),
+    )
+    assert len(calls) == 1
+    assert calls[0][1:3] == ["-m", "pytest"]
+    assert str(changed) not in repr(result)
+
+
+def test_unrelated_venv_file_does_not_change_qualified_tool_identities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    unrelated = runtime.venv_root / "unrelated-package.txt"
+    unrelated.write_text("unrelated mutable content\n", encoding="utf-8")
+
+    def rediscover(_python, _venv, tool, **_kwargs):
+        return (
+            runtime.pytest_identity if tool == "pytest" else runtime.ruff_identity
+        )
+
+    monkeypatch.setattr(
+        runner_module,
+        "_discover_validation_tool_identity",
+        rediscover,
+    )
+
+    assert runner_module._validation_tool_identity_is_current(
+        runtime,
+        runtime.pytest_identity,
+        cwd=canonical,
+    )
+    assert runner_module._validation_tool_identity_is_current(
+        runtime,
+        runtime.ruff_identity,
+        cwd=canonical,
+    )
+
+
+def test_validation_tool_identity_rejects_path_escape(tmp_path: Path):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    outside = tmp_path / "outside.py"
+    outside.write_text("outside validation code\n", encoding="utf-8")
+    pytest_root = runtime.venv_root / "Lib" / "site-packages" / "pytest"
+
+    identity = runner_module._validation_tool_identity_from_paths(
+        tool="pytest",
+        venv_root=runtime.venv_root,
+        roots=(pytest_root,),
+        origins=(outside,),
+        executable=None,
+    )
+
+    assert identity is None
+
+
+def test_validation_rechecks_frozen_python_before_each_python_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(list(argv))
+        runtime.python_identity.path.write_bytes(b"MZchanged-after-pytest")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_runtime_changed",
+        ("passed", "runtime_changed"),
+    )
+    assert len(calls) == 1
+    assert calls[0][1:3] == ["-m", "pytest"]
+
+
 @pytest.mark.parametrize("failure_mode", ["nonzero", "timeout"])
 def test_phoenix_validation_runs_in_order_and_stops_on_first_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure_mode: str,
 ):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
     worktree = WorktreeHandle(
-        tmp_path,
+        worktree_path,
         BRANCH,
         BASE_SHA,
         b"gitdir",
@@ -2879,8 +3378,19 @@ def test_phoenix_validation_runs_in_order_and_stops_on_first_failure(
         )
 
     monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
 
-    result = SystemCodexPilotServices(tmp_path).run_validations(
+    result = service.run_validations(
         worktree,
         VALIDATION_COMMANDS,
     )
@@ -2894,8 +3404,11 @@ def test_phoenix_validation_runs_in_order_and_stops_on_first_failure(
         "timed_out" if failure_mode == "timeout" else "failed",
     )
     assert len(calls) == 2
+    assert calls[0][0] == str(runtime.python_identity.path)
     assert calls[0][1:3] == ["-m", "pytest"]
+    assert calls[1][0] == str(runtime.python_identity.path)
     assert calls[1][1:4] == ["-m", "ruff", "check"]
+    assert not (worktree.path / ".venv").exists()
     assert "raw" not in repr(result)
 
 
