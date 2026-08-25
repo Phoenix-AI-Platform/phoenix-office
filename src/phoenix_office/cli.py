@@ -27,12 +27,14 @@ from phoenix_office.dev import (
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
     SystemCodexSuccessorServices,
+    blocked_approved_codex_successor_execution_result,
     blocked_codex_pilot_package_build_result,
     blocked_codex_successor_task_spec_result,
     blocked_reviewed_execution_result,
     bounded_codex_pilot_run_result,
     build_approved_codex_successor_task_spec,
     build_codex_pilot_package,
+    execute_approved_codex_successor,
     execute_reviewed_codex_task,
     propose_codex_successor,
     render_reviewed_codex_invocation_prompt,
@@ -381,6 +383,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     codex_successor_task_spec_parser.set_defaults(
         func=codex_successor_task_spec_build
+    )
+    codex_successor_execute_parser = dev_subparsers.add_parser(
+        "codex-successor-execute-approved",
+        help="Execute one externally approved successor through reviewed controls",
+    )
+    codex_successor_execute_parser.add_argument(
+        "successor_proposal_json",
+        type=Path,
+        help="Path to the exact TASK-075 successor proposal JSON",
+    )
+    codex_successor_execute_parser.add_argument(
+        "architecture_approval_json",
+        type=Path,
+        help="Path to the existing external architecture approval receipt JSON",
+    )
+    codex_successor_execute_parser.add_argument(
+        "--control-root",
+        type=Path,
+        required=True,
+        help="Explicit safe external directory for generated control artifacts",
+    )
+    codex_successor_execute_parser.add_argument(
+        "--claim-store",
+        type=Path,
+        required=True,
+        help="Explicit new dedicated Codex control-state SQLite database path",
+    )
+    codex_successor_execute_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded approved-successor execution result as JSON",
+    )
+    codex_successor_execute_parser.set_defaults(
+        func=codex_successor_execute_approved
     )
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
@@ -1451,6 +1487,34 @@ def codex_successor_task_spec_build(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "success" else 1
 
 
+def codex_successor_execute_approved(args: argparse.Namespace) -> int:
+    """Compile and execute one existing external successor approval."""
+
+    try:
+        result = execute_approved_codex_successor(
+            proposal_path=args.successor_proposal_json,
+            architecture_approval_path=args.architecture_approval_json,
+            control_root=args.control_root,
+            claim_store_path=args.claim_store,
+            repository_root=Path.cwd(),
+            evidence_control_reviewers=(
+                CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
+            ),
+            package_inspector=_inspect_codex_pilot_package_build,
+            runner_invoker=_invoke_generated_codex_package,
+            services=SystemCodexSuccessorServices(Path.cwd()),
+        )
+    except Exception:
+        result = blocked_approved_codex_successor_execution_result(
+            "successor_execution_internal_failure"
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_successor_reviewed_execution(result)
+    return 0 if result.get("status") == "success" else 1
+
+
 def _print_codex_successor_proposal(result: Mapping[str, object]) -> None:
     print("Codex autonomy successor proposal")
     print(f"Status: {result['status']}")
@@ -1481,6 +1545,20 @@ def _print_codex_successor_task_spec_build(
     print("Package builder invoked: no")
     print("Runner invoked: no")
     print("Codex invoked: no")
+
+
+def _print_codex_successor_reviewed_execution(
+    result: Mapping[str, object],
+) -> None:
+    print("Approved Codex successor execution")
+    print(f"Status: {result['status']}")
+    print(f"Category: {result['category']}")
+    print(f"Selected issue: {result['selected_issue_number'] or 'none'}")
+    print(f"Selected task: {result['selected_task_id'] or 'none'}")
+    print(f"Task spec written: {_format_yes_no(bool(result['task_spec_written']))}")
+    print(f"Runner invoked: {_format_yes_no(bool(result['runner_invoked']))}")
+    print(f"Attempt ID: {result['attempt_id']}")
+    print(f"Pull request identity: {result['office_pr']}")
 
 
 def _execute_codex_pilot_from_paths(
