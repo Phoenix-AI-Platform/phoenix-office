@@ -7,6 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,11 +25,13 @@ from phoenix_office.dev import (
     ReviewedRunnerOutcome,
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
+    SystemCodexSuccessorServices,
     blocked_codex_pilot_package_build_result,
     blocked_reviewed_execution_result,
     bounded_codex_pilot_run_result,
     build_codex_pilot_package,
     execute_reviewed_codex_task,
+    propose_codex_successor,
     render_reviewed_codex_invocation_prompt,
 )
 from phoenix_office.dev_status import (
@@ -332,6 +335,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the bounded supervised-run result as JSON",
     )
     codex_pilot_run_parser.set_defaults(func=codex_pilot_run)
+    codex_successor_propose_parser = dev_subparsers.add_parser(
+        "codex-successor-propose",
+        help="Propose one deterministic read-only Codex autonomy successor",
+    )
+    codex_successor_propose_parser.add_argument(
+        "--verification-evidence",
+        type=Path,
+        required=True,
+        help="Explicit Phoenix Tools verification evidence JSON",
+    )
+    codex_successor_propose_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded successor proposal as JSON",
+    )
+    codex_successor_propose_parser.set_defaults(func=codex_successor_propose)
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -1360,6 +1379,39 @@ def codex_pilot_run(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_run_result(result)
     return 0 if result.get("status") == "success" else 1
+
+
+def codex_successor_propose(args: argparse.Namespace) -> int:
+    """Propose at most one successor without creating execution authority."""
+
+    result = propose_codex_successor(
+        repository_root=Path.cwd(),
+        verification_evidence_path=args.verification_evidence,
+        services=SystemCodexSuccessorServices(Path.cwd()),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_successor_proposal(result)
+    return 0 if result.get("status") == "success" else 1
+
+
+def _print_codex_successor_proposal(result: Mapping[str, object]) -> None:
+    print("Codex autonomy successor proposal")
+    print(f"Status: {result['status']}")
+    print(f"Category: {result['category']}")
+    print(f"Verified base SHA: {result['verified_base_sha'] or 'not available'}")
+    print(f"Verification ID: {result['verification_id'] or 'not available'}")
+    print(f"Eligible candidates: {result['candidate_count']}")
+    print(f"Selected issue: {result['selected_issue_number'] or 'none'}")
+    print(f"Selected task: {result['selected_task_id'] or 'none'}")
+    print(f"Proposal fingerprint: {result['proposal_fingerprint'] or 'none'}")
+    print(
+        "Ready for architecture review: "
+        f"{_format_yes_no(bool(result['proposal_ready_for_architecture_review']))}"
+    )
+    print("Execution: not performed")
+    print("GitHub mutation: not performed")
 
 
 def _execute_codex_pilot_from_paths(
