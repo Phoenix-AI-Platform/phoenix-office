@@ -3035,9 +3035,14 @@ def test_validation_uses_frozen_python_minimal_environment_and_worktree_cwd(
         "",
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
+    pytest_basetemps: list[Path] = []
 
     def fake_run(argv, **kwargs):
         calls.append((list(argv), kwargs))
+        if list(argv)[1:3] == ["-m", "pytest"]:
+            pytest_basetemp = Path(argv[-1])
+            assert pytest_basetemp.is_dir()
+            pytest_basetemps.append(pytest_basetemp)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-propagate")
@@ -3068,7 +3073,7 @@ def test_validation_uses_frozen_python_minimal_environment_and_worktree_cwd(
         "-m",
         "pytest",
         "--basetemp",
-        ".pytest_tmp",
+        str(pytest_basetemps[0]),
     ]
     assert calls[1][0] == [
         str(runtime.python_identity.path),
@@ -3083,11 +3088,212 @@ def test_validation_uses_frozen_python_minimal_environment_and_worktree_cwd(
     assert all(call[1]["shell"] is False for call in calls)
     assert calls[0][1]["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in calls[1][1]["env"]
+    assert len(pytest_basetemps) == 1
+    pytest_basetemp = pytest_basetemps[0]
+    assert pytest_basetemp.is_absolute()
+    assert pytest_basetemp.name.startswith(
+        runner_module.VALIDATION_PYTEST_BASETEMP_PREFIX
+    )
+    assert not runner_module._path_is_within(
+        pytest_basetemp,
+        canonical.resolve(strict=True),
+    )
+    assert not runner_module._path_is_within(
+        pytest_basetemp,
+        worktree.path.resolve(strict=True),
+    )
+    assert not runner_module._path_is_within(pytest_basetemp, runtime.venv_root)
+    assert not pytest_basetemp.exists()
+    assert str(pytest_basetemp) not in repr(result)
     for _argv, kwargs in calls:
         assert "OPENAI_API_KEY" not in kwargs["env"]
         assert "GITHUB_TOKEN" not in kwargs["env"]
         assert "ARBITRARY_AMBIENT_VALUE" not in kwargs["env"]
     assert not (worktree.path / ".venv").exists()
+
+
+def test_validation_authorization_commands_remain_byte_for_byte_unchanged():
+    assert VALIDATION_COMMANDS == (
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest --basetemp .pytest_tmp",
+        "python -m ruff check . --no-cache",
+        "git diff --check",
+    )
+
+
+def test_validation_temp_creation_failure_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    calls: list[list[str]] = []
+
+    def fail_temp_creation(**_kwargs):
+        raise OSError("private temp creation failure")
+
+    monkeypatch.setattr(
+        runner_module.tempfile,
+        "TemporaryDirectory",
+        fail_temp_creation,
+    )
+    monkeypatch.setattr(
+        runner_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: calls.append(list(argv)),
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_temp_unavailable",
+        ("temp_unavailable",),
+    )
+    assert calls == []
+    assert "private" not in repr(result)
+
+
+@pytest.mark.parametrize("unsafe_parent_name", ["repository", "worktree", "venv"])
+def test_validation_rejects_and_cleans_unsafe_temp_location(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_parent_name: str,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    unsafe_parents = {
+        "repository": canonical,
+        "worktree": worktree_path,
+        "venv": runtime.venv_root,
+    }
+    unsafe_parent = unsafe_parents[unsafe_parent_name]
+    real_temporary_directory = runner_module.tempfile.TemporaryDirectory
+    created_paths: list[Path] = []
+
+    def unsafe_temp_directory(*, prefix):
+        temporary = real_temporary_directory(prefix=prefix, dir=unsafe_parent)
+        created_paths.append(Path(temporary.name))
+        return temporary
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        runner_module.tempfile,
+        "TemporaryDirectory",
+        unsafe_temp_directory,
+    )
+    monkeypatch.setattr(
+        runner_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: calls.append(list(argv)),
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_temp_unsafe",
+        ("temp_unsafe",),
+    )
+    assert calls == []
+    assert len(created_paths) == 1
+    assert not created_paths[0].exists()
+    assert str(created_paths[0]) not in repr(result)
+
+
+def test_validation_temp_cleanup_must_be_verified_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    canonical = tmp_path / "canonical"
+    runtime = _validation_runtime_spec(canonical)
+    worktree_path = tmp_path / "disposable-worktree"
+    worktree_path.mkdir()
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        BASE_SHA,
+        b"gitdir",
+        (),
+        "",
+        "",
+    )
+    leaked_path = tmp_path / "phoenix-pytest-cleanup-not-proved"
+
+    class UnprovedCleanupTemporaryDirectory:
+        def __init__(self, *, prefix):
+            assert prefix == runner_module.VALIDATION_PYTEST_BASETEMP_PREFIX
+            leaked_path.mkdir()
+            self.name = str(leaked_path)
+
+        def cleanup(self):
+            return None
+
+    monkeypatch.setattr(
+        runner_module.tempfile,
+        "TemporaryDirectory",
+        UnprovedCleanupTemporaryDirectory,
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "_validation_tool_identity_is_current",
+        lambda _runtime, _identity, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        runner_module.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    service = SystemCodexPilotServices(canonical)
+    service._validation_runtime_spec = runtime
+    service._validation_runtime_preflight_result = GateResult(
+        True,
+        "validation_runtime_ready",
+    )
+
+    result = service.run_validations(worktree, VALIDATION_COMMANDS)
+
+    assert result == ValidationGateResult(
+        False,
+        "validation_temp_cleanup_failed",
+        ("temp_cleanup_failed",),
+    )
+    assert leaked_path.exists()
+    assert str(leaked_path) not in repr(result)
+    leaked_path.rmdir()
 
 
 def test_validation_runtime_identity_change_fails_closed_before_execution(

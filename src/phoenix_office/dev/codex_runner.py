@@ -53,6 +53,7 @@ MAX_USAGE_RATIO_BASIS_POINTS: Final = (
 )
 VALIDATION_TIMEOUT_SECONDS: Final = 1800
 VALIDATION_RUNTIME_PREFLIGHT_TIMEOUT_SECONDS: Final = 30
+VALIDATION_PYTEST_BASETEMP_PREFIX: Final = "phoenix-pytest-"
 MAX_VALIDATION_TOOL_DISCOVERY_OUTPUT_BYTES: Final = 65_536
 MAX_VALIDATION_TOOL_FILES: Final = 512
 MAX_VALIDATION_TOOL_TREE_ENTRIES: Final = 4096
@@ -1773,6 +1774,77 @@ class SystemCodexPilotServices:
             "validation_runtime_ready",
         ):
             return ValidationGateResult(False, "validation_runtime_unavailable")
+        try:
+            temporary = tempfile.TemporaryDirectory(
+                prefix=VALIDATION_PYTEST_BASETEMP_PREFIX
+            )
+        except (OSError, RuntimeError):
+            return ValidationGateResult(
+                False,
+                "validation_temp_unavailable",
+                ("temp_unavailable",),
+            )
+        raw_basetemp: Path | None = None
+        pytest_basetemp: Path | None = None
+        try:
+            try:
+                raw_basetemp = Path(temporary.name)
+            except (AttributeError, TypeError, ValueError):
+                result = ValidationGateResult(
+                    False,
+                    "validation_temp_unavailable",
+                    ("temp_unavailable",),
+                )
+            else:
+                pytest_basetemp = _resolve_validation_basetemp(
+                    raw_basetemp,
+                    repository_path=self._repository_path,
+                    worktree_path=worktree.path,
+                    venv_root=spec.venv_root,
+                )
+                if pytest_basetemp is None:
+                    result = ValidationGateResult(
+                        False,
+                        "validation_temp_unsafe",
+                        ("temp_unsafe",),
+                    )
+                else:
+                    result = self._run_validations_with_basetemp(
+                        worktree,
+                        commands,
+                        spec,
+                        pytest_basetemp,
+                    )
+        finally:
+            try:
+                temporary.cleanup()
+                cleanup_succeeded = True
+            except (OSError, RuntimeError):
+                cleanup_succeeded = False
+        cleanup_path = pytest_basetemp or raw_basetemp
+        try:
+            cleanup_verified = (
+                cleanup_succeeded
+                and cleanup_path is not None
+                and not cleanup_path.exists()
+            )
+        except OSError:
+            cleanup_verified = False
+        if not cleanup_verified:
+            return ValidationGateResult(
+                False,
+                "validation_temp_cleanup_failed",
+                ("temp_cleanup_failed",),
+            )
+        return result
+
+    def _run_validations_with_basetemp(
+        self,
+        worktree: WorktreeHandle,
+        commands: tuple[str, ...],
+        spec: ValidationRuntimeSpec,
+        pytest_basetemp: Path,
+    ) -> ValidationGateResult:
         categories: list[str] = []
         for command in commands:
             if command != VALIDATION_COMMANDS[2]:
@@ -1794,7 +1866,11 @@ class SystemCodexPilotServices:
                         "validation_runtime_changed",
                         tuple(categories),
                     )
-            argv, environment = _validation_command(command, spec)
+            argv, environment = _validation_command(
+                command,
+                spec,
+                pytest_basetemp=pytest_basetemp,
+            )
             try:
                 completed = subprocess.run(
                     argv,
@@ -3324,17 +3400,61 @@ def _validation_environment() -> dict[str, str]:
 def _validation_command(
     command: str,
     runtime: ValidationRuntimeSpec,
+    *,
+    pytest_basetemp: Path,
 ) -> tuple[list[str], dict[str, str]]:
     environment = _validation_environment()
     python = str(runtime.python_identity.path)
     if command == VALIDATION_COMMANDS[0]:
+        if not pytest_basetemp.is_absolute():
+            raise ValueError("pytest basetemp must be absolute")
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        return [python, "-m", "pytest", "--basetemp", ".pytest_tmp"], environment
+        return [
+            python,
+            "-m",
+            "pytest",
+            "--basetemp",
+            str(pytest_basetemp),
+        ], environment
     if command == VALIDATION_COMMANDS[1]:
         return [python, "-m", "ruff", "check", ".", "--no-cache"], environment
     if command == VALIDATION_COMMANDS[2]:
         return ["git", "diff", "--check"], environment
     raise ValueError("validation command is not authorized")
+
+
+def _resolve_validation_basetemp(
+    path: Path,
+    *,
+    repository_path: Path,
+    worktree_path: Path,
+    venv_root: Path,
+) -> Path | None:
+    if not path.is_absolute():
+        return None
+    try:
+        path_stat = path.lstat()
+        resolved = path.resolve(strict=True)
+        protected_roots = tuple(
+            candidate.resolve(strict=True)
+            for candidate in (repository_path, worktree_path, venv_root)
+        )
+    except (OSError, RuntimeError):
+        return None
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    if (
+        not stat.S_ISDIR(path_stat.st_mode)
+        or path.is_symlink()
+        or bool(file_attributes & reparse_attribute)
+    ):
+        return None
+    if any(
+        _path_is_within(resolved, root) or _path_is_within(root, resolved)
+        for root in protected_roots
+    ):
+        return None
+    return resolved
 
 
 def _git_null_device() -> str:
