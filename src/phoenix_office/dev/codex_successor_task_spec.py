@@ -13,6 +13,7 @@ from typing import Any, Final
 
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
     TASK_SPEC_SCHEMA_VERSION,
     CodexPilotPackageBuildError,
     CodexPilotTaskSpec,
@@ -210,7 +211,9 @@ def _load_architecture_approval(path: Path) -> ArchitectureApprovalReceipt:
         or not isinstance(base_sha, str)
         or _SHA_PATTERN.fullmatch(base_sha) is None
         or type(issue_number) is not int
-        or not 1 <= issue_number <= 10**9
+        or not 1
+        <= issue_number
+        <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
         or not isinstance(task_id, str)
         or _TASK_ID_PATTERN.fullmatch(task_id) is None
         or not _canonical_utc_timestamp(approved_at)

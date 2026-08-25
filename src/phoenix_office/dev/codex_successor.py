@@ -18,6 +18,7 @@ from typing import Final, Protocol
 from phoenix_office.core.contracts import _is_safe_branch, _is_safe_pr_title
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
     _bounded_identifier,
 )
 from phoenix_office.dev.codex_runner import _repository_identity_from_remote
@@ -376,7 +377,12 @@ class SystemCodexSuccessorServices:
     def read_issue(self, issue_number: int) -> object:
         """Read one selected issue through the existing read-only boundary."""
 
-        if type(issue_number) is not int or not 1 <= issue_number <= 10**9:
+        if (
+            type(issue_number) is not int
+            or not 1
+            <= issue_number
+            <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
+        ):
             raise CodexSuccessorProposalError("github_read_failed")
         output = self._run_gh(
             "issue",
@@ -906,6 +912,13 @@ def _candidate_from_metadata(
     dependency_numbers = _validated_dependency_numbers(depends_on)
     safe_paths = _validated_allowed_paths(allowed_paths)
     issue_number = issue["number"]
+    if (
+        type(issue_number) is not int
+        or not 1
+        <= issue_number
+        <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
+    ):
+        raise CodexSuccessorProposalError("malformed_candidate_metadata")
     if issue_number in dependency_numbers:
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     if execution_definition is not None and execution_definition.task_id != task_id:
@@ -1209,7 +1222,9 @@ def parse_codex_successor_proposal_payload(
         or type(candidate_count) is not int
         or not 1 <= candidate_count <= MAX_ISSUES
         or type(issue_number) is not int
-        or not 1 <= issue_number <= 10**9
+        or not 1
+        <= issue_number
+        <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
         or not isinstance(task_id, str)
         or _TASK_ID_PATTERN.fullmatch(task_id) is None
         or not _safe_public_text(title, max_length=120)

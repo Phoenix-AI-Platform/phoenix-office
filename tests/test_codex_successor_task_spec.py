@@ -12,6 +12,7 @@ from phoenix_office import cli
 from phoenix_office.dev import codex_successor_task_spec
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
     load_codex_pilot_task_spec,
 )
 from phoenix_office.dev.codex_successor import (
@@ -95,6 +96,7 @@ def _execution(**updates: object) -> dict[str, object]:
 
 def _issue(
     *,
+    number: int = ISSUE_NUMBER,
     candidate: dict[str, object] | None = None,
     execution: dict[str, object] | None = None,
     include_execution: bool = True,
@@ -114,7 +116,7 @@ def _issue(
             "```"
         )
     return {
-        "number": ISSUE_NUMBER,
+        "number": number,
         "title": title,
         "state": "OPEN",
         "body": body,
@@ -297,6 +299,42 @@ def test_valid_external_approval_compiles_exact_task_spec(tmp_path: Path) -> Non
     assert set(cli.CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS) == (
         CODEX_PILOT_TASK_SPEC_CONTROL_IDS
     )
+
+
+def test_maximum_issue_number_compiles_with_external_approval(
+    tmp_path: Path,
+) -> None:
+    issue = _issue(number=CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER)
+    result, output, proposal = _compile(
+        tmp_path,
+        services=FakeServices(issue, _head()),
+    )
+
+    spec = load_codex_pilot_task_spec(
+        output,
+        required_control_ids=set(CODEX_PILOT_TASK_SPEC_CONTROL_IDS),
+    )
+
+    assert result["status"] == "success"
+    assert proposal["selected_issue_number"] == 9_999_999
+    assert spec.issue_number == 9_999_999
+
+
+def test_approval_issue_number_above_task_spec_ceiling_is_rejected(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(CodexSuccessorTaskSpecError) as error:
+        _compile(
+            tmp_path,
+            approval_updates={
+                "selected_issue_number": (
+                    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1
+                )
+            },
+        )
+
+    assert error.value.category == "malformed_approval_receipt"
+    assert not (tmp_path / "task-spec.json").exists()
 
 
 def test_repeated_compile_produces_identical_task_spec_bytes(tmp_path: Path) -> None:

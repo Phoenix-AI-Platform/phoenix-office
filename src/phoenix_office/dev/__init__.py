@@ -6,6 +6,7 @@ from phoenix_office.dev.codex_claim_store import (
 )
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
     CodexPilotPackageBuildError,
     CodexPilotPackageInspection,
     CodexPilotTaskSpec,
@@ -50,6 +51,7 @@ from phoenix_office.dev.codex_successor_task_spec import (
 __all__ = [
     "CONTROL_STATE_SCHEMA_VERSION",
     "CODEX_PILOT_TASK_SPEC_CONTROL_IDS",
+    "CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER",
     "ARCHITECTURE_APPROVAL_SCHEMA_VERSION",
     "CodexPilotPackageBuildError",
     "CodexPilotPackageInspection",

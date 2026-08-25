@@ -102,6 +102,7 @@ CODEX_PILOT_TASK_SPEC_CONTROL_IDS = frozenset(
         "per_run_budget_ceiling",
     }
 )
+CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER = 9_999_999
 MAX_TASK_SPEC_BYTES = 64 * 1024
 MAX_NARRATIVE_ITEMS = 20
 GIT_TIMEOUT_SECONDS = 10
@@ -370,7 +371,10 @@ def _parse_task_spec(
         if not _bounded_text(value.get(field_name), maximum):
             raise CodexPilotPackageBuildError("task_spec_malformed")
     issue_number = value.get("issue_number")
-    if type(issue_number) is not int or not 1 <= issue_number <= 9_999_999:
+    if (
+        type(issue_number) is not int
+        or not 1 <= issue_number <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
+    ):
         raise CodexPilotPackageBuildError("task_spec_malformed")
     if value.get("repository") != REPOSITORY:
         raise CodexPilotPackageBuildError("task_spec_malformed")

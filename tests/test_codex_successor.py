@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 
 from phoenix_office import cli
-from phoenix_office.dev.codex_package import CODEX_PILOT_TASK_SPEC_CONTROL_IDS
+from phoenix_office.dev.codex_package import (
+    CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
+)
 from phoenix_office.dev.codex_successor import (
     REPOSITORY_IDENTITY,
     SUCCESSOR_CANDIDATE_SCHEMA_VERSION,
@@ -18,6 +21,7 @@ from phoenix_office.dev.codex_successor import (
     RepositoryState,
     SystemCodexSuccessorServices,
     _bounded_process_environment,
+    parse_codex_successor_proposal_payload,
     propose_codex_successor,
 )
 
@@ -259,6 +263,91 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
         "tracked_paths",
         "list_open_issues",
     ]
+
+
+def test_task_spec_issue_number_ceiling_is_shared() -> None:
+    assert CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER == 9_999_999
+
+
+def test_maximum_task_spec_issue_number_is_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER)
+
+    result = _propose(repository, evidence, FakeServices(issues=[issue]))
+
+    assert result["category"] == "successor_proposed"
+    assert result["selected_issue_number"] == 9_999_999
+    assert result["proposal_ready_for_architecture_review"] is True
+
+
+def test_issue_above_task_spec_ceiling_is_not_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1)
+
+    result = _propose(repository, evidence, FakeServices(issues=[issue]))
+
+    assert result["category"] == "malformed_candidate_metadata"
+    assert result["selected_issue_number"] is None
+    assert result["proposal_ready_for_architecture_review"] is False
+
+
+def test_successful_proposal_parser_uses_task_spec_issue_number_ceiling(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(issues=[_issue()]),
+    )
+    maximum = {
+        **result,
+        "selected_issue_number": CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
+    }
+    above_maximum = {
+        **result,
+        "selected_issue_number": CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1,
+    }
+
+    parsed = parse_codex_successor_proposal_payload(maximum)
+
+    assert parsed.issue_number == 9_999_999
+    with pytest.raises(CodexSuccessorProposalError) as error:
+        parse_codex_successor_proposal_payload(above_maximum)
+    assert error.value.category == "malformed_proposal"
+
+
+def test_dependency_issue_number_bound_remains_independent(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    dependency_issue = CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(
+        metadata=_candidate_metadata(depends_on=[dependency_issue]),
+    )
+    services = FakeServices(
+        issues=[issue],
+        dependencies={
+            dependency_issue: {
+                "number": dependency_issue,
+                "state": "CLOSED",
+                "stateReason": "COMPLETED",
+            }
+        },
+    )
+
+    result = _propose(repository, evidence, services)
+
+    assert result["category"] == "successor_proposed"
+    assert services.calls[-1] == f"read_dependency:{dependency_issue}"
 
 
 def test_priority_descending_deterministically_selects_highest(
