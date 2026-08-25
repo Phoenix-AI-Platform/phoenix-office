@@ -9,13 +9,19 @@ from typing import Any
 import pytest
 
 from phoenix_office import cli
+from phoenix_office.dev.codex_package import (
+    CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
+)
 from phoenix_office.dev.codex_successor import (
     REPOSITORY_IDENTITY,
     SUCCESSOR_CANDIDATE_SCHEMA_VERSION,
+    SUCCESSOR_EXECUTION_SCHEMA_VERSION,
     CodexSuccessorProposalError,
     RepositoryState,
     SystemCodexSuccessorServices,
     _bounded_process_environment,
+    parse_codex_successor_proposal_payload,
     propose_codex_successor,
 )
 
@@ -53,6 +59,15 @@ class FakeServices:
         if self.failure is not None:
             raise CodexSuccessorProposalError(self.failure)
         return self.issues
+
+    def read_issue(self, issue_number: int) -> object:
+        self.calls.append(f"read_issue:{issue_number}")
+        if not isinstance(self.issues, list):
+            raise CodexSuccessorProposalError("github_read_failed")
+        matches = [item for item in self.issues if item.get("number") == issue_number]
+        if len(matches) != 1:
+            raise CodexSuccessorProposalError("github_read_failed")
+        return matches[0]
 
     def read_dependency(self, issue_number: int) -> object:
         self.calls.append(f"read_dependency:{issue_number}")
@@ -139,21 +154,60 @@ def _candidate_metadata(**overrides: object) -> dict[str, object]:
     return value
 
 
+def _execution_definition(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": SUCCESSOR_EXECUTION_SCHEMA_VERSION,
+        "task_id": "TASK-076",
+        "objective": "Document the next verified autonomy milestone.",
+        "branch_name": "codex/issue-076-docs",
+        "budget_ceiling": 225000,
+        "timeout_seconds": 1800,
+        "control_references": {
+            control_id: f"{control_id}-reviewed"
+            for control_id in CODEX_PILOT_TASK_SPEC_CONTROL_IDS
+        },
+        "constraints": [
+            "Edit only the authorized Markdown path.",
+            "Do not create publication authority for the worker.",
+        ],
+        "acceptance_criteria": [
+            "The reviewed documentation reflects the verified milestone.",
+            "All Phoenix-owned validation gates pass.",
+        ],
+    }
+    value.update(overrides)
+    return value
+
+
 def _issue(
     number: int = 391,
     *,
     title: str = "TASK-076: Record the next autonomy milestone",
     metadata: dict[str, object] | None = None,
+    execution: dict[str, object] | None = None,
+    include_execution: bool = True,
     body: str | None = None,
 ) -> dict[str, object]:
     if body is None:
         payload = metadata if metadata is not None else _candidate_metadata()
+        execution_payload = (
+            execution
+            if execution is not None
+            else _execution_definition(task_id=payload.get("task_id"))
+        )
         body = (
             "Reviewed successor metadata:\n\n"
             "```phoenix-codex-successor\n"
             f"{json.dumps(payload, sort_keys=True)}\n"
             "```"
         )
+        if include_execution:
+            body += (
+                "\n\nReviewed execution definition:\n\n"
+                "```phoenix-codex-execution\n"
+                f"{json.dumps(execution_payload, sort_keys=True)}\n"
+                "```"
+            )
     return {"number": number, "title": title, "state": "OPEN", "body": body}
 
 
@@ -183,7 +237,7 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
     result = _propose(repository, evidence, services)
 
     assert result == {
-        "schema_version": "codex-successor-proposal.v1",
+        "schema_version": "codex-successor-proposal.v2",
         "status": "success",
         "category": "successor_proposed",
         "verified_base_sha": HEAD,
@@ -197,6 +251,7 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
         "selected_execution_class": "docs-only-supervised",
         "selected_allowed_paths": [ALLOWED_PATH],
         "selected_expected_pr_title": "docs: record the next autonomy milestone",
+        "selected_execution_definition": _execution_definition(),
         "selection_reason": "highest_priority_then_lowest_issue_number",
         "proposal_fingerprint": result["proposal_fingerprint"],
         "proposal_ready_for_architecture_review": True,
@@ -208,6 +263,91 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
         "tracked_paths",
         "list_open_issues",
     ]
+
+
+def test_task_spec_issue_number_ceiling_is_shared() -> None:
+    assert CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER == 9_999_999
+
+
+def test_maximum_task_spec_issue_number_is_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER)
+
+    result = _propose(repository, evidence, FakeServices(issues=[issue]))
+
+    assert result["category"] == "successor_proposed"
+    assert result["selected_issue_number"] == 9_999_999
+    assert result["proposal_ready_for_architecture_review"] is True
+
+
+def test_issue_above_task_spec_ceiling_is_not_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1)
+
+    result = _propose(repository, evidence, FakeServices(issues=[issue]))
+
+    assert result["category"] == "malformed_candidate_metadata"
+    assert result["selected_issue_number"] is None
+    assert result["proposal_ready_for_architecture_review"] is False
+
+
+def test_successful_proposal_parser_uses_task_spec_issue_number_ceiling(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(issues=[_issue()]),
+    )
+    maximum = {
+        **result,
+        "selected_issue_number": CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
+    }
+    above_maximum = {
+        **result,
+        "selected_issue_number": CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1,
+    }
+
+    parsed = parse_codex_successor_proposal_payload(maximum)
+
+    assert parsed.issue_number == 9_999_999
+    with pytest.raises(CodexSuccessorProposalError) as error:
+        parse_codex_successor_proposal_payload(above_maximum)
+    assert error.value.category == "malformed_proposal"
+
+
+def test_dependency_issue_number_bound_remains_independent(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    dependency_issue = CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER + 1
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(
+        metadata=_candidate_metadata(depends_on=[dependency_issue]),
+    )
+    services = FakeServices(
+        issues=[issue],
+        dependencies={
+            dependency_issue: {
+                "number": dependency_issue,
+                "state": "CLOSED",
+                "stateReason": "COMPLETED",
+            }
+        },
+    )
+
+    result = _propose(repository, evidence, services)
+
+    assert result["category"] == "successor_proposed"
+    assert services.calls[-1] == f"read_dependency:{dependency_issue}"
 
 
 def test_priority_descending_deterministically_selects_highest(
@@ -596,6 +736,63 @@ def test_malformed_explicit_candidate_metadata_fails_closed(
     assert result["category"] == "malformed_candidate_metadata"
 
 
+def test_ready_candidate_without_execution_definition_is_not_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(issues=[_issue(include_execution=False)]),
+    )
+
+    assert result["category"] == "missing_execution_definition"
+    assert result["proposal_ready_for_architecture_review"] is False
+
+
+@pytest.mark.parametrize(
+    "execution",
+    [
+        {"schema_version": "bad"},
+        _execution_definition(branch_name="feature/unsafe"),
+        _execution_definition(control_references={}),
+    ],
+)
+def test_malformed_execution_definition_fails_closed(
+    repository: Path,
+    tmp_path: Path,
+    execution: dict[str, object],
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(issues=[_issue(execution=execution)]),
+    )
+
+    assert result["category"] == "malformed_execution_definition"
+
+
+def test_candidate_execution_task_identity_must_match(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(
+            issues=[_issue(execution=_execution_definition(task_id="TASK-999"))]
+        ),
+    )
+
+    assert result["category"] == "candidate_execution_mismatch"
+
+
 @pytest.mark.parametrize(
     "allowed_paths",
     [
@@ -670,6 +867,49 @@ def test_fingerprint_is_deterministic_and_binds_dependency_facts(
     assert first["proposal_fingerprint"] is not None
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("objective", "Document a materially different reviewed objective."),
+        (
+            "acceptance_criteria",
+            ["A different reviewed acceptance criterion is satisfied."],
+        ),
+        ("branch_name", "codex/issue-076-alternate"),
+        ("budget_ceiling", 225001),
+        ("timeout_seconds", 1801),
+        (
+            "control_references",
+            {
+                control_id: f"{control_id}-changed"
+                for control_id in CODEX_PILOT_TASK_SPEC_CONTROL_IDS
+            },
+        ),
+    ],
+)
+def test_execution_definition_is_bound_into_proposal_fingerprint(
+    repository: Path,
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    original = _propose(
+        repository,
+        evidence,
+        FakeServices(issues=[_issue()]),
+    )
+    changed = _propose(
+        repository,
+        evidence,
+        FakeServices(
+            issues=[_issue(execution=_execution_definition(**{field: replacement}))]
+        ),
+    )
+
+    assert original["proposal_fingerprint"] != changed["proposal_fingerprint"]
+
+
 def test_fingerprint_and_serialization_failures_are_bounded(
     repository: Path,
     tmp_path: Path,
@@ -724,6 +964,8 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
             output = str(repository)
         elif argv[1:3] == ["issue", "list"]:
             output = "[]"
+        elif argv[3] == "391":
+            output = json.dumps(_issue())
         else:
             output = json.dumps(
                 {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
@@ -745,6 +987,7 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
     )
 
     assert services.list_open_issues() == []
+    assert services.read_issue(391) == _issue()
     assert services.read_dependency(390) == {
         "number": 390,
         "state": "CLOSED",
@@ -753,6 +996,7 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
     github_calls = [call for call in calls if call[0][0] == "gh"]
     assert [call[0][1:3] for call in github_calls] == [
         ["issue", "list"],
+        ["issue", "view"],
         ["issue", "view"],
     ]
     assert all(call[1]["shell"] is False for call in calls)
@@ -892,7 +1136,7 @@ def test_selector_has_no_mutation_or_execution_authority(
 
 def test_cli_json_surface_returns_success(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
     result = {
-        "schema_version": "codex-successor-proposal.v1",
+        "schema_version": "codex-successor-proposal.v2",
         "status": "success",
         "category": "successor_proposed",
         "proposal_ready_for_architecture_review": True,
@@ -916,7 +1160,7 @@ def test_cli_json_surface_returns_success(monkeypatch: pytest.MonkeyPatch, capsy
 
 def test_cli_blocked_result_returns_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
     result = {
-        "schema_version": "codex-successor-proposal.v1",
+        "schema_version": "codex-successor-proposal.v2",
         "status": "blocked",
         "category": "no_eligible_successor",
         "proposal_ready_for_architecture_review": False,

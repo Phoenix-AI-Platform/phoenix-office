@@ -87,6 +87,22 @@ REFERENCE_FIELD_BY_CONTROL = {
     "duplicate_active_pr_detection": "duplicate_pr_check_ref",
     "branch_collision_detection": "branch_collision_check_ref",
 }
+CODEX_PILOT_TASK_SPEC_CONTROL_IDS = frozenset(
+    {
+        "assistant_architecture_review",
+        "authentication_runner_access",
+        "branch_collision_detection",
+        "codex_cannot_approve_or_merge",
+        "codex_task_time_availability",
+        "duplicate_active_pr_detection",
+        "final_ci_requirement",
+        "github_branch_creation_permission",
+        "github_pr_creation_permission",
+        "operator_cancellation_timeout",
+        "per_run_budget_ceiling",
+    }
+)
+CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER = 9_999_999
 MAX_TASK_SPEC_BYTES = 64 * 1024
 MAX_NARRATIVE_ITEMS = 20
 GIT_TIMEOUT_SECONDS = 10
@@ -217,6 +233,18 @@ def load_codex_pilot_task_spec(
     return _load_task_spec(path, required_control_ids=required_control_ids)
 
 
+def parse_codex_pilot_task_spec_payload(
+    value: Mapping[str, Any],
+    *,
+    required_control_ids: set[str],
+) -> CodexPilotTaskSpec:
+    """Validate one in-memory task-spec payload through the TASK-073 parser."""
+
+    if not isinstance(value, dict) or set(value) != TASK_SPEC_FIELDS:
+        raise CodexPilotPackageBuildError("task_spec_malformed")
+    return _parse_task_spec(value, required_control_ids=required_control_ids)
+
+
 def qualify_codex_repository_root(path: Path) -> Path:
     """Resolve the exact canonical Git worktree root without mutation."""
 
@@ -317,9 +345,12 @@ def _load_task_spec(
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CodexPilotPackageBuildError("task_spec_malformed") from exc
-    if not isinstance(value, dict) or set(value) != TASK_SPEC_FIELDS:
+    if not isinstance(value, dict):
         raise CodexPilotPackageBuildError("task_spec_malformed")
-    return _parse_task_spec(value, required_control_ids=required_control_ids)
+    return parse_codex_pilot_task_spec_payload(
+        value,
+        required_control_ids=required_control_ids,
+    )
 
 
 def _parse_task_spec(
@@ -340,7 +371,10 @@ def _parse_task_spec(
         if not _bounded_text(value.get(field_name), maximum):
             raise CodexPilotPackageBuildError("task_spec_malformed")
     issue_number = value.get("issue_number")
-    if type(issue_number) is not int or not 1 <= issue_number <= 9_999_999:
+    if (
+        type(issue_number) is not int
+        or not 1 <= issue_number <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
+    ):
         raise CodexPilotPackageBuildError("task_spec_malformed")
     if value.get("repository") != REPOSITORY:
         raise CodexPilotPackageBuildError("task_spec_malformed")
