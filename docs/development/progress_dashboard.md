@@ -3,8 +3,8 @@
 > **Phoenix Office still cannot execute orchestration plans.**
 > Orchestration execution, mutation, audit persistence, scheduling, retries, and automatic delivery remain unavailable.
 > Read-only inspection and preflight capabilities remain non-executing.
-> A separate supervised Codex worker-edit path is verified through PR #372 and TASK-064, with Phoenix retaining every repository and review boundary.
-> This dashboard reflects verified progress through PR #372 and TASK-064.
+> A separate supervised Codex worker-edit path is verified through PR #372, TASK-064, and the bounded TASK-077 pilot, with Phoenix retaining every repository and review boundary.
+> This dashboard reflects verified progress through PR #372, TASK-064, and TASK-077.
 
 ---
 
@@ -24,7 +24,7 @@
 | WorkflowPlan inspect | ✅ Complete |
 | WorkflowPlanReview inspect | ✅ Complete |
 | Read-only orchestration preflight | ✅ Complete — non-executing |
-| Supervised Codex worker edits | ✅ Verified — isolated WSL2/Linux worker; Phoenix-controlled validation and delivery |
+| Supervised Codex worker edits | ✅ Verified — isolated WSL2/Linux worker; one externally approved successor-driven docs pilot; Phoenix-controlled validation and delivery |
 | Orchestration execution gate design docs | 🟡 Designed / documented |
 | Execution implementation | ⛔ Not implemented |
 | Audit persistence | ⛔ Not implemented |
@@ -54,7 +54,7 @@
 | WorkflowPlan inspection | Complete — read-only `orchestration plan inspect` CLI | `docs/development/orchestration_inspection_cli.md`, PR #72 | Stable |
 | WorkflowPlanReview inspection | Complete — read-only `orchestration review inspect` CLI | `docs/development/orchestration_inspection_cli.md`, PR #74 | Stable |
 | Read-only orchestration preflight | Complete — deterministic non-executing reports and plan/review fingerprint checks | `docs/development/orchestration-preflight-json-contract.md`, PR #134–#139 | Stable; remains non-executing |
-| Supervised Codex worker edits | Verified through PR #372 and TASK-064 — durable claim/control state, supervised execution-to-PR foundation, authenticated model transport, isolated WSL2/Linux execution, validated patch transfer, and targeted cancellation/exit proof | TASK-059–TASK-062, TASK-064, PR #372 | Phoenix retains validation, commit, push, PR, review, and merge authority |
+| Supervised Codex worker edits | Verified through PR #372, TASK-064, and TASK-077 — durable claim/control state, supervised execution-to-PR foundation, authenticated model transport, isolated WSL2/Linux execution, validated patch transfer, targeted cancellation/exit proof, and one bounded successor-driven docs pilot | TASK-059–TASK-062, TASK-064, TASK-077, PR #372 | Phoenix retains validation, commit, push, PR, review, and merge authority; no retry authority is granted |
 | Orchestration execution gates | Design notes and read-only preflight only — execution remains unavailable | `docs/development/orchestration_execution_readiness_checklist.md`, PR #85–#97, PR #134–#139 | No execution work authorized |
 | Future execution | ⛔ Not implemented | `docs/development/orchestration_execution_command_surface_design_notes.md` | Requires all gates cleared |
 | Future audit persistence | ⛔ Not implemented | `docs/development/orchestration_audit_logging_design_notes.md` | Skeleton only, when explicitly approved |
@@ -118,6 +118,7 @@ flowchart TD
 | Execution readiness and guardrail docs | #85–#97 | Execution readiness checklist, 12 design-notes-only gate areas (audit, binding, preflight, confirmation, artifact policy, dry-run, result, command surface, cancellation, provenance, private data/secrets, permission/capability, idempotency/replay) |
 | Verified local desktop records and proposal workflow | #347, #349–#350, #352, #354, #356, #358 | Read-only desktop foundation, controlled DOCX + companion JSON generation, real-Tk correction, insert-only customer/job creation, and guarded customer/job editing with immutable identities and stale-data protection |
 | Supervised Codex autonomy milestone | Through #372 and TASK-064 | TASK-059 added durable SQLite Codex claim/control state; TASK-060 added the supervised execution-to-PR pipeline foundation; TASK-061 added deterministic safe native Windows launcher binding; TASK-062 restored authenticated model transport under a bounded sanitized environment; TASK-064 added the isolated WSL2/Linux backend using exact Codex 0.146.1, a WSL-native shadow workspace, validated patch transfer to the disposable Windows worktree, and targeted cancellation and exit proof |
+| First successor-driven supervised Codex pilot | TASK-077 | Exercised a successor proposal, external approval, deterministic task-spec compilation, and one supervised docs-only runner attempt as one bounded chain. All Phoenix-owned validation gates passed, and the runner reached `pr_opened_and_stopped` and stopped for architecture review. |
 
 ---
 
@@ -130,7 +131,8 @@ The following are explicitly **not implemented**:
 - **The supervised Codex worker is not orchestration execution.** Native Windows `workspace-write` remains unsuitable on the current qualified path, so Phoenix uses WSL2 for supervised worker edits.
 - **Codex has no branch, commit, push, PR, approval, or merge authority.** Phoenix owns validation, commit, push, PR creation, review, and merge boundaries.
 - **There are no automatic retries, background resume, or autonomous merge authority.**
-- **There is no successor selection, autonomous issue authoring, autonomous approval, autonomous merge, or continuous looping.**
+- **The TASK-077 successor proposal required external approval.** It did not provide autonomous approval, autonomous issue authoring, autonomous merge, retry authority, background execution, or continuous looping.
+- **The TASK-077 worker authority was docs-only and bounded to the reviewed task specification.** It did not broaden worker authority.
 - **No automatic proposal generation from orchestration plans exists.**
 - **No network integration or automatic email/delivery exists in the desktop workflow.**
 - **Desktop record authority is create/update only.** Customer/job deletion, identity rename, and job customer reassignment are unavailable.
@@ -156,7 +158,7 @@ The following are explicitly **not implemented**:
 ### Lane A — docs / manual (safe for this agent now)
 
 - [x] Progress dashboard (this document)
-- [x] Progress dashboard synchronized through PR #372 and TASK-064
+- [x] Progress dashboard synchronized through PR #372, TASK-064, and TASK-077
 - [ ] Documentation cleanup and navigation updates when explicitly scoped
 - [ ] Project state updates after future merged PRs
 
