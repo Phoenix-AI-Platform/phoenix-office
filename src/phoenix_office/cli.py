@@ -21,11 +21,14 @@ from phoenix_office.core import (
 from phoenix_office.dev import (
     CodexPilotPackageBuildError,
     CodexPilotPackageInspection,
+    ReviewedRunnerOutcome,
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
     blocked_codex_pilot_package_build_result,
+    blocked_reviewed_execution_result,
     bounded_codex_pilot_run_result,
     build_codex_pilot_package,
+    execute_reviewed_codex_task,
     render_reviewed_codex_invocation_prompt,
 )
 from phoenix_office.dev_status import (
@@ -268,6 +271,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     codex_pilot_package_build_parser.set_defaults(
         func=codex_pilot_package_build
+    )
+    codex_pilot_execute_reviewed_parser = dev_subparsers.add_parser(
+        "codex-pilot-execute-reviewed",
+        help="Execute one reviewed Codex task spec through the supervised runner",
+    )
+    codex_pilot_execute_reviewed_parser.add_argument(
+        "task_spec_json",
+        type=Path,
+        help="Path to the reviewed bounded Codex pilot task spec JSON",
+    )
+    codex_pilot_execute_reviewed_parser.add_argument(
+        "--control-root",
+        type=Path,
+        required=True,
+        help="Explicit safe external directory for generated control artifacts",
+    )
+    codex_pilot_execute_reviewed_parser.add_argument(
+        "--claim-store",
+        type=Path,
+        required=True,
+        help="Explicit new dedicated Codex control-state SQLite database path",
+    )
+    codex_pilot_execute_reviewed_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded reviewed-execution result as JSON",
+    )
+    codex_pilot_execute_reviewed_parser.set_defaults(
+        func=codex_pilot_execute_reviewed
     )
     codex_pilot_run_parser = dev_subparsers.add_parser(
         "codex-pilot-run",
@@ -1265,21 +1297,93 @@ def _print_codex_pilot_package_build_result(
     print("Claim created: no")
 
 
+def codex_pilot_execute_reviewed(args: argparse.Namespace) -> int:
+    """Build and execute one reviewed task spec through existing boundaries."""
+
+    try:
+        result = execute_reviewed_codex_task(
+            task_spec_path=args.task_spec_json,
+            control_root=args.control_root,
+            claim_store_path=args.claim_store,
+            repository_root=Path.cwd(),
+            evidence_control_reviewers=(
+                CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
+            ),
+            package_inspector=_inspect_codex_pilot_package_build,
+            runner_invoker=_invoke_generated_codex_package,
+        )
+    except Exception:
+        result = blocked_reviewed_execution_result(
+            "reviewed_execution_internal_failure"
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_reviewed_execution_result(result)
+    return 0 if result.get("status") == "success" else 1
+
+
+def _invoke_generated_codex_package(
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+    claim_store_path: Path,
+) -> ReviewedRunnerOutcome:
+    result, system = _execute_codex_pilot_from_paths(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        authorization_path=authorization_path,
+        claim_store_path=claim_store_path,
+    )
+    lifecycle_state, lifecycle_terminal = (
+        _durable_lifecycle_from_runner_result(result)
+    )
+    return ReviewedRunnerOutcome(
+        result=result,
+        execution_backend_selected=system.execution_backend_kind,
+        durable_lifecycle_state=lifecycle_state,
+        durable_lifecycle_terminal=lifecycle_terminal,
+    )
+
+
 def codex_pilot_run(args: argparse.Namespace) -> int:
     """Run exactly one reviewed docs-only authorization through safe boundaries."""
 
+    result, _system = _execute_codex_pilot_from_paths(
+        handoff_path=args.handoff_json,
+        evidence_path=args.evidence_json,
+        authorization_path=args.authorization_json,
+        claim_store_path=args.claim_store,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_run_result(result)
+    return 0 if result.get("status") == "success" else 1
+
+
+def _execute_codex_pilot_from_paths(
+    *,
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+    claim_store_path: Path,
+) -> tuple[
+    dict[str, object],
+    SystemCodexPilotServices,
+]:
     authorization, authorization_report = (
         _run_codex_pilot_authorization_inspection(
-            handoff_path=args.handoff_json,
-            evidence_path=args.evidence_json,
-            authorization_path=args.authorization_json,
+            handoff_path=handoff_path,
+            evidence_path=evidence_path,
+            authorization_path=authorization_path,
         )
     )
     handoff, invocation_preflight = _load_codex_invocation_preflight(
-        args.handoff_json
+        handoff_path
     )
     try:
-        evidence: dict[str, Any] | None = _read_json_object_file(args.evidence_json)
+        evidence: dict[str, Any] | None = _read_json_object_file(evidence_path)
     except ValueError:
         evidence = None
 
@@ -1291,16 +1395,15 @@ def codex_pilot_run(args: argparse.Namespace) -> int:
         )
         reviewed_prompt = str(request["rendered_prompt"])
 
-    runner = SupervisedCodexPilotRunner(
-        system=SystemCodexPilotServices(Path.cwd()),
-    )
+    system = SystemCodexPilotServices(Path.cwd())
+    runner = SupervisedCodexPilotRunner(system=system)
     try:
         result = runner.run(
             handoff=handoff,
             evidence=evidence,
             authorization=authorization,
             reviewed_prompt=reviewed_prompt,
-            claim_store_path=args.claim_store,
+            claim_store_path=claim_store_path,
             static_preflight_passed=bool(
                 authorization_report.get(
                     "authorization_packet_valid_for_one_attempt"
@@ -1312,11 +1415,42 @@ def codex_pilot_run(args: argparse.Namespace) -> int:
             "runner_internal_failure",
             status="failed",
         )
-    if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    else:
-        _print_codex_pilot_run_result(result)
-    return 0 if result.get("status") == "success" else 1
+    return result, system
+
+
+def _durable_lifecycle_from_runner_result(
+    result: dict[str, object],
+) -> tuple[str | None, bool]:
+    """Use the runner's terminal-publication invariant without reopening storage."""
+
+    if not isinstance(result.get("attempt_id"), str):
+        return None, False
+    if result.get("category") == "lifecycle_storage_uncertain":
+        return None, False
+    status = result.get("status")
+    category = result.get("category")
+    if status == "success" and category == "pr_opened_and_stopped":
+        return "pr_opened_and_stopped", False
+    if status == "failed" and category == "aborted":
+        return "aborted", True
+    if status in {"cancelled", "failed", "timed_out"}:
+        return str(status), True
+    return None, False
+
+
+def _print_codex_pilot_reviewed_execution_result(
+    result: dict[str, object],
+) -> None:
+    print("Reviewed supervised Codex execution")
+    print(f"Status: {result['status']}")
+    print(f"Category: {result['category']}")
+    print(f"Task ID: {result['task_id']}")
+    print(f"Issue: {result['issue_number']}")
+    print(f"Package build: {result['package_build_result']}")
+    print(f"Preclaim ready: {_format_yes_no(bool(result['preclaim_ready']))}")
+    print(f"Runner invoked: {_format_yes_no(bool(result['runner_invoked']))}")
+    print(f"Attempt ID: {result['attempt_id']}")
+    print(f"Pull request identity: {result['office_pr']}")
 
 
 def _print_codex_pilot_run_result(result: dict[str, object]) -> None:

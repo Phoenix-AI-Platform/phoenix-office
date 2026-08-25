@@ -151,8 +151,8 @@ def build_codex_pilot_package(
 ) -> dict[str, Any]:
     """Generate, inspect, and atomically publish one preclaim package."""
 
-    repository = _qualified_repository_root(repository_root)
-    spec = _load_task_spec(
+    repository = qualify_codex_repository_root(repository_root)
+    spec = load_codex_pilot_task_spec(
         task_spec_path,
         required_control_ids=set(evidence_control_reviewers),
     )
@@ -205,6 +205,72 @@ def build_codex_pilot_package(
         authorization_id=authorization_id,
         inspection=inspection,
     )
+
+
+def load_codex_pilot_task_spec(
+    path: Path,
+    *,
+    required_control_ids: set[str],
+) -> CodexPilotTaskSpec:
+    """Load one exact bounded task spec without opening execution authority."""
+
+    return _load_task_spec(path, required_control_ids=required_control_ids)
+
+
+def qualify_codex_repository_root(path: Path) -> Path:
+    """Resolve the exact canonical Git worktree root without mutation."""
+
+    return _qualified_repository_root(path)
+
+
+def qualify_codex_control_directory(
+    path: Path,
+    repository_root: Path,
+) -> Path:
+    """Validate one existing external Phoenix control directory."""
+
+    repository = qualify_codex_repository_root(repository_root)
+    _reject_link_or_reparse_ancestry(path)
+    try:
+        target = path.resolve(strict=True)
+    except OSError as exc:
+        raise CodexPilotPackageBuildError("control_root_unavailable") from exc
+    if not target.is_dir() or _is_link_or_reparse(target):
+        raise CodexPilotPackageBuildError("control_root_unavailable")
+    _reject_control_location(target, repository, git_probe=target)
+    return target
+
+
+def qualify_codex_new_claim_store_path(
+    path: Path,
+    repository_root: Path,
+) -> Path:
+    """Validate a new dedicated control-state database path without creating it."""
+
+    repository = qualify_codex_repository_root(repository_root)
+    if path.suffix.lower() != ".sqlite3":
+        raise CodexPilotPackageBuildError("claim_store_path_unsafe")
+    _reject_link_or_reparse_ancestry(path)
+    try:
+        target = path.resolve(strict=False)
+    except OSError as exc:
+        raise CodexPilotPackageBuildError("claim_store_path_unsafe") from exc
+    if target.exists() or target.is_symlink():
+        raise CodexPilotPackageBuildError("claim_store_already_exists")
+    _reject_control_location_before_parent(target, repository)
+    try:
+        parent = target.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CodexPilotPackageBuildError("claim_store_path_unsafe") from exc
+    if not parent.is_dir() or _is_link_or_reparse(parent):
+        raise CodexPilotPackageBuildError("claim_store_path_unsafe")
+    if _inside_any_git_worktree(parent):
+        raise CodexPilotPackageBuildError("output_inside_git_worktree")
+    for suffix in ("-journal", "-shm", "-wal"):
+        sidecar = Path(f"{target}{suffix}")
+        if sidecar.exists() or sidecar.is_symlink():
+            raise CodexPilotPackageBuildError("claim_store_already_exists")
+    return target
 
 
 def blocked_codex_pilot_package_build_result(category: str) -> dict[str, Any]:
@@ -592,21 +658,38 @@ def _qualify_output_dir(output_dir: Path, repository: Path) -> Path:
         target = output_dir.resolve(strict=False)
     except OSError as exc:
         raise CodexPilotPackageBuildError("output_resolution_unsafe") from exc
-    venv = (repository / ".venv").resolve(strict=False)
-    if _path_within(target, venv):
-        raise CodexPilotPackageBuildError("output_inside_venv")
+    _reject_control_location_before_parent(target, repository)
     try:
         parent = target.parent.resolve(strict=True)
     except OSError as exc:
         raise CodexPilotPackageBuildError("output_resolution_unsafe") from exc
     if not parent.is_dir() or _is_link_or_reparse(parent):
         raise CodexPilotPackageBuildError("output_resolution_unsafe")
+    _reject_control_location(target, repository, git_probe=parent)
+    return target
+
+
+def _reject_control_location_before_parent(
+    target: Path,
+    repository: Path,
+) -> None:
+    venv = (repository / ".venv").resolve(strict=False)
+    if _path_within(target, venv):
+        raise CodexPilotPackageBuildError("output_inside_venv")
     for worktree in _registered_worktrees(repository):
         if _path_within(target, worktree):
             raise CodexPilotPackageBuildError("output_inside_git_worktree")
-    if _inside_any_git_worktree(parent):
+
+
+def _reject_control_location(
+    target: Path,
+    repository: Path,
+    *,
+    git_probe: Path,
+) -> None:
+    _reject_control_location_before_parent(target, repository)
+    if _inside_any_git_worktree(git_probe):
         raise CodexPilotPackageBuildError("output_inside_git_worktree")
-    return target
 
 
 def _registered_worktrees(repository: Path) -> tuple[Path, ...]:
