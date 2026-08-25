@@ -55,9 +55,11 @@ from phoenix_office.core.contracts import (
     classify_codex_pilot_initial_claim_conflicts,
     codex_pilot_audit_event_digest,
     codex_pilot_authorization_fingerprint,
+    codex_pilot_authorization_structural_errors,
     codex_pilot_objective_digest,
     compose_codex_pilot_initial_claim_bundle,
     derive_codex_pilot_attempt_snapshot,
+    is_safe_codex_pilot_authorization_objective,
     prepare_codex_pilot_initial_claim_commit,
     validate_codex_pilot_attempt_snapshot,
     validate_codex_pilot_attempt_snapshot_binding,
@@ -545,6 +547,25 @@ def _valid_codex_authorization_dict() -> dict[str, object]:
         "retry_authorized": False,
         "background_execution_authorized": False,
     }
+
+
+def test_shared_authorization_objective_rule_matches_structural_validator():
+    valid = "Document the supervised Codex pilot authorization packet."
+    task_077 = (
+        "Record the first verified successor-driven supervised Codex autonomy "
+        "pilot in the Phoenix development progress dashboard."
+    )
+    authorization = _valid_codex_authorization_dict()
+
+    authorization["objective"] = valid
+    assert is_safe_codex_pilot_authorization_objective(valid) is True
+    assert codex_pilot_authorization_structural_errors(authorization) == []
+
+    authorization["objective"] = task_077
+    assert is_safe_codex_pilot_authorization_objective(task_077) is False
+    assert codex_pilot_authorization_structural_errors(authorization) == [
+        "authorization objective is invalid"
+    ]
 
 
 def _valid_codex_claim_record(

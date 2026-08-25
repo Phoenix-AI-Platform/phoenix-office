@@ -352,7 +352,10 @@ def test_repeated_compile_produces_identical_task_spec_bytes(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("execution_updates", "category"),
     [
-        ({"objective": "A changed objective."}, "selected_issue_changed"),
+        (
+            {"objective": "Document a changed objective."},
+            "selected_issue_changed",
+        ),
         (
             {"acceptance_criteria": ["A changed acceptance criterion."]},
             "selected_issue_changed",
@@ -553,6 +556,28 @@ def test_current_issue_must_remain_task_spec_compatible(
         )
 
     assert error.value.category == category
+
+
+def test_authorization_incompatible_objective_cannot_compile(
+    tmp_path: Path,
+) -> None:
+    task_077_objective = (
+        "Record the first verified successor-driven supervised Codex autonomy "
+        "pilot in the Phoenix development progress dashboard."
+    )
+
+    with pytest.raises(CodexSuccessorTaskSpecError) as error:
+        _compile(
+            tmp_path,
+            proposal_updates={
+                "selected_execution_definition": _execution(
+                    objective=task_077_objective
+                )
+            },
+        )
+
+    assert error.value.category == "malformed_proposal"
+    assert not (tmp_path / "task-spec.json").exists()
 
 
 def test_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:

@@ -36,6 +36,7 @@ from phoenix_office.core import (
     TaskStatus,
     VerificationPlan,
     codex_pilot_authorization_structural_errors,
+    is_safe_codex_pilot_authorization_objective,
 )
 
 PACKAGE_BUILD_SCHEMA_VERSION = "codex-pilot-package-build-result.v1"
@@ -364,12 +365,15 @@ def _parse_task_spec(
         ("task_id", 80),
         ("handoff_id", 80),
         ("title", 120),
-        ("objective", 200),
         ("expected_pr_title", 120),
         ("branch_name", 100),
     ):
         if not _bounded_text(value.get(field_name), maximum):
             raise CodexPilotPackageBuildError("task_spec_malformed")
+    if not is_safe_codex_pilot_authorization_objective(
+        value.get("objective")
+    ):
+        raise CodexPilotPackageBuildError("task_spec_malformed")
     issue_number = value.get("issue_number")
     if (
         type(issue_number) is not int
