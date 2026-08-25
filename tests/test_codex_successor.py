@@ -26,12 +26,19 @@ ALLOWED_PATH = "docs/development/progress_dashboard.md"
 
 @dataclass
 class FakeServices:
+    root: Path | None = None
     state: RepositoryState = RepositoryState("main", HEAD, True)
     issues: object = field(default_factory=list)
     dependencies: dict[int, object] = field(default_factory=dict)
     paths: tuple[str, ...] = (ALLOWED_PATH,)
     failure: str | None = None
     calls: list[str] = field(default_factory=list)
+
+    def canonical_repository_root(self) -> Path:
+        self.calls.append("canonical_repository_root")
+        if self.root is None:
+            raise CodexSuccessorProposalError("outside_repository")
+        return self.root
 
     def repository_state(self) -> RepositoryState:
         self.calls.append("repository_state")
@@ -156,6 +163,8 @@ def _propose(
     services: FakeServices,
     **kwargs: Any,
 ) -> dict[str, object]:
+    if services.root is None:
+        services.root = repository
     return propose_codex_successor(
         repository_root=repository,
         verification_evidence_path=evidence,
@@ -193,7 +202,12 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
         "proposal_ready_for_architecture_review": True,
     }
     assert len(str(result["proposal_fingerprint"])) == 64
-    assert services.calls == ["repository_state", "tracked_paths", "list_open_issues"]
+    assert services.calls == [
+        "canonical_repository_root",
+        "repository_state",
+        "tracked_paths",
+        "list_open_issues",
+    ]
 
 
 def test_priority_descending_deterministically_selects_highest(
@@ -334,7 +348,145 @@ def test_repository_state_failures_block_before_evidence_or_github(
     result = _propose(repository, evidence, services)
 
     assert result["category"] == category
-    assert services.calls == ["repository_state"]
+    assert services.calls == ["canonical_repository_root", "repository_state"]
+
+
+@pytest.mark.parametrize(
+    "repository_identity",
+    ["SomeoneElse/phoenix-office", "Phoenix-AI-Platform/unrelated", None],
+)
+def test_noncanonical_repository_identity_fails_closed(
+    repository: Path,
+    tmp_path: Path,
+    repository_identity: str | None,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    services = FakeServices(
+        state=RepositoryState("main", HEAD, True, repository_identity),
+        issues=[_issue()],
+    )
+
+    result = _propose(repository, evidence, services)
+
+    assert result["category"] == "repository_identity_mismatch"
+    assert services.calls == ["canonical_repository_root", "repository_state"]
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/Phoenix-AI-Platform/phoenix-office.git",
+        "git@github.com:Phoenix-AI-Platform/phoenix-office.git",
+        "ssh://git@github.com/Phoenix-AI-Platform/phoenix-office.git",
+    ],
+)
+def test_existing_canonical_origin_semantics_are_reused(
+    repository: Path,
+    origin: str,
+) -> None:
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        arguments = argv[3:]
+        if arguments == ["rev-parse", "--show-toplevel"]:
+            output = str(repository)
+        elif arguments == ["branch", "--show-current"]:
+            output = "main"
+        elif arguments == ["rev-parse", "HEAD"]:
+            output = HEAD
+        elif arguments == ["status", "--porcelain=v1"]:
+            output = ""
+        elif arguments == ["remote", "get-url", "origin"]:
+            output = origin
+        else:  # pragma: no cover - test contract guard
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    services = SystemCodexSuccessorServices(repository, process_runner=run)
+
+    assert services.canonical_repository_root() == repository.resolve()
+    assert services.repository_state().repository_identity == REPOSITORY_IDENTITY
+
+
+def test_missing_origin_uses_bounded_identity_failure(repository: Path) -> None:
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        arguments = argv[3:]
+        if arguments == ["rev-parse", "--show-toplevel"]:
+            return subprocess.CompletedProcess(argv, 0, str(repository), "")
+        if arguments == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(argv, 2, "", "missing origin")
+        output = {
+            ("branch", "--show-current"): "main",
+            ("rev-parse", "HEAD"): HEAD,
+            ("status", "--porcelain=v1"): "",
+        }[tuple(arguments)]
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    services = SystemCodexSuccessorServices(repository, process_runner=run)
+
+    with pytest.raises(CodexSuccessorProposalError) as error:
+        services.repository_state()
+
+    assert error.value.category == "repository_identity_mismatch"
+    assert "missing origin" not in str(error.value)
+
+
+@pytest.mark.parametrize("from_subdirectory", [False, True])
+def test_root_and_subdirectory_invocation_share_one_canonical_root(
+    repository: Path,
+    tmp_path: Path,
+    from_subdirectory: bool,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    invocation_path = repository / "docs" if from_subdirectory else repository
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        if argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 0, json.dumps([_issue()]), "")
+        arguments = argv[3:]
+        output = {
+            ("rev-parse", "--show-toplevel"): str(repository),
+            ("branch", "--show-current"): "main",
+            ("rev-parse", "HEAD"): HEAD,
+            ("status", "--porcelain=v1"): "",
+            ("remote", "get-url", "origin"): (
+                "https://github.com/Phoenix-AI-Platform/phoenix-office.git"
+            ),
+            ("ls-files", "-z"): f"{ALLOWED_PATH}\0",
+        }[tuple(arguments)]
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    services = SystemCodexSuccessorServices(invocation_path, process_runner=run)
+    result = propose_codex_successor(
+        repository_root=invocation_path,
+        verification_evidence_path=evidence,
+        services=services,
+    )
+
+    assert result["category"] == "successor_proposed"
+    assert services.canonical_repository_root() == repository.resolve()
+    for argv, kwargs in calls[1:]:
+        assert Path(str(kwargs["cwd"])).resolve() == repository.resolve()
+        if argv[0] == "git":
+            assert Path(argv[2]).resolve() == repository.resolve()
+
+
+def test_outside_repository_is_rejected_before_other_gates(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    evidence = _write_evidence(tmp_path / "verification.json")
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 128, "", "not a repository")
+
+    services = SystemCodexSuccessorServices(outside, process_runner=run)
+    result = propose_codex_successor(
+        repository_root=outside,
+        verification_evidence_path=evidence,
+        services=services,
+    )
+
+    assert result["category"] == "outside_repository"
 
 
 @pytest.mark.parametrize(
@@ -358,7 +510,7 @@ def test_invalid_or_stale_evidence_blocks_before_github(
     result = _propose(repository, evidence, services)
 
     assert result["category"] == category
-    assert services.calls == ["repository_state"]
+    assert services.calls == ["canonical_repository_root", "repository_state"]
 
 
 def test_missing_and_malformed_evidence_are_bounded(
@@ -466,6 +618,33 @@ def test_unsafe_or_untracked_allowed_path_is_rejected(
     assert result["category"] == "unsafe_allowed_path"
 
 
+@pytest.mark.parametrize(
+    ("title", "expected_category"),
+    [
+        ("docs: record a bounded successor", "successor_proposed"),
+        ("feat: add a successor", "malformed_candidate_metadata"),
+        ("chore: update a successor", "malformed_candidate_metadata"),
+        ("docs: ", "malformed_candidate_metadata"),
+        ("docs: token=unsafe-value", "malformed_candidate_metadata"),
+    ],
+)
+def test_docs_only_candidate_requires_existing_docs_pr_title_contract(
+    repository: Path,
+    tmp_path: Path,
+    title: str,
+    expected_category: str,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    candidate = _issue(metadata=_candidate_metadata(expected_pr_title=title))
+
+    result = _propose(repository, evidence, FakeServices(issues=[candidate]))
+
+    assert result["category"] == expected_category
+    assert result["proposal_ready_for_architecture_review"] is (
+        expected_category == "successor_proposed"
+    )
+
+
 def test_fingerprint_is_deterministic_and_binds_dependency_facts(
     repository: Path,
     tmp_path: Path,
@@ -541,16 +720,21 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
-        output = "[]" if argv[1:3] == ["issue", "list"] else json.dumps(
-            {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
-        )
+        if argv[0] == "git":
+            output = str(repository)
+        elif argv[1:3] == ["issue", "list"]:
+            output = "[]"
+        else:
+            output = json.dumps(
+                {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
+            )
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     environment = {
         "PATH": "safe-path",
         "USERPROFILE": "safe-profile",
-        "GH_TOKEN": "forbidden-token",
-        "GITHUB_TOKEN": "forbidden-token",
+        "GH_TOKEN": "preferred-gh-token",
+        "GITHUB_TOKEN": "fallback-github-token",
         "OPENAI_API_KEY": "forbidden-token",
         "AWS_SECRET_ACCESS_KEY": "forbidden-secret",
     }
@@ -566,15 +750,19 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
         "state": "CLOSED",
         "stateReason": "COMPLETED",
     }
-    assert [call[0][1:3] for call in calls] == [
+    github_calls = [call for call in calls if call[0][0] == "gh"]
+    assert [call[0][1:3] for call in github_calls] == [
         ["issue", "list"],
         ["issue", "view"],
     ]
     assert all(call[1]["shell"] is False for call in calls)
-    for _argv, kwargs in calls:
+    for argv, kwargs in calls:
         child_environment = kwargs["env"]
         assert isinstance(child_environment, dict)
-        assert "GH_TOKEN" not in child_environment
+        if argv[0] == "gh":
+            assert child_environment["GH_TOKEN"] == "preferred-gh-token"
+        else:
+            assert "GH_TOKEN" not in child_environment
         assert "GITHUB_TOKEN" not in child_environment
         assert "OPENAI_API_KEY" not in child_environment
         assert "AWS_SECRET_ACCESS_KEY" not in child_environment
@@ -599,6 +787,77 @@ def test_bounded_environment_excludes_arbitrary_credentials() -> None:
     assert "UNRELATED" not in result
 
 
+def test_github_auth_environment_supports_tokens_with_deterministic_precedence() -> None:
+    gh_only = _bounded_process_environment(
+        {"PATH": "safe", "GH_TOKEN": "gh-auth-value"},
+        include_github_auth=True,
+    )
+    github_only = _bounded_process_environment(
+        {"PATH": "safe", "GITHUB_TOKEN": "github-auth-value"},
+        include_github_auth=True,
+    )
+    both = _bounded_process_environment(
+        {
+            "PATH": "safe",
+            "GH_TOKEN": "preferred-gh-value",
+            "GITHUB_TOKEN": "fallback-github-value",
+            "OPENAI_API_KEY": "unrelated-secret",
+            "AWS_SECRET_ACCESS_KEY": "unrelated-secret",
+        },
+        include_github_auth=True,
+    )
+
+    assert gh_only["GH_TOKEN"] == "gh-auth-value"
+    assert "GITHUB_TOKEN" not in gh_only
+    assert github_only["GITHUB_TOKEN"] == "github-auth-value"
+    assert "GH_TOKEN" not in github_only
+    assert both["GH_TOKEN"] == "preferred-gh-value"
+    assert "GITHUB_TOKEN" not in both
+    assert "OPENAI_API_KEY" not in both
+    assert "AWS_SECRET_ACCESS_KEY" not in both
+
+
+def test_github_auth_token_never_enters_public_or_exception_output(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    secret_token = "gh-auth-value-never-public"
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 1, secret_token, secret_token)
+        arguments = argv[3:]
+        output = {
+            ("rev-parse", "--show-toplevel"): str(repository),
+            ("branch", "--show-current"): "main",
+            ("rev-parse", "HEAD"): HEAD,
+            ("status", "--porcelain=v1"): "",
+            ("remote", "get-url", "origin"): (
+                "https://github.com/Phoenix-AI-Platform/phoenix-office.git"
+            ),
+            ("ls-files", "-z"): f"{ALLOWED_PATH}\0",
+        }[tuple(arguments)]
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    services = SystemCodexSuccessorServices(
+        repository,
+        process_runner=run,
+        environment={"PATH": "safe", "GH_TOKEN": secret_token},
+    )
+    result = propose_codex_successor(
+        repository_root=repository,
+        verification_evidence_path=evidence,
+        services=services,
+    )
+
+    assert result["category"] == "github_read_failed"
+    assert secret_token not in json.dumps(result, sort_keys=True)
+    with pytest.raises(CodexSuccessorProposalError) as error:
+        services.list_open_issues()
+    assert secret_token not in str(error.value)
+
+
 def test_selector_has_no_mutation_or_execution_authority(
     repository: Path,
     tmp_path: Path,
@@ -610,6 +869,7 @@ def test_selector_has_no_mutation_or_execution_authority(
 
     assert result["status"] == "success"
     assert set(services.calls) <= {
+        "canonical_repository_root",
         "repository_state",
         "tracked_paths",
         "list_open_issues",

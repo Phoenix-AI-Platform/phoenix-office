@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
 
+from phoenix_office.core.contracts import _is_safe_pr_title
+from phoenix_office.dev.codex_runner import _repository_identity_from_remote
+
 SUCCESSOR_PROPOSAL_SCHEMA_VERSION: Final = "codex-successor-proposal.v1"
 SUCCESSOR_CANDIDATE_SCHEMA_VERSION: Final = (
     "codex-successor-candidate.v1"
@@ -105,6 +108,7 @@ class RepositoryState:
     branch: str
     head: str
     clean: bool
+    repository_identity: str | None = REPOSITORY_IDENTITY
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +154,9 @@ class SuccessorCandidate:
 class CodexSuccessorServices(Protocol):
     """Injectable read-only boundary for local Git and GitHub facts."""
 
+    def canonical_repository_root(self) -> Path:
+        ...
+
     def repository_state(self) -> RepositoryState:
         ...
 
@@ -178,9 +185,49 @@ class SystemCodexSuccessorServices:
         process_runner: ProcessRunner | None = None,
         environment: Mapping[str, str] | None = None,
     ) -> None:
-        self._repository_root = Path(repository_root)
+        self._invocation_path = Path(repository_root)
+        self._repository_root: Path | None = None
         self._process_runner = process_runner or subprocess.run
         self._environment = dict(environment if environment is not None else os.environ)
+
+    def canonical_repository_root(self) -> Path:
+        """Resolve and freeze the canonical Git top-level directory once."""
+
+        if self._repository_root is not None:
+            return self._repository_root
+        output = self._run(
+            (
+                "git",
+                "-C",
+                str(self._invocation_path),
+                "rev-parse",
+                "--show-toplevel",
+            ),
+            cwd=self._invocation_path,
+            failure_category="outside_repository",
+            timeout=GIT_TIMEOUT_SECONDS,
+            max_output_bytes=MAX_GIT_OUTPUT_BYTES,
+            include_github_auth=False,
+        ).strip()
+        if (
+            not output
+            or "\n" in output
+            or "\r" in output
+            or any(ord(character) < 32 or ord(character) == 127 for character in output)
+        ):
+            raise CodexSuccessorProposalError("outside_repository")
+        candidate = Path(output)
+        if not candidate.is_absolute():
+            raise CodexSuccessorProposalError("outside_repository")
+        try:
+            details = candidate.lstat()
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise CodexSuccessorProposalError("outside_repository") from exc
+        if not stat.S_ISDIR(details.st_mode) or _is_link_or_reparse(details):
+            raise CodexSuccessorProposalError("outside_repository")
+        self._repository_root = resolved
+        return resolved
 
     def repository_state(self) -> RepositoryState:
         """Inspect branch, HEAD, and cleanliness without mutation."""
@@ -188,7 +235,18 @@ class SystemCodexSuccessorServices:
         branch = self._run_git("branch", "--show-current").strip()
         head = self._run_git("rev-parse", "HEAD").strip()
         status_output = self._run_git("status", "--porcelain=v1")
-        return RepositoryState(branch=branch, head=head, clean=not status_output.strip())
+        remote = self._run_git(
+            "remote",
+            "get-url",
+            "origin",
+            failure_category="repository_identity_mismatch",
+        )
+        return RepositoryState(
+            branch=branch,
+            head=head,
+            clean=not status_output.strip(),
+            repository_identity=_repository_identity_from_remote(remote),
+        )
 
     def tracked_paths(self) -> tuple[str, ...]:
         """Return the bounded tracked-path set needed for candidate validation."""
@@ -241,39 +299,54 @@ class SystemCodexSuccessorServices:
         except CodexSuccessorProposalError as exc:
             raise CodexSuccessorProposalError("dependency_state_unknown") from exc
 
-    def _run_git(self, *arguments: str) -> str:
+    def _run_git(
+        self,
+        *arguments: str,
+        failure_category: str = "repository_inspection_failed",
+    ) -> str:
+        repository_root = self.canonical_repository_root()
         return self._run(
-            ("git", "-C", str(self._repository_root), *arguments),
-            failure_category="repository_inspection_failed",
+            ("git", "-C", str(repository_root), *arguments),
+            cwd=repository_root,
+            failure_category=failure_category,
             timeout=GIT_TIMEOUT_SECONDS,
             max_output_bytes=MAX_GIT_OUTPUT_BYTES,
+            include_github_auth=False,
         )
 
     def _run_gh(self, *arguments: str) -> str:
         if tuple(arguments[:2]) not in {("issue", "list"), ("issue", "view")}:
             raise CodexSuccessorProposalError("github_read_failed")
+        repository_root = self.canonical_repository_root()
         return self._run(
             ("gh", *arguments),
+            cwd=repository_root,
             failure_category="github_read_failed",
             timeout=GITHUB_TIMEOUT_SECONDS,
             max_output_bytes=MAX_GITHUB_OUTPUT_BYTES,
+            include_github_auth=True,
         )
 
     def _run(
         self,
         argv: tuple[str, ...],
         *,
+        cwd: Path,
         failure_category: str,
         timeout: int,
         max_output_bytes: int,
+        include_github_auth: bool,
     ) -> str:
         try:
             completed = self._process_runner(
                 list(argv),
                 capture_output=True,
                 check=False,
-                cwd=self._repository_root,
-                env=_bounded_process_environment(self._environment),
+                cwd=cwd,
+                env=_bounded_process_environment(
+                    self._environment,
+                    include_github_auth=include_github_auth,
+                ),
                 shell=False,
                 text=True,
                 timeout=timeout,
@@ -305,6 +378,7 @@ def propose_codex_successor(
     verification: VerificationState | None = None
     candidate_count = 0
     try:
+        canonical_repository_root = system.canonical_repository_root()
         state = system.repository_state()
         _require_canonical_repository_state(state)
         verification = _load_verification_evidence(
@@ -315,7 +389,7 @@ def propose_codex_successor(
         issues = _validate_issue_payload(system.list_open_issues())
         candidates = _parse_explicit_candidates(
             issues,
-            repository_root=Path(repository_root),
+            repository_root=canonical_repository_root,
             tracked_paths=tracked_paths,
         )
         dependencies = _resolve_dependency_facts(candidates, system)
@@ -387,6 +461,8 @@ def _require_canonical_repository_state(state: RepositoryState) -> None:
         raise CodexSuccessorProposalError("invalid_head")
     if not state.clean:
         raise CodexSuccessorProposalError("dirty_worktree")
+    if state.repository_identity != REPOSITORY_IDENTITY:
+        raise CodexSuccessorProposalError("repository_identity_mismatch")
 
 
 def _load_verification_evidence(
@@ -588,7 +664,7 @@ def _candidate_from_metadata(
         or value.get("repository") != REPOSITORY_IDENTITY
         or value.get("base_branch") != BASE_BRANCH
         or value.get("execution_class") != CURRENT_EXECUTION_CLASS
-        or not _safe_public_text(expected_pr_title, max_length=120)
+        or not _is_safe_pr_title(expected_pr_title)
     ):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     dependency_numbers = _validated_dependency_numbers(depends_on)
@@ -920,7 +996,11 @@ def _sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _bounded_process_environment(source: Mapping[str, str]) -> dict[str, str]:
+def _bounded_process_environment(
+    source: Mapping[str, str],
+    *,
+    include_github_auth: bool = False,
+) -> dict[str, str]:
     case_insensitive = os.name == "nt"
     selected: dict[str, str] = {}
     source_items = tuple(source.items())
@@ -945,7 +1025,35 @@ def _bounded_process_environment(source: Mapping[str, str]) -> dict[str, str]:
             "NO_COLOR": "1",
         }
     )
+    if include_github_auth:
+        gh_token = _environment_value(source, "GH_TOKEN")
+        github_token = _environment_value(source, "GITHUB_TOKEN")
+        if gh_token is not None and _safe_github_token(gh_token):
+            selected["GH_TOKEN"] = gh_token
+        elif gh_token is None and github_token is not None and _safe_github_token(
+            github_token
+        ):
+            selected["GITHUB_TOKEN"] = github_token
     return selected
+
+
+def _environment_value(source: Mapping[str, str], name: str) -> str | None:
+    exact = source.get(name)
+    if exact is not None:
+        return exact
+    if os.name != "nt":
+        return None
+    matches = [value for key, value in source.items() if key.casefold() == name.casefold()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _safe_github_token(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and 1 <= len(value.encode("ascii", errors="ignore")) <= 4096
+        and value.isascii()
+        and all(33 <= ord(character) <= 126 for character in value)
+    )
 
 
 def _safe_environment_value(value: object) -> bool:
