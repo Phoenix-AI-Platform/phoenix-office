@@ -2544,7 +2544,9 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
     for field_name in ["handoff_path", "evidence_path"]:
         if not _is_safe_authorization_json_path(package.get(field_name)):
             errors.append(f"authorization {field_name} is invalid")
-    if not _is_safe_authorization_objective(package.get("objective")):
+    if not is_safe_codex_pilot_authorization_objective(
+        package.get("objective")
+    ):
         errors.append("authorization objective is invalid")
     if not _is_allowed_paths(package.get("allowed_paths")):
         errors.append("authorization allowed paths are invalid")
@@ -3147,7 +3149,9 @@ def _is_safe_authorization_json_path(value: object) -> bool:
     )
 
 
-def _is_safe_authorization_objective(value: object) -> bool:
+def is_safe_codex_pilot_authorization_objective(value: object) -> bool:
+    """Return whether an objective satisfies the existing authorization rule."""
+
     if not isinstance(value, str):
         return False
     if (

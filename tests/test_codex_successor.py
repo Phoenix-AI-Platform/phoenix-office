@@ -265,6 +265,26 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
     ]
 
 
+def test_authorization_incompatible_objective_is_not_proposal_ready(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    task_077_objective = (
+        "Record the first verified successor-driven supervised Codex autonomy "
+        "pilot in the Phoenix development progress dashboard."
+    )
+    evidence = _write_evidence(tmp_path / "verification.json")
+    issue = _issue(
+        execution=_execution_definition(objective=task_077_objective),
+    )
+
+    result = _propose(repository, evidence, FakeServices(issues=[issue]))
+
+    assert result["category"] == "malformed_execution_definition"
+    assert result["proposal_ready_for_architecture_review"] is False
+    assert result["proposal_fingerprint"] is None
+
+
 def test_task_spec_issue_number_ceiling_is_shared() -> None:
     assert CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER == 9_999_999
 

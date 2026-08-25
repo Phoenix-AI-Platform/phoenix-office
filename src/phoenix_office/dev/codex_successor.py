@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
 
+from phoenix_office.core import is_safe_codex_pilot_authorization_objective
 from phoenix_office.core.contracts import _is_safe_branch, _is_safe_pr_title
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
@@ -856,6 +857,7 @@ def _execution_definition_from_metadata(
         or not isinstance(task_id, str)
         or _TASK_ID_PATTERN.fullmatch(task_id) is None
         or not _safe_public_text(objective, max_length=200)
+        or not is_safe_codex_pilot_authorization_objective(objective)
         or not _is_safe_branch(branch_name)
         or type(budget_ceiling) is not int
         or not 1 <= budget_ceiling <= 1_000_000

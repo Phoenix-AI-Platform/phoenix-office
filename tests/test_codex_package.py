@@ -130,6 +130,27 @@ def test_valid_package_build_round_trips_existing_validators(
     assert len(result["authorization_fingerprint"]) == 64
 
 
+def test_authorization_incompatible_objective_fails_before_composition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_077_objective = (
+        "Record the first verified successor-driven supervised Codex autonomy "
+        "pilot in the Phoenix development progress dashboard."
+    )
+    monkeypatch.setattr(
+        codex_package,
+        "_compose_artifacts",
+        lambda **_kwargs: pytest.fail("invalid objective reached composition"),
+    )
+
+    with pytest.raises(CodexPilotPackageBuildError) as exc_info:
+        _build(tmp_path, objective=task_077_objective)
+
+    assert exc_info.value.category == "task_spec_malformed"
+    assert not (tmp_path / "package").exists()
+
+
 def test_repeated_builds_are_substantively_deterministic_with_fresh_identity(
     tmp_path: Path,
 ) -> None:
