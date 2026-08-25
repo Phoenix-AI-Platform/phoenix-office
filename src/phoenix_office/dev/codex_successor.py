@@ -15,19 +15,25 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
 
-from phoenix_office.core.contracts import _is_safe_pr_title
+from phoenix_office.core.contracts import _is_safe_branch, _is_safe_pr_title
+from phoenix_office.dev.codex_package import (
+    CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
+    _bounded_identifier,
+)
 from phoenix_office.dev.codex_runner import _repository_identity_from_remote
 
-SUCCESSOR_PROPOSAL_SCHEMA_VERSION: Final = "codex-successor-proposal.v1"
+SUCCESSOR_PROPOSAL_SCHEMA_VERSION: Final = "codex-successor-proposal.v2"
 SUCCESSOR_CANDIDATE_SCHEMA_VERSION: Final = (
     "codex-successor-candidate.v1"
 )
+SUCCESSOR_EXECUTION_SCHEMA_VERSION: Final = "codex-successor-execution.v1"
 SUCCESSOR_FINGERPRINT_SCHEMA_VERSION: Final = (
-    "codex-successor-proposal-fingerprint.v1"
+    "codex-successor-proposal-fingerprint.v2"
 )
 REPOSITORY_IDENTITY: Final = "Phoenix-AI-Platform/phoenix-office"
 BASE_BRANCH: Final = "main"
 CANDIDATE_FENCE: Final = "phoenix-codex-successor"
+EXECUTION_FENCE: Final = "phoenix-codex-execution"
 CURRENT_EXECUTION_CLASS: Final = "docs-only-supervised"
 
 MAX_EVIDENCE_BYTES: Final = 2 * 1024 * 1024
@@ -36,6 +42,8 @@ MAX_GIT_OUTPUT_BYTES: Final = 4 * 1024 * 1024
 MAX_ISSUES: Final = 100
 MAX_ISSUE_BODY_CHARACTERS: Final = 65_536
 MAX_CANDIDATE_BYTES: Final = 16 * 1024
+MAX_EXECUTION_DEFINITION_BYTES: Final = 32 * 1024
+MAX_FINGERPRINT_PAYLOAD_BYTES: Final = 64 * 1024
 MAX_DEPENDENCIES_PER_CANDIDATE: Final = 20
 MAX_DEPENDENCY_QUERIES: Final = 100
 MAX_TRACKED_PATHS: Final = 100_000
@@ -58,6 +66,37 @@ _CANDIDATE_FIELDS: Final = {
     "schema_version",
     "task_id",
 }
+_EXECUTION_DEFINITION_FIELDS: Final = {
+    "acceptance_criteria",
+    "branch_name",
+    "budget_ceiling",
+    "constraints",
+    "control_references",
+    "objective",
+    "schema_version",
+    "task_id",
+    "timeout_seconds",
+}
+_PROPOSAL_FIELDS: Final = {
+    "candidate_count",
+    "category",
+    "proposal_fingerprint",
+    "proposal_ready_for_architecture_review",
+    "schema_version",
+    "selected_allowed_paths",
+    "selected_execution_class",
+    "selected_execution_definition",
+    "selected_expected_pr_title",
+    "selected_issue_number",
+    "selected_priority",
+    "selected_risk_class",
+    "selected_task_id",
+    "selected_title",
+    "selection_reason",
+    "status",
+    "verification_id",
+    "verified_base_sha",
+}
 _CANDIDATE_STATES: Final = {"blocked", "deferred", "ready"}
 _CANDIDATE_QUEUES: Final = {"autonomy", "manual"}
 _RISK_CLASSES: Final = {"low", "medium", "high"}
@@ -66,6 +105,10 @@ _TASK_ID_PATTERN: Final = re.compile(r"TASK-[0-9]{3,6}")
 _FINGERPRINT_PATTERN: Final = re.compile(r"[0-9a-f]{64}")
 _CANDIDATE_BLOCK_PATTERN: Final = re.compile(
     rf"(?ms)^```{re.escape(CANDIDATE_FENCE)}[ \t]*\n"
+    r"(?P<payload>.*?)\n```[ \t]*$"
+)
+_EXECUTION_BLOCK_PATTERN: Final = re.compile(
+    rf"(?ms)^```{re.escape(EXECUTION_FENCE)}[ \t]*\n"
     r"(?P<payload>.*?)\n```[ \t]*$"
 )
 _SENSITIVE_TEXT_PATTERNS: Final = (
@@ -133,6 +176,34 @@ class DependencyFact:
 
 
 @dataclass(frozen=True, slots=True)
+class SuccessorExecutionDefinition:
+    """Exact bounded execution facts reviewed before task-spec compilation."""
+
+    schema_version: str
+    task_id: str
+    objective: str
+    branch_name: str
+    budget_ceiling: int
+    timeout_seconds: int
+    control_references: Mapping[str, str]
+    constraints: tuple[str, ...]
+    acceptance_criteria: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "branch_name": self.branch_name,
+            "budget_ceiling": self.budget_ceiling,
+            "constraints": list(self.constraints),
+            "control_references": dict(sorted(self.control_references.items())),
+            "objective": self.objective,
+            "schema_version": self.schema_version,
+            "task_id": self.task_id,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SuccessorCandidate:
     """Strict explicit successor metadata from one open GitHub issue."""
 
@@ -149,6 +220,25 @@ class SuccessorCandidate:
     allowed_paths: tuple[str, ...]
     expected_pr_title: str
     execution_class: str
+    execution_definition: SuccessorExecutionDefinition | None
+
+
+@dataclass(frozen=True, slots=True)
+class SuccessorProposal:
+    """Strict successful proposal accepted by the TASK-076 compiler."""
+
+    verification: VerificationState
+    candidate_count: int
+    issue_number: int
+    task_id: str
+    title: str
+    priority: int
+    risk_class: str
+    execution_class: str
+    allowed_paths: tuple[str, ...]
+    expected_pr_title: str
+    execution_definition: SuccessorExecutionDefinition
+    fingerprint: str
 
 
 class CodexSuccessorServices(Protocol):
@@ -164,6 +254,9 @@ class CodexSuccessorServices(Protocol):
         ...
 
     def list_open_issues(self) -> object:
+        ...
+
+    def read_issue(self, issue_number: int) -> object:
         ...
 
     def read_dependency(self, issue_number: int) -> object:
@@ -275,6 +368,22 @@ class SystemCodexSuccessorServices:
             "open",
             "--limit",
             str(MAX_ISSUES + 1),
+            "--json",
+            "number,title,state,body",
+        )
+        return _load_github_json(output)
+
+    def read_issue(self, issue_number: int) -> object:
+        """Read one selected issue through the existing read-only boundary."""
+
+        if type(issue_number) is not int or not 1 <= issue_number <= 10**9:
+            raise CodexSuccessorProposalError("github_read_failed")
+        output = self._run_gh(
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            REPOSITORY_IDENTITY,
             "--json",
             "number,title,state,body",
         )
@@ -454,6 +563,59 @@ def propose_codex_successor(
         )
 
 
+def parse_selected_codex_successor_issue(
+    value: object,
+    *,
+    repository_root: Path,
+    tracked_paths: tuple[str, ...],
+) -> SuccessorCandidate:
+    """Re-parse one selected issue through the exact TASK-075 contracts."""
+
+    issues = _validate_issue_payload([value])
+    candidates = _parse_explicit_candidates(
+        issues,
+        repository_root=repository_root,
+        tracked_paths=_validate_tracked_paths(tracked_paths),
+    )
+    if len(candidates) != 1:
+        raise CodexSuccessorProposalError("missing_execution_definition")
+    candidate = candidates[0]
+    if (
+        candidate.candidate_state != "ready"
+        or candidate.queue != "autonomy"
+        or candidate.execution_definition is None
+    ):
+        raise CodexSuccessorProposalError("proposal_not_ready")
+    return candidate
+
+
+def resolve_codex_successor_dependency_facts(
+    candidate: SuccessorCandidate,
+    services: CodexSuccessorServices,
+) -> tuple[DependencyFact, ...]:
+    """Resolve the exact dependency facts bound into one proposal."""
+
+    facts = _resolve_dependency_facts((candidate,), services)
+    return tuple(facts[number] for number in candidate.depends_on)
+
+
+def codex_successor_proposal_fingerprint(
+    *,
+    verification: VerificationState,
+    candidate: SuccessorCandidate,
+    dependency_facts: tuple[DependencyFact, ...],
+) -> str:
+    """Recompute the canonical TASK-075 proposal fingerprint."""
+
+    return _proposal_fingerprint(
+        verification=verification,
+        candidate=candidate,
+        dependency_facts=dependency_facts,
+        canonical_serializer=_canonical_json_bytes,
+        fingerprint_function=_sha256_hex,
+    )
+
+
 def _require_canonical_repository_state(state: RepositoryState) -> None:
     if state.branch != BASE_BRANCH:
         raise CodexSuccessorProposalError("non_main_checkout")
@@ -609,8 +771,20 @@ def _parse_explicit_candidates(
         metadata = _candidate_metadata_from_body(str(issue["body"]))
         if metadata is None:
             continue
-        candidate = _candidate_from_metadata(issue, metadata)
+        execution_metadata = _execution_definition_from_body(str(issue["body"]))
+        execution_definition = (
+            _execution_definition_from_metadata(execution_metadata)
+            if execution_metadata is not None
+            else None
+        )
+        candidate = _candidate_from_metadata(
+            issue,
+            metadata,
+            execution_definition=execution_definition,
+        )
         if candidate.candidate_state == "ready" and candidate.queue == "autonomy":
+            if candidate.execution_definition is None:
+                raise CodexSuccessorProposalError("missing_execution_definition")
             _require_candidate_paths(
                 candidate.allowed_paths,
                 repository_root=repository_root,
@@ -640,9 +814,70 @@ def _candidate_metadata_from_body(body: str) -> Mapping[str, object] | None:
     return value
 
 
+def _execution_definition_from_body(body: str) -> Mapping[str, object] | None:
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    marker = f"```{EXECUTION_FENCE}"
+    if marker not in normalized:
+        return None
+    matches = tuple(_EXECUTION_BLOCK_PATTERN.finditer(normalized))
+    if len(matches) != 1 or normalized.count(marker) != 1:
+        raise CodexSuccessorProposalError("malformed_execution_definition")
+    execution_text = matches[0].group("payload")
+    if not 1 <= len(execution_text.encode("utf-8")) <= MAX_EXECUTION_DEFINITION_BYTES:
+        raise CodexSuccessorProposalError("malformed_execution_definition")
+    try:
+        value = _load_json_without_duplicates(execution_text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise CodexSuccessorProposalError("malformed_execution_definition") from exc
+    if not isinstance(value, dict) or set(value) != _EXECUTION_DEFINITION_FIELDS:
+        raise CodexSuccessorProposalError("malformed_execution_definition")
+    return value
+
+
+def _execution_definition_from_metadata(
+    value: Mapping[str, object],
+) -> SuccessorExecutionDefinition:
+    task_id = value.get("task_id")
+    objective = value.get("objective")
+    branch_name = value.get("branch_name")
+    budget_ceiling = value.get("budget_ceiling")
+    timeout_seconds = value.get("timeout_seconds")
+    control_references = value.get("control_references")
+    constraints = value.get("constraints")
+    acceptance_criteria = value.get("acceptance_criteria")
+    if (
+        value.get("schema_version") != SUCCESSOR_EXECUTION_SCHEMA_VERSION
+        or not isinstance(task_id, str)
+        or _TASK_ID_PATTERN.fullmatch(task_id) is None
+        or not _safe_public_text(objective, max_length=200)
+        or not _is_safe_branch(branch_name)
+        or type(budget_ceiling) is not int
+        or not 1 <= budget_ceiling <= 1_000_000
+        or type(timeout_seconds) is not int
+        or not 60 <= timeout_seconds <= 7200
+        or not _valid_control_references(control_references)
+    ):
+        raise CodexSuccessorProposalError("malformed_execution_definition")
+    safe_constraints = _validated_narrative_items(constraints)
+    safe_acceptance = _validated_narrative_items(acceptance_criteria)
+    return SuccessorExecutionDefinition(
+        schema_version=SUCCESSOR_EXECUTION_SCHEMA_VERSION,
+        task_id=task_id,
+        objective=str(objective),
+        branch_name=str(branch_name),
+        budget_ceiling=budget_ceiling,
+        timeout_seconds=timeout_seconds,
+        control_references=dict(control_references),
+        constraints=safe_constraints,
+        acceptance_criteria=safe_acceptance,
+    )
+
+
 def _candidate_from_metadata(
     issue: Mapping[str, object],
     value: Mapping[str, object],
+    *,
+    execution_definition: SuccessorExecutionDefinition | None,
 ) -> SuccessorCandidate:
     task_id = value.get("task_id")
     candidate_state = value.get("candidate_state")
@@ -665,6 +900,7 @@ def _candidate_from_metadata(
         or value.get("base_branch") != BASE_BRANCH
         or value.get("execution_class") != CURRENT_EXECUTION_CLASS
         or not _is_safe_pr_title(expected_pr_title)
+        or not _safe_public_text(issue.get("title"), max_length=120)
     ):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     dependency_numbers = _validated_dependency_numbers(depends_on)
@@ -672,6 +908,8 @@ def _candidate_from_metadata(
     issue_number = issue["number"]
     if issue_number in dependency_numbers:
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
+    if execution_definition is not None and execution_definition.task_id != task_id:
+        raise CodexSuccessorProposalError("candidate_execution_mismatch")
     return SuccessorCandidate(
         issue_number=issue_number,
         title=str(issue["title"]),
@@ -686,6 +924,7 @@ def _candidate_from_metadata(
         allowed_paths=safe_paths,
         expected_pr_title=str(expected_pr_title),
         execution_class=CURRENT_EXECUTION_CLASS,
+        execution_definition=execution_definition,
     )
 
 
@@ -709,6 +948,25 @@ def _validated_allowed_paths(value: object) -> tuple[str, ...]:
         or any(not _safe_markdown_path(item) for item in value)
     ):
         raise CodexSuccessorProposalError("unsafe_allowed_path")
+    return tuple(value)
+
+
+def _valid_control_references(value: object) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and set(value) == CODEX_PILOT_TASK_SPEC_CONTROL_IDS
+        and all(_bounded_identifier(item) for item in value.values())
+    )
+
+
+def _validated_narrative_items(value: object) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 20
+        or any(not _safe_public_text(item, max_length=300) for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise CodexSuccessorProposalError("malformed_execution_definition")
     return tuple(value)
 
 
@@ -796,6 +1054,8 @@ def _proposal_fingerprint(
     canonical_serializer: CanonicalSerializer,
     fingerprint_function: FingerprintFunction,
 ) -> str:
+    if candidate.execution_definition is None:
+        raise CodexSuccessorProposalError("missing_execution_definition")
     payload: dict[str, object] = {
         "schema_version": SUCCESSOR_FINGERPRINT_SCHEMA_VERSION,
         "verified_base_sha": verification.base_sha,
@@ -815,6 +1075,7 @@ def _proposal_fingerprint(
             ],
             "execution_class": candidate.execution_class,
             "expected_pr_title": candidate.expected_pr_title,
+            "execution_definition": candidate.execution_definition.to_payload(),
             "issue_number": candidate.issue_number,
             "priority": candidate.priority,
             "queue": candidate.queue,
@@ -828,7 +1089,10 @@ def _proposal_fingerprint(
         canonical = canonical_serializer(payload)
     except Exception as exc:
         raise CodexSuccessorProposalError("serialization_uncertainty") from exc
-    if not isinstance(canonical, bytes) or not 1 <= len(canonical) <= MAX_CANDIDATE_BYTES:
+    if (
+        not isinstance(canonical, bytes)
+        or not 1 <= len(canonical) <= MAX_FINGERPRINT_PAYLOAD_BYTES
+    ):
         raise CodexSuccessorProposalError("serialization_uncertainty")
     try:
         fingerprint = fingerprint_function(canonical)
@@ -848,6 +1112,8 @@ def _successful_result(
     candidate: SuccessorCandidate,
     fingerprint: str,
 ) -> dict[str, object]:
+    if candidate.execution_definition is None:
+        raise CodexSuccessorProposalError("missing_execution_definition")
     return {
         "schema_version": SUCCESSOR_PROPOSAL_SCHEMA_VERSION,
         "status": "success",
@@ -863,6 +1129,9 @@ def _successful_result(
         "selected_execution_class": candidate.execution_class,
         "selected_allowed_paths": list(candidate.allowed_paths),
         "selected_expected_pr_title": candidate.expected_pr_title,
+        "selected_execution_definition": (
+            candidate.execution_definition.to_payload()
+        ),
         "selection_reason": "highest_priority_then_lowest_issue_number",
         "proposal_fingerprint": fingerprint,
         "proposal_ready_for_architecture_review": True,
@@ -891,10 +1160,86 @@ def _blocked_result(
         "selected_execution_class": None,
         "selected_allowed_paths": [],
         "selected_expected_pr_title": None,
+        "selected_execution_definition": None,
         "selection_reason": None,
         "proposal_fingerprint": None,
         "proposal_ready_for_architecture_review": False,
     }
+
+
+def parse_codex_successor_proposal_payload(
+    value: object,
+) -> SuccessorProposal:
+    """Validate one exact successful TASK-075 proposal for compilation."""
+
+    if not isinstance(value, dict) or set(value) != _PROPOSAL_FIELDS:
+        raise CodexSuccessorProposalError("malformed_proposal")
+    if (
+        value.get("schema_version") != SUCCESSOR_PROPOSAL_SCHEMA_VERSION
+        or value.get("status") != "success"
+        or value.get("category") != "successor_proposed"
+        or value.get("proposal_ready_for_architecture_review") is not True
+        or value.get("selection_reason")
+        != "highest_priority_then_lowest_issue_number"
+    ):
+        raise CodexSuccessorProposalError("proposal_not_ready")
+    base_sha = value.get("verified_base_sha")
+    verification_id = value.get("verification_id")
+    candidate_count = value.get("candidate_count")
+    issue_number = value.get("selected_issue_number")
+    task_id = value.get("selected_task_id")
+    title = value.get("selected_title")
+    priority = value.get("selected_priority")
+    risk_class = value.get("selected_risk_class")
+    execution_class = value.get("selected_execution_class")
+    expected_pr_title = value.get("selected_expected_pr_title")
+    fingerprint = value.get("proposal_fingerprint")
+    execution_payload = value.get("selected_execution_definition")
+    try:
+        allowed_paths = _validated_allowed_paths(value.get("selected_allowed_paths"))
+        if not isinstance(execution_payload, dict):
+            raise CodexSuccessorProposalError("malformed_proposal")
+        execution_definition = _execution_definition_from_metadata(execution_payload)
+    except CodexSuccessorProposalError as exc:
+        raise CodexSuccessorProposalError("malformed_proposal") from exc
+    if (
+        not isinstance(base_sha, str)
+        or _SHA_PATTERN.fullmatch(base_sha) is None
+        or not _valid_verification_id(verification_id)
+        or type(candidate_count) is not int
+        or not 1 <= candidate_count <= MAX_ISSUES
+        or type(issue_number) is not int
+        or not 1 <= issue_number <= 10**9
+        or not isinstance(task_id, str)
+        or _TASK_ID_PATTERN.fullmatch(task_id) is None
+        or not _safe_public_text(title, max_length=120)
+        or type(priority) is not int
+        or not 0 <= priority <= MAX_PRIORITY
+        or risk_class not in _RISK_CLASSES
+        or execution_class != CURRENT_EXECUTION_CLASS
+        or not _is_safe_pr_title(expected_pr_title)
+        or not isinstance(fingerprint, str)
+        or _FINGERPRINT_PATTERN.fullmatch(fingerprint) is None
+        or execution_definition.task_id != task_id
+    ):
+        raise CodexSuccessorProposalError("malformed_proposal")
+    return SuccessorProposal(
+        verification=VerificationState(
+            verification_id=str(verification_id),
+            base_sha=base_sha,
+        ),
+        candidate_count=candidate_count,
+        issue_number=issue_number,
+        task_id=task_id,
+        title=str(title),
+        priority=priority,
+        risk_class=str(risk_class),
+        execution_class=str(execution_class),
+        allowed_paths=allowed_paths,
+        expected_pr_title=str(expected_pr_title),
+        execution_definition=execution_definition,
+        fingerprint=fingerprint,
+    )
 
 
 def _validate_tracked_paths(value: object) -> frozenset[str]:

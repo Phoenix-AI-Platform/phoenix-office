@@ -22,13 +22,16 @@ from phoenix_office.core import (
 from phoenix_office.dev import (
     CodexPilotPackageBuildError,
     CodexPilotPackageInspection,
+    CodexSuccessorTaskSpecError,
     ReviewedRunnerOutcome,
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
     SystemCodexSuccessorServices,
     blocked_codex_pilot_package_build_result,
+    blocked_codex_successor_task_spec_result,
     blocked_reviewed_execution_result,
     bounded_codex_pilot_run_result,
+    build_approved_codex_successor_task_spec,
     build_codex_pilot_package,
     execute_reviewed_codex_task,
     propose_codex_successor,
@@ -351,6 +354,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the bounded successor proposal as JSON",
     )
     codex_successor_propose_parser.set_defaults(func=codex_successor_propose)
+    codex_successor_task_spec_parser = dev_subparsers.add_parser(
+        "codex-successor-task-spec-build",
+        help="Compile one externally approved successor task spec",
+    )
+    codex_successor_task_spec_parser.add_argument(
+        "successor_proposal_json",
+        type=Path,
+        help="Path to the exact TASK-075 successor proposal JSON",
+    )
+    codex_successor_task_spec_parser.add_argument(
+        "architecture_approval_json",
+        type=Path,
+        help="Path to the external architecture approval receipt JSON",
+    )
+    codex_successor_task_spec_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Explicit safe output path for the reviewed task-spec JSON",
+    )
+    codex_successor_task_spec_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded task-spec compilation result as JSON",
+    )
+    codex_successor_task_spec_parser.set_defaults(
+        func=codex_successor_task_spec_build
+    )
 
     proposal_parser = subparsers.add_parser("proposal", help="Proposal commands")
     proposal_subparsers = proposal_parser.add_subparsers(dest="proposal_command")
@@ -1396,6 +1427,30 @@ def codex_successor_propose(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "success" else 1
 
 
+def codex_successor_task_spec_build(args: argparse.Namespace) -> int:
+    """Compile one external architecture approval without executing work."""
+
+    try:
+        result = build_approved_codex_successor_task_spec(
+            proposal_path=args.successor_proposal_json,
+            architecture_approval_path=args.architecture_approval_json,
+            output_path=args.output,
+            repository_root=Path.cwd(),
+            services=SystemCodexSuccessorServices(Path.cwd()),
+        )
+    except CodexSuccessorTaskSpecError as exc:
+        result = blocked_codex_successor_task_spec_result(exc.category)
+    except Exception:
+        result = blocked_codex_successor_task_spec_result(
+            "task_spec_compiler_internal_failure"
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_successor_task_spec_build(result)
+    return 0 if result.get("status") == "success" else 1
+
+
 def _print_codex_successor_proposal(result: Mapping[str, object]) -> None:
     print("Codex autonomy successor proposal")
     print(f"Status: {result['status']}")
@@ -1412,6 +1467,20 @@ def _print_codex_successor_proposal(result: Mapping[str, object]) -> None:
     )
     print("Execution: not performed")
     print("GitHub mutation: not performed")
+
+
+def _print_codex_successor_task_spec_build(
+    result: Mapping[str, object],
+) -> None:
+    print("Approved Codex successor task-spec compilation")
+    print(f"Status: {result['status']}")
+    print(f"Category: {result['category']}")
+    print(f"Selected issue: {result['selected_issue_number'] or 'none'}")
+    print(f"Selected task: {result['selected_task_id'] or 'none'}")
+    print(f"Task spec written: {_format_yes_no(bool(result['task_spec_written']))}")
+    print("Package builder invoked: no")
+    print("Runner invoked: no")
+    print("Codex invoked: no")
 
 
 def _execute_codex_pilot_from_paths(
