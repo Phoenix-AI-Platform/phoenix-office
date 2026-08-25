@@ -23,6 +23,17 @@ EXPECTED_FILES = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _simulate_canonical_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep package tests independent of feature and detached CI checkouts."""
+
+    monkeypatch.setattr(
+        codex_package,
+        "_current_branch",
+        lambda _repository: "main",
+    )
+
+
 def _head() -> str:
     completed = subprocess.run(
         ["git", "-C", str(REPOSITORY_ROOT), "rev-parse", "HEAD"],
@@ -182,6 +193,56 @@ def test_stale_base_sha_is_rejected_before_output(tmp_path: Path) -> None:
     assert not (tmp_path / "package").exists()
 
 
+def test_feature_branch_package_build_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        codex_package,
+        "_current_branch",
+        lambda _repository: "codex/issue-073-builder",
+    )
+
+    with pytest.raises(CodexPilotPackageBuildError) as exc_info:
+        _build(tmp_path)
+
+    assert exc_info.value.category == "noncanonical_base_branch"
+    assert not (tmp_path / "package").exists()
+
+
+def test_detached_head_package_build_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        codex_package,
+        "_current_branch",
+        lambda _repository: "",
+    )
+
+    with pytest.raises(CodexPilotPackageBuildError) as exc_info:
+        _build(tmp_path)
+
+    assert exc_info.value.category == "noncanonical_base_branch"
+    assert not (tmp_path / "package").exists()
+
+
+def test_exact_main_sha_package_build_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        codex_package,
+        "_current_branch",
+        lambda _repository: "main",
+    )
+
+    result, output = _build(tmp_path)
+
+    assert result["preclaim_ready"] is True
+    assert output.is_dir()
+
+
 @pytest.mark.parametrize(
     ("updates", "category"),
     [
@@ -238,6 +299,22 @@ def test_output_inside_canonical_venv_is_rejected(tmp_path: Path) -> None:
                 cli.CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
             ),
             inspector=cli._inspect_codex_pilot_package_build,
+        )
+
+    assert exc_info.value.category == "output_inside_venv"
+
+
+def test_output_inside_absent_canonical_venv_is_rejected_before_parent_resolution(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "synthetic-repository"
+    repository.mkdir()
+    assert not (repository / ".venv").exists()
+
+    with pytest.raises(CodexPilotPackageBuildError) as exc_info:
+        codex_package._qualify_output_dir(
+            repository / ".venv" / "package",
+            repository.resolve(strict=True),
         )
 
     assert exc_info.value.category == "output_inside_venv"

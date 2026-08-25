@@ -573,6 +573,15 @@ def _require_current_base(repository: Path, expected_sha: str) -> None:
     completed = _run_git(repository, "rev-parse", "HEAD")
     if completed.returncode != 0 or completed.stdout.strip() != expected_sha:
         raise CodexPilotPackageBuildError("stale_base_commit")
+    if _current_branch(repository) != "main":
+        raise CodexPilotPackageBuildError("noncanonical_base_branch")
+
+
+def _current_branch(repository: Path) -> str:
+    completed = _run_git(repository, "branch", "--show-current")
+    if completed.returncode != 0:
+        raise CodexPilotPackageBuildError("noncanonical_base_branch")
+    return completed.stdout.strip()
 
 
 def _qualify_output_dir(output_dir: Path, repository: Path) -> Path:
@@ -581,14 +590,17 @@ def _qualify_output_dir(output_dir: Path, repository: Path) -> Path:
     _reject_link_or_reparse_ancestry(output_dir)
     try:
         target = output_dir.resolve(strict=False)
+    except OSError as exc:
+        raise CodexPilotPackageBuildError("output_resolution_unsafe") from exc
+    venv = (repository / ".venv").resolve(strict=False)
+    if _path_within(target, venv):
+        raise CodexPilotPackageBuildError("output_inside_venv")
+    try:
         parent = target.parent.resolve(strict=True)
     except OSError as exc:
         raise CodexPilotPackageBuildError("output_resolution_unsafe") from exc
     if not parent.is_dir() or _is_link_or_reparse(parent):
         raise CodexPilotPackageBuildError("output_resolution_unsafe")
-    venv = repository / ".venv"
-    if _path_within(target, venv):
-        raise CodexPilotPackageBuildError("output_inside_venv")
     for worktree in _registered_worktrees(repository):
         if _path_within(target, worktree):
             raise CodexPilotPackageBuildError("output_inside_git_worktree")
