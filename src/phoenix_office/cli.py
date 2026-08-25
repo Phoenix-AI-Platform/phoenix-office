@@ -19,9 +19,13 @@ from phoenix_office.core import (
     codex_pilot_authorization_structural_errors,
 )
 from phoenix_office.dev import (
+    CodexPilotPackageBuildError,
+    CodexPilotPackageInspection,
     SupervisedCodexPilotRunner,
     SystemCodexPilotServices,
+    blocked_codex_pilot_package_build_result,
     bounded_codex_pilot_run_result,
+    build_codex_pilot_package,
     render_reviewed_codex_invocation_prompt,
 )
 from phoenix_office.dev_status import (
@@ -242,6 +246,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output the authorization fingerprint inspection report as JSON",
     )
     codex_pilot_fingerprint_parser.set_defaults(func=codex_pilot_fingerprint)
+    codex_pilot_package_build_parser = dev_subparsers.add_parser(
+        "codex-pilot-package-build",
+        help="Build and inspect a preclaim supervised Codex package",
+    )
+    codex_pilot_package_build_parser.add_argument(
+        "task_spec_json",
+        type=Path,
+        help="Path to the reviewed bounded Codex pilot task spec JSON",
+    )
+    codex_pilot_package_build_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Explicit safe output directory for the generated package",
+    )
+    codex_pilot_package_build_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output the bounded package-build result as JSON",
+    )
+    codex_pilot_package_build_parser.set_defaults(
+        func=codex_pilot_package_build
+    )
     codex_pilot_run_parser = dev_subparsers.add_parser(
         "codex-pilot-run",
         help="Run one authorized supervised Codex docs-only attempt",
@@ -1148,6 +1175,94 @@ def codex_pilot_fingerprint(args: argparse.Namespace) -> int:
     else:
         _print_codex_pilot_fingerprint_report(report)
     return 0 if report["authorization_fingerprint_valid"] else 1
+
+
+def codex_pilot_package_build(args: argparse.Namespace) -> int:
+    """Build a validated package without opening execution authority."""
+
+    try:
+        result = build_codex_pilot_package(
+            task_spec_path=args.task_spec_json,
+            output_dir=args.output_dir,
+            repository_root=Path.cwd(),
+            evidence_control_reviewers=(
+                CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS
+            ),
+            inspector=_inspect_codex_pilot_package_build,
+        )
+    except CodexPilotPackageBuildError as exc:
+        result = blocked_codex_pilot_package_build_result(exc.category)
+    except Exception:
+        result = blocked_codex_pilot_package_build_result(
+            "package_builder_internal_failure"
+        )
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        _print_codex_pilot_package_build_result(result)
+    return 0 if result["package_build_result"] == "pass" else 1
+
+
+def _inspect_codex_pilot_package_build(
+    handoff_path: Path,
+    evidence_path: Path,
+    authorization_path: Path,
+) -> CodexPilotPackageInspection:
+    runtime_not_invoked = {
+        "blockers": ["informational runtime diagnostic not run"],
+        "local_cli_ready": False,
+    }
+    preflight = _run_codex_pilot_preflight(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        runtime_report_override=runtime_not_invoked,
+    )
+    authorization_inspection = _run_codex_pilot_authorization_inspection(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        authorization_path=authorization_path,
+        preflight_report_override=preflight,
+    )
+    _package, authorization_report = authorization_inspection
+    fingerprint_report = _run_codex_pilot_fingerprint(
+        handoff_path=handoff_path,
+        evidence_path=evidence_path,
+        authorization_path=authorization_path,
+        authorization_inspection_override=authorization_inspection,
+    )
+    return CodexPilotPackageInspection(
+        composite_preflight_passed=bool(
+            authorization_report.get("composite_preflight_passed")
+        ),
+        authorization_structural_valid=bool(
+            authorization_report.get("authorization_structural_valid")
+        ),
+        authorization_binding_passed=bool(
+            authorization_report.get("authorization_binding_passed")
+        ),
+        authorization_fingerprint_valid=bool(
+            fingerprint_report.get("authorization_fingerprint_valid")
+        ),
+        authorization_fingerprint=fingerprint_report.get(
+            "authorization_fingerprint"
+        ),
+    )
+
+
+def _print_codex_pilot_package_build_result(
+    result: dict[str, object],
+) -> None:
+    print("Supervised Codex package build")
+    print(f"Result: {result['package_build_result']}")
+    print(f"Category: {result['category']}")
+    print(f"Handoff path: {result['handoff_path']}")
+    print(f"Evidence path: {result['evidence_path']}")
+    print(f"Authorization path: {result['authorization_path']}")
+    print(f"Authorization ID: {result['authorization_id']}")
+    print(f"Authorization fingerprint: {result['authorization_fingerprint']}")
+    print(f"Preclaim ready: {_format_yes_no(bool(result['preclaim_ready']))}")
+    print("Runner invoked: no")
+    print("Claim created: no")
 
 
 def codex_pilot_run(args: argparse.Namespace) -> int:
@@ -2588,13 +2703,18 @@ def _run_codex_pilot_preflight(
     *,
     handoff_path: Path,
     evidence_path: Path,
+    runtime_report_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     handoff_filename = _safe_codex_pilot_evidence_input_filename(handoff_path)
     evidence_filename = _safe_codex_pilot_evidence_input_filename(evidence_path)
     handoff_package, handoff_report = _load_codex_invocation_preflight(
         handoff_path
     )
-    runtime_report = _run_codex_runtime_probe()
+    runtime_report = (
+        _run_codex_runtime_probe()
+        if runtime_report_override is None
+        else runtime_report_override
+    )
     evidence_report = _inspect_codex_pilot_evidence_package(evidence_path)
 
     handoff_id = handoff_report.get("handoff_id")
@@ -2792,10 +2912,15 @@ def _run_codex_pilot_authorization_inspection(
     handoff_path: Path,
     evidence_path: Path,
     authorization_path: Path,
+    preflight_report_override: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    preflight_report = _run_codex_pilot_preflight(
-        handoff_path=handoff_path,
-        evidence_path=evidence_path,
+    preflight_report = (
+        _run_codex_pilot_preflight(
+            handoff_path=handoff_path,
+            evidence_path=evidence_path,
+        )
+        if preflight_report_override is None
+        else preflight_report_override
     )
     authorization_filename = _safe_codex_pilot_evidence_input_filename(
         authorization_path
@@ -2988,6 +3113,9 @@ def _run_codex_pilot_fingerprint(
     handoff_path: Path,
     evidence_path: Path,
     authorization_path: Path,
+    authorization_inspection_override: (
+        tuple[dict[str, Any] | None, dict[str, Any]] | None
+    ) = None,
 ) -> dict[str, Any]:
     authorization_package, authorization_report = (
         _run_codex_pilot_authorization_inspection(
@@ -2995,6 +3123,8 @@ def _run_codex_pilot_fingerprint(
             evidence_path=evidence_path,
             authorization_path=authorization_path,
         )
+        if authorization_inspection_override is None
+        else authorization_inspection_override
     )
     authorization_inspection_passed = bool(
         authorization_report.get("authorization_packet_valid_for_one_attempt")
