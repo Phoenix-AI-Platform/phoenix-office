@@ -1430,7 +1430,9 @@ def _durable_lifecycle_from_runner_result(
     status = result.get("status")
     category = result.get("category")
     if status == "success" and category == "pr_opened_and_stopped":
-        return "completed_pending_review", True
+        return "pr_opened_and_stopped", False
+    if status == "failed" and category == "aborted":
+        return "aborted", True
     if status in {"cancelled", "failed", "timed_out"}:
         return str(status), True
     return None, False

@@ -117,8 +117,8 @@ def _success_outcome() -> ReviewedRunnerOutcome:
             "usage_ratio_basis_points": 44,
         },
         execution_backend_selected="wsl2_linux",
-        durable_lifecycle_state="completed_pending_review",
-        durable_lifecycle_terminal=True,
+        durable_lifecycle_state="pr_opened_and_stopped",
+        durable_lifecycle_terminal=False,
     )
 
 
@@ -207,8 +207,17 @@ def test_success_surfaces_pr_opened_stop_and_bounded_usage(tmp_path: Path) -> No
     assert result["office_pr_head"] is None
     assert result["observed_usage_tokens"] == 1000
     assert result["authorized_budget_tokens"] == 225000
-    assert result["durable_lifecycle_state"] == "completed_pending_review"
-    assert result["durable_lifecycle_terminal"] is True
+    assert result["durable_lifecycle_state"] == "pr_opened_and_stopped"
+    assert result["durable_lifecycle_terminal"] is False
+
+
+def test_cli_derives_exact_pr_opened_nonterminal_lifecycle() -> None:
+    state, terminal = cli._durable_lifecycle_from_runner_result(
+        dict(_success_outcome().result)
+    )
+
+    assert state == "pr_opened_and_stopped"
+    assert terminal is False
 
 
 def test_real_task_073_builder_artifacts_flow_directly_to_runner(
@@ -536,6 +545,74 @@ def test_postclaim_lifecycle_uncertainty_fails_closed(tmp_path: Path) -> None:
     assert result["category"] == "lifecycle_storage_uncertain"
     assert result["authorization_consumed"] is True
     assert result["auto_retry_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("lifecycle_state", "lifecycle_terminal"),
+    [
+        ("completed_pending_review", True),
+        ("pr_opened_and_stopped", True),
+        ("unknown_state", False),
+    ],
+)
+def test_invalid_postclaim_lifecycle_fails_closed(
+    tmp_path: Path,
+    lifecycle_state: str,
+    lifecycle_terminal: bool,
+) -> None:
+    outcome = ReviewedRunnerOutcome(
+        result=_success_outcome().result,
+        execution_backend_selected="wsl2_linux",
+        durable_lifecycle_state=lifecycle_state,
+        durable_lifecycle_terminal=lifecycle_terminal,
+    )
+
+    result = _execute(tmp_path, runner_invoker=lambda *_paths: outcome)
+
+    assert result["status"] == "failed"
+    assert result["category"] == "lifecycle_storage_uncertain"
+    assert result["pr_created_by_runner"] is True
+    assert result["office_pr"] == "#389"
+    assert result["auto_retry_used"] is False
+    assert result["replacement_authorization_created"] is False
+    assert result["background_resume_used"] is False
+
+
+@pytest.mark.parametrize(
+    ("status", "category", "lifecycle_state"),
+    [
+        ("failed", "validation_failed", "failed"),
+        ("failed", "aborted", "aborted"),
+        ("cancelled", "wsl_codex_cancelled", "cancelled"),
+        ("timed_out", "wsl_codex_timed_out", "timed_out"),
+    ],
+)
+def test_verified_terminal_failure_states_remain_terminal(
+    tmp_path: Path,
+    status: str,
+    category: str,
+    lifecycle_state: str,
+) -> None:
+    outcome = ReviewedRunnerOutcome(
+        result={
+            "status": status,
+            "category": category,
+            "attempt_id": "pilot-attempt-terminal-state",
+            "pull_request_identity": None,
+            "changed_paths": [],
+            "usage_category": "within_budget",
+        },
+        execution_backend_selected="wsl2_linux",
+        durable_lifecycle_state=lifecycle_state,
+        durable_lifecycle_terminal=True,
+    )
+
+    result = _execute(tmp_path, runner_invoker=lambda *_paths: outcome)
+
+    assert result["status"] == status
+    assert result["category"] == category
+    assert result["durable_lifecycle_state"] == lifecycle_state
+    assert result["durable_lifecycle_terminal"] is True
 
 
 def test_pr_identity_remains_visible_after_publication_audit_failure(

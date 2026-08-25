@@ -31,15 +31,15 @@ GIT_INSPECTION_TIMEOUT_SECONDS: Final = 10
 _TERMINAL_LIFECYCLE_STATES: Final = {
     "aborted",
     "cancelled",
-    "completed_pending_review",
     "failed",
     "timed_out",
 }
+_NONTERMINAL_LIFECYCLE_STATES: Final = {"pr_opened_and_stopped"}
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewedRunnerOutcome:
-    """Bounded runner outcome plus independently verified lifecycle facts."""
+    """Bounded runner outcome plus runner-confirmed lifecycle facts."""
 
     result: Mapping[str, object]
     execution_backend_selected: str | None = None
@@ -274,8 +274,18 @@ def _combined_result(
         runner_outcome.durable_lifecycle_terminal
         and lifecycle_state in _TERMINAL_LIFECYCLE_STATES
     )
+    lifecycle_nonterminal = bool(
+        not runner_outcome.durable_lifecycle_terminal
+        and lifecycle_state in _NONTERMINAL_LIFECYCLE_STATES
+    )
+    lifecycle_verified = _lifecycle_matches_runner_result(
+        runner,
+        lifecycle_state=lifecycle_state,
+        lifecycle_terminal=lifecycle_terminal,
+        lifecycle_nonterminal=lifecycle_nonterminal,
+    )
     pr_created = pull_request is not None
-    if attempt_id is not None and not lifecycle_terminal:
+    if attempt_id is not None and not lifecycle_verified:
         status = "failed"
         category = "lifecycle_storage_uncertain"
     return {
@@ -324,6 +334,37 @@ def _combined_result(
         "worker_may_merge": False,
         "pr_merged": False,
     }
+
+
+def _lifecycle_matches_runner_result(
+    runner: Mapping[str, object],
+    *,
+    lifecycle_state: str | None,
+    lifecycle_terminal: bool,
+    lifecycle_nonterminal: bool,
+) -> bool:
+    status = runner.get("status")
+    category = runner.get("category")
+    if status == "success" and category == "pr_opened_and_stopped":
+        return (
+            lifecycle_state == "pr_opened_and_stopped"
+            and lifecycle_nonterminal
+            and not lifecycle_terminal
+        )
+    if status == "failed" and category == "aborted":
+        return lifecycle_state == "aborted" and lifecycle_terminal
+    expected_terminal_state = {
+        "cancelled": "cancelled",
+        "failed": "failed",
+        "timed_out": "timed_out",
+    }.get(status)
+    if expected_terminal_state is not None:
+        return (
+            lifecycle_state == expected_terminal_state
+            and lifecycle_terminal
+            and not lifecycle_nonterminal
+        )
+    return False
 
 
 def _validation_result(runner: Mapping[str, object]) -> str | None:
