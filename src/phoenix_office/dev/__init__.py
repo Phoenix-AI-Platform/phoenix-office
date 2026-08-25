@@ -30,6 +30,12 @@ from phoenix_office.dev.codex_runner import (
     render_codex_worker_prompt,
     render_reviewed_codex_invocation_prompt,
 )
+from phoenix_office.dev.codex_successor import (
+    SUCCESSOR_CANDIDATE_SCHEMA_VERSION,
+    SUCCESSOR_PROPOSAL_SCHEMA_VERSION,
+    SystemCodexSuccessorServices,
+    propose_codex_successor,
+)
 
 __all__ = [
     "CONTROL_STATE_SCHEMA_VERSION",
@@ -41,7 +47,10 @@ __all__ = [
     "REVIEWED_EXECUTION_SCHEMA_VERSION",
     "ReviewedRunnerOutcome",
     "SQLiteCodexPilotInitialClaimStore",
+    "SUCCESSOR_CANDIDATE_SCHEMA_VERSION",
+    "SUCCESSOR_PROPOSAL_SCHEMA_VERSION",
     "SupervisedCodexPilotRunner",
+    "SystemCodexSuccessorServices",
     "SystemCodexPilotServices",
     "bounded_codex_pilot_run_result",
     "blocked_codex_pilot_package_build_result",
@@ -52,6 +61,7 @@ __all__ = [
     "qualify_codex_control_directory",
     "qualify_codex_new_claim_store_path",
     "qualify_codex_repository_root",
+    "propose_codex_successor",
     "render_codex_worker_prompt",
     "render_reviewed_codex_invocation_prompt",
 ]
