@@ -40,6 +40,11 @@ from phoenix_office.dev.codex_successor import (
     SystemCodexSuccessorServices,
     propose_codex_successor,
 )
+from phoenix_office.dev.codex_successor_reviewed import (
+    SUCCESSOR_REVIEWED_EXECUTION_SCHEMA_VERSION,
+    blocked_approved_codex_successor_execution_result,
+    execute_approved_codex_successor,
+)
 from phoenix_office.dev.codex_successor_task_spec import (
     ARCHITECTURE_APPROVAL_SCHEMA_VERSION,
     SUCCESSOR_TASK_SPEC_BUILD_SCHEMA_VERSION,
@@ -65,6 +70,7 @@ __all__ = [
     "SUCCESSOR_CANDIDATE_SCHEMA_VERSION",
     "SUCCESSOR_EXECUTION_SCHEMA_VERSION",
     "SUCCESSOR_PROPOSAL_SCHEMA_VERSION",
+    "SUCCESSOR_REVIEWED_EXECUTION_SCHEMA_VERSION",
     "SUCCESSOR_TASK_SPEC_BUILD_SCHEMA_VERSION",
     "SupervisedCodexPilotRunner",
     "SystemCodexSuccessorServices",
@@ -72,10 +78,12 @@ __all__ = [
     "bounded_codex_pilot_run_result",
     "blocked_codex_pilot_package_build_result",
     "blocked_codex_successor_task_spec_result",
+    "blocked_approved_codex_successor_execution_result",
     "blocked_reviewed_execution_result",
     "build_codex_pilot_package",
     "build_approved_codex_successor_task_spec",
     "execute_reviewed_codex_task",
+    "execute_approved_codex_successor",
     "load_codex_pilot_task_spec",
     "parse_codex_pilot_task_spec_payload",
     "qualify_codex_control_directory",
