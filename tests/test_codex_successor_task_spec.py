@@ -171,6 +171,7 @@ class FakeServices:
             390: {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
         }
     )
+    paths: tuple[str, ...] = (ALLOWED_PATH,)
     branch: str = "main"
     clean: bool = True
     repository_identity: str | None = REPOSITORY_IDENTITY
@@ -192,7 +193,7 @@ class FakeServices:
 
     def tracked_paths(self) -> tuple[str, ...]:
         self.calls.append("tracked_paths")
-        return (ALLOWED_PATH,)
+        return self.paths
 
     def list_open_issues(self) -> object:
         self.calls.append("list_open_issues")
@@ -259,7 +260,10 @@ def _compile(
     output_name: str = "task-spec.json",
 ) -> tuple[dict[str, object], Path, dict[str, object]]:
     system = services or FakeServices(_issue(), _head())
-    proposal = _proposal(tmp_path, FakeServices(system.issue, system.head))
+    proposal = _proposal(
+        tmp_path,
+        FakeServices(system.issue, system.head, paths=system.paths),
+    )
     if proposal_updates:
         proposal.update(proposal_updates)
     proposal_path = _write_json(tmp_path / "proposal.json", proposal)
@@ -291,6 +295,13 @@ def test_valid_external_approval_compiles_exact_task_spec(tmp_path: Path) -> Non
         required_control_ids=set(CODEX_PILOT_TASK_SPEC_CONTROL_IDS),
     )
     assert spec.issue_number == ISSUE_NUMBER
+    assert spec.execution_class == "docs-only-supervised"
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == (
+        "codex-pilot-task-spec.v2"
+    )
+    assert json.loads(output.read_text(encoding="utf-8"))["execution_class"] == (
+        "docs-only-supervised"
+    )
     assert spec.task_id == TASK_ID
     assert spec.base_commit_sha == proposal["verified_base_sha"]
     assert spec.allowed_paths == (ALLOWED_PATH,)
@@ -299,6 +310,53 @@ def test_valid_external_approval_compiles_exact_task_spec(tmp_path: Path) -> Non
     assert set(cli.CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS) == (
         CODEX_PILOT_TASK_SPEC_CONTROL_IDS
     )
+
+
+def test_bounded_python_successor_compiles_explicit_v2_class(
+    tmp_path: Path,
+) -> None:
+    paths = (
+        "src/phoenix_office/dev/codex_successor.py",
+        "tests/test_codex_successor.py",
+    )
+    candidate = _candidate(
+        execution_class="bounded-python-supervised",
+        allowed_paths=list(paths),
+        expected_pr_title="dev: refine successor policy",
+        risk_class="low",
+    )
+    execution = _execution(
+        objective="Develop Python code and focused tests safely."
+    )
+    services = FakeServices(
+        _issue(candidate=candidate, execution=execution),
+        _head(),
+        paths=paths,
+    )
+
+    result, output, _proposal_value = _compile(tmp_path, services=services)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    spec = load_codex_pilot_task_spec(
+        output,
+        required_control_ids=set(CODEX_PILOT_TASK_SPEC_CONTROL_IDS),
+    )
+
+    assert result["status"] == "success"
+    assert payload["schema_version"] == "codex-pilot-task-spec.v2"
+    assert payload["execution_class"] == "bounded-python-supervised"
+    assert spec.execution_class == "bounded-python-supervised"
+
+
+def test_mutated_selected_execution_class_is_rejected_before_compilation(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(CodexSuccessorTaskSpecError):
+        _compile(
+            tmp_path,
+            proposal_updates={
+                "selected_execution_class": "bounded-python-supervised"
+            },
+        )
 
 
 def test_maximum_issue_number_compiles_with_external_approval(

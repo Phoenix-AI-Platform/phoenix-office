@@ -301,6 +301,7 @@ def _task_spec_payload(
         "constraints": list(execution.constraints),
         "control_references": dict(sorted(execution.control_references.items())),
         "expected_pr_title": candidate.expected_pr_title,
+        "execution_class": candidate.execution_class,
         "handoff_id": f"pilot-handoff-{proposal.fingerprint}",
         "issue_number": candidate.issue_number,
         "objective": execution.objective,

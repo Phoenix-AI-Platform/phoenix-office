@@ -23,7 +23,11 @@ from typing import Final, Protocol
 from urllib.parse import urlsplit
 
 from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_KINDS,
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
     compose_codex_pilot_initial_claim_bundle,
+    is_safe_codex_pilot_allowed_paths,
     prepare_codex_pilot_initial_claim_commit,
     validate_codex_pilot_authorization_packet,
 )
@@ -250,6 +254,7 @@ class WorktreeHandle:
     git_worktree_state: str
     local_git_config: str
     allowed_paths: tuple[str, ...] = ()
+    pilot_kind: str = CODEX_PILOT_DOCS_ONLY_KIND
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,7 +559,7 @@ def bounded_codex_pilot_run_result(
 
 
 class SupervisedCodexPilotRunner:
-    """One-run fail-closed orchestration for a reviewed docs-only authorization."""
+    """One-run fail-closed orchestration for a reviewed authorization."""
 
     def __init__(
         self,
@@ -1069,6 +1074,9 @@ def _validated_run_context(
     authorization_validation = validate_codex_pilot_authorization_packet(authorization)
     if not authorization_validation["authorization_structural_valid"]:
         return None
+    pilot_kind = authorization.get("pilot_kind")
+    if pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS:
+        return None
     if handoff.get("repository") != REPOSITORY_IDENTITY:
         return None
     if handoff.get("base_branch") != BASE_BRANCH:
@@ -1091,6 +1099,11 @@ def _validated_run_context(
         return None
     if task.get("objective") != authorization.get("objective"):
         return None
+    task_execution_class = task.get("execution_class")
+    if task_execution_class is None and pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        task_execution_class = CODEX_PILOT_DOCS_ONLY_KIND
+    if task_execution_class != pilot_kind:
+        return None
     allowed_paths = allowed_resources.get("paths")
     if allowed_paths != authorization.get("allowed_paths"):
         return None
@@ -1104,7 +1117,7 @@ def _validated_run_context(
         return None
     if evidence.get("repository") != REPOSITORY_IDENTITY:
         return None
-    if evidence.get("pilot_kind") != "docs-only-supervised":
+    if evidence.get("pilot_kind") != pilot_kind:
         return None
     if evidence.get("handoff_id") != authorization.get("handoff_id"):
         return None
@@ -1318,6 +1331,9 @@ class SystemCodexPilotServices:
             return GateResult(False, "clean_repo_gate_failed")
         if _repository_identity_from_remote(remote) != REPOSITORY_IDENTITY:
             return GateResult(False, "repository_identity_gate_failed")
+        path_gate = self._authorization_paths_gate(authorization)
+        if not path_gate.passed:
+            return path_gate
         fetched = self._run(
             [
                 "git",
@@ -1360,6 +1376,45 @@ class SystemCodexPilotServices:
         if not validation_runtime.passed:
             return validation_runtime
         return collision
+
+    def _authorization_paths_gate(
+        self,
+        authorization: dict[str, object],
+    ) -> GateResult:
+        pilot_kind = authorization.get("pilot_kind")
+        paths = authorization.get("allowed_paths")
+        if not is_safe_codex_pilot_allowed_paths(paths, pilot_kind):
+            return GateResult(False, "authorized_path_policy_failed")
+        if pilot_kind != CODEX_PILOT_BOUNDED_PYTHON_KIND:
+            return GateResult(True, "authorized_paths_ready")
+        assert isinstance(paths, list)
+        repository = self._repository_path.resolve(strict=True)
+        for path_text in paths:
+            candidate = repository.joinpath(*PurePosixPath(path_text).parts)
+            tracked = self._run(
+                ["git", "ls-files", "--error-unmatch", "--", path_text],
+                cwd=repository,
+                timeout=30,
+            )
+            try:
+                details = candidate.lstat()
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(repository)
+            except (OSError, RuntimeError, ValueError):
+                return GateResult(False, "authorized_path_policy_failed")
+            reparse_attribute = getattr(
+                stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+            )
+            file_attributes = getattr(details, "st_file_attributes", 0)
+            if (
+                tracked is None
+                or tracked.returncode != 0
+                or not stat.S_ISREG(details.st_mode)
+                or candidate.is_symlink()
+                or bool(file_attributes & reparse_attribute)
+            ):
+                return GateResult(False, "authorized_path_policy_failed")
+        return GateResult(True, "authorized_paths_ready")
 
     def _validation_runtime_gate(self) -> GateResult:
         if self._validation_runtime_preflight_result is not None:
@@ -1624,6 +1679,7 @@ class SystemCodexPilotServices:
                 git_worktree_state,
                 local_git_config,
                 tuple(str(path) for path in authorization["allowed_paths"]),
+                str(authorization["pilot_kind"]),
             ),
         )
 
@@ -1718,11 +1774,13 @@ class SystemCodexPilotServices:
             return DiffGateResult(False, "git_status_invalid")
 
         allowed = set(allowed_paths)
+        if not is_safe_codex_pilot_allowed_paths(
+            list(allowed_paths), worktree.pilot_kind
+        ):
+            return DiffGateResult(False, "unsafe_changed_path")
         for path_text in changed_paths:
             if path_text not in allowed:
                 return DiffGateResult(False, "unauthorized_path_changed")
-            if not _safe_markdown_path(path_text):
-                return DiffGateResult(False, "unsafe_changed_path")
             path = worktree.path.joinpath(*PurePosixPath(path_text).parts)
             try:
                 path_stat = path.lstat()
@@ -2058,6 +2116,7 @@ class SystemCodexPilotServices:
             required_headings=required_headings,
             changed_paths=changed_paths,
             validation_commands=validation_commands,
+            pilot_kind=str(authorization["pilot_kind"]),
         )
         created = self._run(
             [
@@ -3492,10 +3551,20 @@ def _pull_request_body(
     required_headings: tuple[str, ...],
     changed_paths: tuple[str, ...],
     validation_commands: tuple[str, ...],
+    pilot_kind: str = CODEX_PILOT_DOCS_ONLY_KIND,
 ) -> str:
+    python_change = pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND
     content = {
-        "Summary": "Phoenix supervised a bounded docs-only Codex change.",
-        "Scope": "Only reviewed Markdown paths were eligible for publication.",
+        "Summary": (
+            "Phoenix supervised a bounded Python Codex change."
+            if python_change
+            else "Phoenix supervised a bounded docs-only Codex change."
+        ),
+        "Scope": (
+            "Only reviewed bounded Python paths were eligible for publication."
+            if python_change
+            else "Only reviewed Markdown paths were eligible for publication."
+        ),
         "Changed files": "\n".join(f"- `{path}`" for path in changed_paths),
         "Out-of-scope confirmation": (
             "No product code, execution authority, approval, or merge was added."

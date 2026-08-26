@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from phoenix_office.core import (
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
     CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
     ApprovalPolicy,
     CodexHandoffPackage,
@@ -36,11 +38,15 @@ from phoenix_office.core import (
     TaskStatus,
     VerificationPlan,
     codex_pilot_authorization_structural_errors,
+    is_safe_codex_pilot_allowed_paths,
     is_safe_codex_pilot_authorization_objective,
+    is_safe_codex_pilot_expected_pr_title,
 )
 
 PACKAGE_BUILD_SCHEMA_VERSION = "codex-pilot-package-build-result.v1"
-TASK_SPEC_SCHEMA_VERSION = "codex-pilot-task-spec.v1"
+TASK_SPEC_SCHEMA_VERSION_V1 = "codex-pilot-task-spec.v1"
+TASK_SPEC_SCHEMA_VERSION_V2 = "codex-pilot-task-spec.v2"
+TASK_SPEC_SCHEMA_VERSION = TASK_SPEC_SCHEMA_VERSION_V2
 HANDOFF_FILENAME = "handoff.json"
 EVIDENCE_FILENAME = "evidence.json"
 AUTHORIZATION_FILENAME = "authorization.json"
@@ -50,7 +56,7 @@ PACKAGE_FILENAMES = (
     AUTHORIZATION_FILENAME,
 )
 REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
-PILOT_KIND = "docs-only-supervised"
+PILOT_KIND = CODEX_PILOT_DOCS_ONLY_KIND
 REQUIRED_PR_BODY_HEADINGS = (
     "Summary",
     "Scope",
@@ -59,7 +65,7 @@ REQUIRED_PR_BODY_HEADINGS = (
     "Validation performed",
     "Risks",
 )
-TASK_SPEC_FIELDS = {
+TASK_SPEC_V1_FIELDS = {
     "acceptance_criteria",
     "allowed_paths",
     "base_commit_sha",
@@ -78,6 +84,7 @@ TASK_SPEC_FIELDS = {
     "timeout_seconds",
     "title",
 }
+TASK_SPEC_V2_FIELDS = TASK_SPEC_V1_FIELDS | {"execution_class"}
 REFERENCE_FIELD_BY_CONTROL = {
     "authentication_runner_access": "authentication_runner_ref",
     "per_run_budget_ceiling": "budget_enforcement_ref",
@@ -120,9 +127,11 @@ class CodexPilotPackageBuildError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class CodexPilotTaskSpec:
-    """Reviewed, bounded source needed to compose the existing v1 artifacts."""
+    """Reviewed, bounded source needed to compose supervised artifacts."""
 
     task_id: str
+    schema_version: str
+    execution_class: str
     handoff_id: str
     issue_number: int
     title: str
@@ -174,6 +183,7 @@ def build_codex_pilot_package(
         required_control_ids=set(evidence_control_reviewers),
     )
     _require_current_base(repository, spec.base_commit_sha)
+    _require_tracked_task_paths(repository, spec)
     target = _qualify_output_dir(output_dir, repository)
     factory = authorization_id_factory or _fresh_authorization_id
     authorization_id = factory(spec.issue_number)
@@ -241,7 +251,17 @@ def parse_codex_pilot_task_spec_payload(
 ) -> CodexPilotTaskSpec:
     """Validate one in-memory task-spec payload through the TASK-073 parser."""
 
-    if not isinstance(value, dict) or set(value) != TASK_SPEC_FIELDS:
+    if not isinstance(value, dict):
+        raise CodexPilotPackageBuildError("task_spec_malformed")
+    schema_version = value.get("schema_version")
+    expected_fields = (
+        TASK_SPEC_V1_FIELDS
+        if schema_version == TASK_SPEC_SCHEMA_VERSION_V1
+        else TASK_SPEC_V2_FIELDS
+        if schema_version == TASK_SPEC_SCHEMA_VERSION_V2
+        else None
+    )
+    if expected_fields is None or set(value) != expected_fields:
         raise CodexPilotPackageBuildError("task_spec_malformed")
     return _parse_task_spec(value, required_control_ids=required_control_ids)
 
@@ -359,8 +379,12 @@ def _parse_task_spec(
     *,
     required_control_ids: set[str],
 ) -> CodexPilotTaskSpec:
-    if value.get("schema_version") != TASK_SPEC_SCHEMA_VERSION:
-        raise CodexPilotPackageBuildError("task_spec_malformed")
+    schema_version = value.get("schema_version")
+    execution_class = (
+        CODEX_PILOT_DOCS_ONLY_KIND
+        if schema_version == TASK_SPEC_SCHEMA_VERSION_V1
+        else value.get("execution_class")
+    )
     for field_name, maximum in (
         ("task_id", 80),
         ("handoff_id", 80),
@@ -371,7 +395,7 @@ def _parse_task_spec(
         if not _bounded_text(value.get(field_name), maximum):
             raise CodexPilotPackageBuildError("task_spec_malformed")
     if not is_safe_codex_pilot_authorization_objective(
-        value.get("objective")
+        value.get("objective"), execution_class
     ):
         raise CodexPilotPackageBuildError("task_spec_malformed")
     issue_number = value.get("issue_number")
@@ -386,13 +410,12 @@ def _parse_task_spec(
     if not _lower_hex(base_commit_sha, 40):
         raise CodexPilotPackageBuildError("task_spec_malformed")
     allowed_paths = value.get("allowed_paths")
-    if (
-        not isinstance(allowed_paths, list)
-        or not 1 <= len(allowed_paths) <= 3
-        or not all(isinstance(item, str) for item in allowed_paths)
-        or allowed_paths != sorted(set(allowed_paths))
-    ):
+    if not is_safe_codex_pilot_allowed_paths(allowed_paths, execution_class):
         raise CodexPilotPackageBuildError("unauthorized_path")
+    if not is_safe_codex_pilot_expected_pr_title(
+        value.get("expected_pr_title"), execution_class
+    ):
+        raise CodexPilotPackageBuildError("task_spec_malformed")
     budget_ceiling = value.get("budget_ceiling")
     if type(budget_ceiling) is not int or not 1 <= budget_ceiling <= 1_000_000:
         raise CodexPilotPackageBuildError("task_spec_malformed")
@@ -411,6 +434,8 @@ def _parse_task_spec(
     acceptance_criteria = _narrative_list(value.get("acceptance_criteria"))
     return CodexPilotTaskSpec(
         task_id=value["task_id"],
+        schema_version=str(schema_version),
+        execution_class=str(execution_class),
         handoff_id=value["handoff_id"],
         issue_number=issue_number,
         title=value["title"],
@@ -484,7 +509,13 @@ def _compose_artifacts(
         required_repo_paths=allowed_paths,
         required_pr_body_headings=list(REQUIRED_PR_BODY_HEADINGS),
     ).to_dict()
-    handoff["task"]["risk_class"] = "docs-only"
+    handoff["task"]["risk_class"] = (
+        "docs-only"
+        if spec.execution_class == CODEX_PILOT_DOCS_ONLY_KIND
+        else "low"
+    )
+    if spec.schema_version == TASK_SPEC_SCHEMA_VERSION_V2:
+        handoff["task"]["execution_class"] = spec.execution_class
 
     controls = [
         CodexPilotEvidenceControl(
@@ -500,7 +531,7 @@ def _compose_artifacts(
     evidence = CodexPilotEvidencePackage(
         schema_version="codex-pilot-evidence.v1",
         repository=spec.repository,
-        pilot_kind=PILOT_KIND,
+        pilot_kind=spec.execution_class,
         handoff_id=spec.handoff_id,
         controls=controls,
         pilot_ready=False,
@@ -515,7 +546,7 @@ def _compose_artifacts(
         schema_version="codex-pilot-authorization.v1",
         authorization_id=authorization_id,
         repository=spec.repository,
-        pilot_kind=PILOT_KIND,
+        pilot_kind=spec.execution_class,
         decision_state="human_authorized_for_one_run",
         authorizer_role="human_operator",
         base_commit_sha=spec.base_commit_sha,
@@ -573,10 +604,15 @@ def _render_reviewed_prompt(spec: CodexPilotTaskSpec) -> str:
         f"{index}. {item}" for index, item in enumerate(spec.constraints, 1)
     )
     paths = ", ".join(spec.allowed_paths)
+    path_instruction = (
+        f"Modify only these reviewed Markdown paths: {paths}. "
+        if spec.execution_class == CODEX_PILOT_DOCS_ONLY_KIND
+        else f"Modify only these reviewed Python paths: {paths}. "
+    )
     return (
         f"Reviewed task {spec.task_id}: {spec.title}. "
         f"Objective: {spec.objective} "
-        f"Modify only these reviewed Markdown paths: {paths}. "
+        f"{path_instruction}"
         f"Acceptance criteria: {criteria} "
         f"Constraints: {constraints} "
         "Do not access the network or GitHub. Do not commit, push, approve, "
@@ -679,6 +715,29 @@ def _require_current_base(repository: Path, expected_sha: str) -> None:
         raise CodexPilotPackageBuildError("stale_base_commit")
     if _current_branch(repository) != "main":
         raise CodexPilotPackageBuildError("noncanonical_base_branch")
+
+
+def _require_tracked_task_paths(
+    repository: Path,
+    spec: CodexPilotTaskSpec,
+) -> None:
+    if spec.execution_class != CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return
+    for path_text in spec.allowed_paths:
+        tracked = _run_git(repository, "ls-files", "--error-unmatch", "--", path_text)
+        candidate = repository.joinpath(*Path(path_text).parts)
+        try:
+            details = candidate.lstat()
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(repository)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CodexPilotPackageBuildError("unauthorized_path") from exc
+        if (
+            tracked.returncode != 0
+            or not stat.S_ISREG(details.st_mode)
+            or _is_link_or_reparse(candidate)
+        ):
+            raise CodexPilotPackageBuildError("unauthorized_path")
 
 
 def _current_branch(repository: Path) -> str:

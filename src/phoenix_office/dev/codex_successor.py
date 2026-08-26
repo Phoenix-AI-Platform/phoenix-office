@@ -15,8 +15,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final, Protocol
 
-from phoenix_office.core import is_safe_codex_pilot_authorization_objective
-from phoenix_office.core.contracts import _is_safe_branch, _is_safe_pr_title
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_KINDS,
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
+    is_safe_codex_pilot_allowed_paths,
+    is_safe_codex_pilot_authorization_objective,
+    is_safe_codex_pilot_expected_pr_title,
+)
+from phoenix_office.core.contracts import _is_safe_branch
 from phoenix_office.dev.codex_package import (
     CODEX_PILOT_TASK_SPEC_CONTROL_IDS,
     CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER,
@@ -36,7 +43,8 @@ REPOSITORY_IDENTITY: Final = "Phoenix-AI-Platform/phoenix-office"
 BASE_BRANCH: Final = "main"
 CANDIDATE_FENCE: Final = "phoenix-codex-successor"
 EXECUTION_FENCE: Final = "phoenix-codex-execution"
-CURRENT_EXECUTION_CLASS: Final = "docs-only-supervised"
+CURRENT_EXECUTION_CLASS: Final = CODEX_PILOT_DOCS_ONLY_KIND
+SUPPORTED_EXECUTION_CLASSES: Final = CODEX_PILOT_AUTHORIZATION_KINDS
 
 MAX_EVIDENCE_BYTES: Final = 2 * 1024 * 1024
 MAX_GITHUB_OUTPUT_BYTES: Final = 8 * 1024 * 1024
@@ -779,8 +787,12 @@ def _parse_explicit_candidates(
         if metadata is None:
             continue
         execution_metadata = _execution_definition_from_body(str(issue["body"]))
+        execution_class = metadata.get("execution_class")
         execution_definition = (
-            _execution_definition_from_metadata(execution_metadata)
+            _execution_definition_from_metadata(
+                execution_metadata,
+                execution_class=execution_class,
+            )
             if execution_metadata is not None
             else None
         )
@@ -843,6 +855,8 @@ def _execution_definition_from_body(body: str) -> Mapping[str, object] | None:
 
 def _execution_definition_from_metadata(
     value: Mapping[str, object],
+    *,
+    execution_class: object = CURRENT_EXECUTION_CLASS,
 ) -> SuccessorExecutionDefinition:
     task_id = value.get("task_id")
     objective = value.get("objective")
@@ -857,7 +871,9 @@ def _execution_definition_from_metadata(
         or not isinstance(task_id, str)
         or _TASK_ID_PATTERN.fullmatch(task_id) is None
         or not _safe_public_text(objective, max_length=200)
-        or not is_safe_codex_pilot_authorization_objective(objective)
+        or not is_safe_codex_pilot_authorization_objective(
+            objective, execution_class
+        )
         or not _is_safe_branch(branch_name)
         or type(budget_ceiling) is not int
         or not 1 <= budget_ceiling <= 1_000_000
@@ -895,6 +911,7 @@ def _candidate_from_metadata(
     depends_on = value.get("depends_on")
     allowed_paths = value.get("allowed_paths")
     expected_pr_title = value.get("expected_pr_title")
+    execution_class = value.get("execution_class")
     if (
         value.get("schema_version") != SUCCESSOR_CANDIDATE_SCHEMA_VERSION
         or not isinstance(task_id, str)
@@ -906,13 +923,22 @@ def _candidate_from_metadata(
         or risk_class not in _RISK_CLASSES
         or value.get("repository") != REPOSITORY_IDENTITY
         or value.get("base_branch") != BASE_BRANCH
-        or value.get("execution_class") != CURRENT_EXECUTION_CLASS
-        or not _is_safe_pr_title(expected_pr_title)
+        or execution_class not in SUPPORTED_EXECUTION_CLASSES
+        or not is_safe_codex_pilot_expected_pr_title(
+            expected_pr_title, execution_class
+        )
+        or (
+            execution_class == CODEX_PILOT_BOUNDED_PYTHON_KIND
+            and risk_class != "low"
+        )
         or not _safe_public_text(issue.get("title"), max_length=120)
     ):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     dependency_numbers = _validated_dependency_numbers(depends_on)
-    safe_paths = _validated_allowed_paths(allowed_paths)
+    safe_paths = _validated_allowed_paths(
+        allowed_paths,
+        execution_class=execution_class,
+    )
     issue_number = issue["number"]
     if (
         type(issue_number) is not int
@@ -938,7 +964,7 @@ def _candidate_from_metadata(
         base_branch=BASE_BRANCH,
         allowed_paths=safe_paths,
         expected_pr_title=str(expected_pr_title),
-        execution_class=CURRENT_EXECUTION_CLASS,
+        execution_class=str(execution_class),
         execution_definition=execution_definition,
     )
 
@@ -953,14 +979,14 @@ def _validated_dependency_numbers(value: object) -> tuple[int, ...]:
     return tuple(value)
 
 
-def _validated_allowed_paths(value: object) -> tuple[str, ...]:
+def _validated_allowed_paths(
+    value: object,
+    *,
+    execution_class: object = CURRENT_EXECUTION_CLASS,
+) -> tuple[str, ...]:
     if (
-        not isinstance(value, list)
-        or not 1 <= len(value) <= MAX_ALLOWED_PATHS
-        or any(not isinstance(item, str) for item in value)
-        or value != sorted(set(value))
-        or len({item.casefold() for item in value}) != len(value)
-        or any(not _safe_markdown_path(item) for item in value)
+        not is_safe_codex_pilot_allowed_paths(value, execution_class)
+        or not isinstance(value, list)
     ):
         raise CodexSuccessorProposalError("unsafe_allowed_path")
     return tuple(value)
@@ -1211,10 +1237,16 @@ def parse_codex_successor_proposal_payload(
     fingerprint = value.get("proposal_fingerprint")
     execution_payload = value.get("selected_execution_definition")
     try:
-        allowed_paths = _validated_allowed_paths(value.get("selected_allowed_paths"))
+        allowed_paths = _validated_allowed_paths(
+            value.get("selected_allowed_paths"),
+            execution_class=execution_class,
+        )
         if not isinstance(execution_payload, dict):
             raise CodexSuccessorProposalError("malformed_proposal")
-        execution_definition = _execution_definition_from_metadata(execution_payload)
+        execution_definition = _execution_definition_from_metadata(
+            execution_payload,
+            execution_class=execution_class,
+        )
     except CodexSuccessorProposalError as exc:
         raise CodexSuccessorProposalError("malformed_proposal") from exc
     if (
@@ -1233,8 +1265,14 @@ def parse_codex_successor_proposal_payload(
         or type(priority) is not int
         or not 0 <= priority <= MAX_PRIORITY
         or risk_class not in _RISK_CLASSES
-        or execution_class != CURRENT_EXECUTION_CLASS
-        or not _is_safe_pr_title(expected_pr_title)
+        or execution_class not in SUPPORTED_EXECUTION_CLASSES
+        or not is_safe_codex_pilot_expected_pr_title(
+            expected_pr_title, execution_class
+        )
+        or (
+            execution_class == CODEX_PILOT_BOUNDED_PYTHON_KIND
+            and risk_class != "low"
+        )
         or not isinstance(fingerprint, str)
         or _FINGERPRINT_PATTERN.fullmatch(fingerprint) is None
         or execution_definition.task_id != task_id

@@ -2730,6 +2730,78 @@ def test_diff_gate_allows_only_authorized_utf8_markdown(tmp_path: Path):
     assert result == DiffGateResult(True, "diff_allowed", (ALLOWED_PATH,))
 
 
+def test_diff_gate_enforces_bounded_python_class_policy(tmp_path: Path) -> None:
+    repository = tmp_path / "python-repository"
+    worktree_path = tmp_path / "python-worktree"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Phoenix Test")
+    _git(repository, "config", "user.email", "test@phoenix.invalid")
+    allowed = (
+        "src/phoenix_office/dev/codex_successor.py",
+        "tests/test_codex_successor.py",
+    )
+    for path_text in allowed:
+        path = repository / path_text
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", "--", *allowed)
+    _git(repository, "commit", "-m", "initial")
+    head = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "worktree", "add", "-b", BRANCH, str(worktree_path), head)
+    service = SystemCodexPilotServices(repository)
+    control_state = service._git_control_state(worktree_path)
+    assert control_state is not None
+    git_refs, git_worktree_state, local_git_config = control_state
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        head,
+        (worktree_path / ".git").read_bytes(),
+        git_refs,
+        git_worktree_state,
+        local_git_config,
+        allowed,
+        "bounded-python-supervised",
+    )
+    (worktree.path / allowed[0]).write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = service.inspect_diff(worktree, allowed)
+    ineligible = service.inspect_diff(
+        worktree,
+        (ALLOWED_PATH, "tests/test_codex_successor.py"),
+    )
+
+    assert result == DiffGateResult(True, "diff_allowed", (allowed[0],))
+    assert ineligible == DiffGateResult(False, "unsafe_changed_path")
+
+
+def test_runner_rejects_pilot_kind_mismatch_before_claim(tmp_path: Path) -> None:
+    authorization = _authorization()
+    authorization.update(
+        {
+            "pilot_kind": "bounded-python-supervised",
+            "objective": "Develop Python code and focused tests safely.",
+            "allowed_paths": [
+                "src/phoenix_office/dev/codex_successor.py",
+                "tests/test_codex_successor.py",
+            ],
+            "expected_pr_title": "dev: refine successor policy",
+        }
+    )
+    system = FakeSystem()
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        authorization=authorization,
+    )
+
+    assert result["category"] == "preclaim_static_preflight_failed"
+    assert system.calls == []
+    assert not database_path.exists()
+
+
 def test_phoenix_commit_has_exact_parent_branch_and_authorized_scope(tmp_path: Path):
     worktree = _real_worktree(tmp_path)
     (worktree.path / ALLOWED_PATH).write_text(
