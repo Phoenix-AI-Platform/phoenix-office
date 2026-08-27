@@ -14,6 +14,7 @@ import tarfile
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -47,6 +48,7 @@ MAX_SNAPSHOT_BYTES: Final = 128_000_000
 MAX_SNAPSHOT_FILES: Final = 50_000
 MAX_PATCH_BYTES: Final = 2_000_000
 MAX_MARKDOWN_BYTES: Final = 1_000_000
+MAX_SENSITIVE_FINDINGS: Final = 10_000
 MAX_PROXY_VALUE_BYTES: Final = 4096
 LINUX_PATH: Final = "/usr/local/bin:/usr/bin:/bin"
 WSL_PROXY_NAMES: Final = (
@@ -86,6 +88,31 @@ _SENSITIVE_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:password|secret|token)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(?:[A-Z]:\\Users\\|/home/|/Users/)[^\s`]+"),
 )
+
+
+def _decode_bounded_utf8_text(payload: bytes) -> str | None:
+    if len(payload) > MAX_MARKDOWN_BYTES or b"\0" in payload:
+        return None
+    try:
+        return payload.decode("utf-8")
+    except UnicodeError:
+        return None
+
+
+def _bounded_sensitive_findings(
+    text: str,
+) -> Counter[tuple[int, str]] | None:
+    findings: Counter[tuple[int, str]] = Counter()
+    finding_count = 0
+    for pattern_index, pattern in enumerate(_SENSITIVE_PATTERNS):
+        for match in pattern.finditer(text):
+            finding_count += 1
+            if finding_count > MAX_SENSITIVE_FINDINGS:
+                return None
+            findings[(pattern_index, match.group(0))] += 1
+    return findings
+
+
 _LINUX_INVOCATION_SUPERVISOR: Final = """\
 import json
 import os
@@ -2068,9 +2095,30 @@ class WslCodexWorker:
     def _validate_shadow_python(self, shadow: str, path_text: str) -> bool:
         if not path_text.casefold().endswith(".py"):
             return False
-        return self._validate_shadow_text_file(shadow, path_text)
+        resulting_text = self._read_validated_shadow_text_file(shadow, path_text)
+        baseline_text = self._read_shadow_head_text_file(shadow, path_text)
+        if resulting_text is None or baseline_text is None:
+            return False
+        resulting_findings = _bounded_sensitive_findings(resulting_text)
+        baseline_findings = _bounded_sensitive_findings(baseline_text)
+        if resulting_findings is None or baseline_findings is None:
+            return False
+        return all(
+            count <= baseline_findings.get(finding, 0)
+            for finding, count in resulting_findings.items()
+        )
 
     def _validate_shadow_text_file(self, shadow: str, path_text: str) -> bool:
+        text = self._read_validated_shadow_text_file(shadow, path_text)
+        return text is not None and not any(
+            pattern.search(text) for pattern in _SENSITIVE_PATTERNS
+        )
+
+    def _read_validated_shadow_text_file(
+        self,
+        shadow: str,
+        path_text: str,
+    ) -> str | None:
         platform = self._require_platform()
         absolute = f"{shadow}/{path_text}"
         symlink = self._run_wsl_text(
@@ -2102,24 +2150,44 @@ class WslCodexWorker:
             result is None
             for result in (symlink, file_test, realpath, metadata, payload)
         ):
-            return False
+            return None
         if symlink.returncode == 0 or file_test.returncode != 0:
-            return False
+            return None
         if realpath.returncode != 0 or not _path_within_posix(
             realpath.stdout.strip(), shadow
         ):
-            return False
+            return None
         if metadata.returncode != 0 or metadata.stdout.strip() != "regular file:1":
-            return False
-        if payload.returncode != 0 or len(payload.stdout) > MAX_MARKDOWN_BYTES:
-            return False
-        if b"\0" in payload.stdout:
-            return False
+            return None
+        if payload.returncode != 0:
+            return None
+        return _decode_bounded_utf8_text(payload.stdout)
+
+    def _read_shadow_head_text_file(
+        self,
+        shadow: str,
+        path_text: str,
+    ) -> str | None:
         try:
-            text = payload.stdout.decode("utf-8")
-        except UnicodeError:
-            return False
-        return not any(pattern.search(text) for pattern in _SENSITIVE_PATTERNS)
+            if validate_transfer_paths((path_text,)) != (path_text,):
+                return None
+        except ValueError:
+            return None
+        baseline = self._run_wsl_bytes(
+            self._require_platform(),
+            (
+                "/usr/bin/git",
+                "-C",
+                shadow,
+                "cat-file",
+                "blob",
+                f"HEAD:{path_text}",
+            ),
+            timeout=30,
+        )
+        if baseline is None or baseline.returncode != 0:
+            return None
+        return _decode_bounded_utf8_text(baseline.stdout)
 
     def _run_wsl_text(
         self,

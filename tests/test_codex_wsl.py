@@ -205,11 +205,14 @@ def _simulated_shadow_patch(
     allowed_paths: tuple[str, ...],
     changed_paths: tuple[str, ...],
     payloads: dict[str, bytes],
+    baseline_payloads: dict[str, bytes] | None = None,
+    baseline_read_fails: bool = False,
 ) -> ShadowPatch | None:
     shadow = "/home/worker/shadow"
     baseline = ("head", "refs", "config")
     worker._runtime_spec = _runtime(worker._canonical_repository / "runtime")
     monkeypatch.setattr(worker, "_shadow_git_control_state", lambda _shadow: baseline)
+    head_payloads = payloads if baseline_payloads is None else baseline_payloads
 
     def fake_text(_platform, argv, **_kwargs):
         command = tuple(argv)
@@ -241,6 +244,16 @@ def _simulated_shadow_patch(
                 list(command),
                 0,
                 payloads[relative],
+                b"",
+            )
+        if "cat-file" in command:
+            relative = command[-1].removeprefix("HEAD:")
+            if baseline_read_fails or relative not in head_payloads:
+                return subprocess.CompletedProcess(list(command), 1, b"", b"")
+            return subprocess.CompletedProcess(
+                list(command),
+                0,
+                head_payloads[relative],
                 b"",
             )
         if "diff" in command:
@@ -729,6 +742,23 @@ def test_docs_shadow_patch_accepts_markdown_compatibly(
     assert patch.changed_paths == (DOCS_PATH,)
 
 
+def test_docs_shadow_patch_preserves_whole_file_sensitive_rejection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        tracked_paths=(DOCS_PATH,),
+        allowed_paths=(DOCS_PATH,),
+        changed_paths=(DOCS_PATH,),
+        payloads={DOCS_PATH: b"token=preexisting-synthetic-value\n"},
+    ) is None
+
+
 def test_docs_shadow_patch_rejects_python_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -764,6 +794,171 @@ def test_bounded_python_shadow_patch_accepts_exact_authorized_paths(
 
     assert patch is not None
     assert patch.changed_paths == PYTHON_PATHS
+
+
+def test_bounded_python_shadow_patch_allows_unchanged_sensitive_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    baseline = b"token=synthetic-fixture-value\nVALUE = 1\n"
+    resulting = b"token=synthetic-fixture-value\nVALUE = 2\n"
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: resulting},
+        baseline_payloads={PYTHON_PATHS[0]: baseline},
+    ) is not None
+
+
+def test_bounded_python_shadow_patch_allows_moved_sensitive_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    baseline = b"token=synthetic-fixture-value\nVALUE = 1\n"
+    resulting = b"VALUE = 2\ntoken=synthetic-fixture-value\n"
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: resulting},
+        baseline_payloads={PYTHON_PATHS[0]: baseline},
+    ) is not None
+
+
+def test_bounded_python_shadow_patch_allows_task081_style_existing_regex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    baseline = (
+        b'SENSITIVE = re.compile(r"(?i)(?:[A-Z]:\\\\Users\\\\|/home/|/Users/)'
+        b'[^\\s`]+")\n'
+    )
+    resulting = baseline + b"\ndef reject_self_dependency():\n    return True\n"
+    assert any(
+        pattern.search(baseline.decode()) for pattern in wsl_module._SENSITIVE_PATTERNS
+    )
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: resulting},
+        baseline_payloads={PYTHON_PATHS[0]: baseline},
+    ) is not None
+
+
+def test_bounded_python_shadow_patch_rejects_new_sensitive_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: b"token=new-synthetic-value\n"},
+        baseline_payloads={PYTHON_PATHS[0]: b"VALUE = 1\n"},
+    ) is None
+
+
+def test_bounded_python_shadow_patch_rejects_duplicated_sensitive_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    finding = b"token=synthetic-fixture-value\n"
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: finding + finding},
+        baseline_payloads={PYTHON_PATHS[0]: finding},
+    ) is None
+
+
+def test_bounded_python_shadow_patch_rejects_changed_sensitive_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: b"token=new-synthetic-value\n"},
+        baseline_payloads={PYTHON_PATHS[0]: b"token=old-synthetic-value\n"},
+    ) is None
+
+
+def test_bounded_python_shadow_patch_rejects_baseline_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: b"VALUE = 2\n"},
+        baseline_read_fails=True,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "baseline_payload",
+    [
+        pytest.param(b"\xff", id="non-utf8"),
+        pytest.param(b"VALUE = 1\0\n", id="nul"),
+    ],
+)
+def test_bounded_python_shadow_patch_rejects_unsafe_baseline_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    baseline_payload: bytes,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: b"VALUE = 2\n"},
+        baseline_payloads={PYTHON_PATHS[0]: baseline_payload},
+    ) is None
 
 
 def test_bounded_python_shadow_patch_rejects_markdown(
@@ -806,7 +1001,6 @@ def test_bounded_python_shadow_patch_rejects_outside_allowlist(
     [
         pytest.param(b"\xff", id="non-utf8"),
         pytest.param(b"VALUE = 'bounded'\0\n", id="nul"),
-        pytest.param(b"token=secret-value\n", id="sensitive-text"),
     ],
 )
 def test_bounded_python_shadow_patch_rejects_unsafe_text(
