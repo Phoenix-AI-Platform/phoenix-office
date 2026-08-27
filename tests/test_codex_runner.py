@@ -49,6 +49,10 @@ from phoenix_office.dev.codex_wsl import (
 BASE_SHA = "0" * 40
 ATTEMPT_ID = "pilot-attempt-task060abc123"
 ALLOWED_PATH = "docs/process/supervised-codex-pilot-storage.md"
+PYTHON_ALLOWED_PATHS = (
+    "src/phoenix_office/dev/codex_successor.py",
+    "tests/test_codex_successor.py",
+)
 BRANCH = "codex/pilot-060-runner"
 
 
@@ -278,11 +282,55 @@ def _evidence() -> dict[str, object]:
     }
 
 
+def _python_authorization() -> dict[str, object]:
+    authorization = _authorization()
+    authorization.update(
+        {
+            "pilot_kind": "bounded-python-supervised",
+            "objective": "Develop Python code and focused tests safely.",
+            "allowed_paths": list(PYTHON_ALLOWED_PATHS),
+            "expected_pr_title": "dev: refine successor policy",
+        }
+    )
+    return authorization
+
+
+def _python_handoff() -> dict[str, object]:
+    handoff = _handoff()
+    authorization = _python_authorization()
+    handoff["expected_pr_title"] = authorization["expected_pr_title"]
+    handoff["prompt"] = "Apply the reviewed bounded Python change and stop."
+    task = handoff["task"]
+    assert isinstance(task, dict)
+    task.update(
+        {
+            "execution_class": "bounded-python-supervised",
+            "title": "Refine bounded successor policy",
+            "objective": authorization["objective"],
+            "risk_class": "low",
+        }
+    )
+    allowed_resources = task["allowed_resources"]
+    assert isinstance(allowed_resources, dict)
+    allowed_resources["paths"] = list(PYTHON_ALLOWED_PATHS)
+    return handoff
+
+
+def _python_evidence() -> dict[str, object]:
+    evidence = _evidence()
+    evidence["pilot_kind"] = "bounded-python-supervised"
+    return evidence
+
+
 def _reviewed_prompt(handoff: dict[str, object]) -> str:
     task = handoff["task"]
     assert isinstance(task, dict)
     source = task["source"]
     assert isinstance(source, dict)
+    allowed_resources = task["allowed_resources"]
+    assert isinstance(allowed_resources, dict)
+    allowed_paths = allowed_resources["paths"]
+    assert isinstance(allowed_paths, list)
     issue_number = int(str(source["uri"]).rsplit("/", 1)[1])
     return render_reviewed_codex_invocation_prompt(
         package=handoff,
@@ -290,7 +338,7 @@ def _reviewed_prompt(handoff: dict[str, object]) -> str:
             "source_issue_number": issue_number,
             "repository": handoff["repository"],
             "base_branch": handoff["base_branch"],
-            "declared_changed_files": [ALLOWED_PATH],
+            "declared_changed_files": allowed_paths,
             "external_checks_required": list(
                 runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
             ),
@@ -2730,6 +2778,67 @@ def test_diff_gate_allows_only_authorized_utf8_markdown(tmp_path: Path):
     assert result == DiffGateResult(True, "diff_allowed", (ALLOWED_PATH,))
 
 
+def test_diff_gate_enforces_bounded_python_class_policy(tmp_path: Path) -> None:
+    repository = tmp_path / "python-repository"
+    worktree_path = tmp_path / "python-worktree"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Phoenix Test")
+    _git(repository, "config", "user.email", "test@phoenix.invalid")
+    allowed = (
+        "src/phoenix_office/dev/codex_successor.py",
+        "tests/test_codex_successor.py",
+    )
+    for path_text in allowed:
+        path = repository / path_text
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", "--", *allowed)
+    _git(repository, "commit", "-m", "initial")
+    head = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "worktree", "add", "-b", BRANCH, str(worktree_path), head)
+    service = SystemCodexPilotServices(repository)
+    control_state = service._git_control_state(worktree_path)
+    assert control_state is not None
+    git_refs, git_worktree_state, local_git_config = control_state
+    worktree = WorktreeHandle(
+        worktree_path,
+        BRANCH,
+        head,
+        (worktree_path / ".git").read_bytes(),
+        git_refs,
+        git_worktree_state,
+        local_git_config,
+        allowed,
+        "bounded-python-supervised",
+    )
+    (worktree.path / allowed[0]).write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = service.inspect_diff(worktree, allowed)
+    ineligible = service.inspect_diff(
+        worktree,
+        (ALLOWED_PATH, "tests/test_codex_successor.py"),
+    )
+
+    assert result == DiffGateResult(True, "diff_allowed", (allowed[0],))
+    assert ineligible == DiffGateResult(False, "unsafe_changed_path")
+
+
+def test_runner_rejects_pilot_kind_mismatch_before_claim(tmp_path: Path) -> None:
+    authorization = _python_authorization()
+    system = FakeSystem()
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        authorization=authorization,
+    )
+
+    assert result["category"] == "preclaim_static_preflight_failed"
+    assert system.calls == []
+    assert not database_path.exists()
+
+
 def test_phoenix_commit_has_exact_parent_branch_and_authorized_scope(tmp_path: Path):
     worktree = _real_worktree(tmp_path)
     (worktree.path / ALLOWED_PATH).write_text(
@@ -3718,6 +3827,143 @@ def test_pull_request_body_is_bounded_and_contains_no_raw_worker_material():
     assert "Apply the reviewed" not in body
     assert "stdout" not in body
     assert "stderr" not in body
+
+
+def test_docs_reviewed_invocation_boundaries_remain_exactly_unchanged() -> None:
+    prompt = _reviewed_prompt(_handoff())
+    section = prompt.split("## 9. Mandatory Execution Boundaries", 1)[1].split(
+        "## 10. External Checks Not Claimed", 1
+    )[0]
+
+    assert section == (
+        "\n- one issue, one branch, one PR\n"
+        "- modify only the declared documentation files\n"
+        "- do not broaden scope\n"
+        "- do not use private customer data\n"
+        "- run and report every required validation\n"
+        "- open one PR and stop\n"
+        "- never approve or merge\n"
+        "- do not comment, label, dispatch workflows, automatically retry, "
+        "schedule, queue, or continue in the background\n"
+        "- stop without mutation when any scope or identity binding is ambiguous\n\n"
+    )
+
+
+def test_bounded_python_reviewed_invocation_is_class_and_path_aware() -> None:
+    prompt = _reviewed_prompt(_python_handoff())
+    section = prompt.split("## 9. Mandatory Execution Boundaries", 1)[1].split(
+        "## 10. External Checks Not Claimed", 1
+    )[0]
+
+    assert (
+        "- modify only the exact reviewed Python paths: "
+        + ", ".join(PYTHON_ALLOWED_PATHS)
+    ) in section
+    assert all(path in section for path in PYTHON_ALLOWED_PATHS)
+    assert "documentation" not in section.casefold()
+    assert "markdown" not in section.casefold()
+    assert "- one reviewed attempt only" in section
+    assert "- do not modify any extra path" in section
+    assert "must not access the network or GitHub" in section
+    assert "must not commit or push" in section
+    assert "- never approve or merge" in section
+    assert "automatically retry" in section
+    assert "continue in the background" in section
+
+
+@pytest.mark.parametrize(
+    ("handoff", "evidence", "authorization", "reviewed_prompt"),
+    [
+        (
+            _handoff(),
+            _evidence(),
+            _authorization(),
+            _reviewed_prompt(_python_handoff()),
+        ),
+        (
+            _python_handoff(),
+            _python_evidence(),
+            _python_authorization(),
+            _reviewed_prompt(_handoff()),
+        ),
+    ],
+)
+def test_reviewed_invocation_class_text_mismatch_is_rejected_before_claim(
+    tmp_path: Path,
+    handoff: dict[str, object],
+    evidence: dict[str, object],
+    authorization: dict[str, object],
+    reviewed_prompt: str,
+) -> None:
+    system = FakeSystem()
+
+    result, database_path = _run(
+        tmp_path,
+        system,
+        handoff=handoff,
+        evidence=evidence,
+        authorization=authorization,
+        reviewed_prompt=reviewed_prompt,
+    )
+
+    assert result["category"] == "preclaim_static_preflight_failed"
+    assert result["attempt_id"] is None
+    assert system.calls == []
+    assert not database_path.exists()
+
+
+def test_unknown_invocation_execution_class_fails_closed() -> None:
+    handoff = _handoff()
+    task = handoff["task"]
+    assert isinstance(task, dict)
+    task["execution_class"] = "unknown-supervised"
+
+    with pytest.raises(ValueError, match="execution_class"):
+        _reviewed_prompt(handoff)
+
+
+def test_docs_pull_request_body_remains_exactly_unchanged() -> None:
+    body = _pull_request_body(
+        source_issue_number=363,
+        required_headings=tuple(_handoff()["required_pr_body_headings"]),
+        changed_paths=(ALLOWED_PATH,),
+        validation_commands=VALIDATION_COMMANDS,
+    )
+
+    assert body == (
+        "Refs #363\n\n"
+        "## Summary\n\n"
+        "Phoenix supervised a bounded docs-only Codex change.\n\n"
+        "## Scope\n\n"
+        "Only reviewed Markdown paths were eligible for publication.\n\n"
+        "## Changed files\n\n"
+        f"- `{ALLOWED_PATH}`\n\n"
+        "## Out-of-scope confirmation\n\n"
+        "No product code, execution authority, approval, or merge was added.\n\n"
+        "## Validation performed\n\n"
+        + "\n".join(f"- `{command}`: PASS" for command in VALIDATION_COMMANDS)
+        + "\n\n## Risks\n\n"
+        "Stopped for required assistant architecture review."
+    )
+
+
+def test_bounded_python_pull_request_body_has_truthful_authority_boundaries() -> None:
+    body = _pull_request_body(
+        source_issue_number=400,
+        required_headings=tuple(_handoff()["required_pr_body_headings"]),
+        changed_paths=PYTHON_ALLOWED_PATHS,
+        validation_commands=VALIDATION_COMMANDS,
+        pilot_kind="bounded-python-supervised",
+    )
+
+    assert "Phoenix supervised a bounded Python Codex change." in body
+    assert "No product code" not in body
+    assert "no execution code" not in body.casefold()
+    assert "no implementation code" not in body.casefold()
+    assert "No worker approval or merge authority was added." in body
+    assert "No retry or background-resume authority was added." in body
+    assert "No changes outside the exact reviewed allowlist were permitted." in body
+    assert "No broader execution class was granted." in body
 
 
 def test_cli_run_emits_only_bounded_result(

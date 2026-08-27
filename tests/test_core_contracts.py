@@ -12,6 +12,7 @@ from phoenix_office.cli import _validate_codex_pilot_authorization_packet
 from phoenix_office.core.contracts import (
     CODEX_PILOT_AUDIT_EVENT_TRANSITIONS,
     CODEX_PILOT_AUTHORIZATION_FINGERPRINT_FIELDS,
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
     CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS,
     ApprovalDecision,
     ApprovalPolicy,
@@ -59,7 +60,9 @@ from phoenix_office.core.contracts import (
     codex_pilot_objective_digest,
     compose_codex_pilot_initial_claim_bundle,
     derive_codex_pilot_attempt_snapshot,
+    is_safe_codex_pilot_allowed_paths,
     is_safe_codex_pilot_authorization_objective,
+    is_safe_codex_pilot_expected_pr_title,
     prepare_codex_pilot_initial_claim_commit,
     validate_codex_pilot_attempt_snapshot,
     validate_codex_pilot_attempt_snapshot_binding,
@@ -71,6 +74,11 @@ from phoenix_office.core.contracts import (
     validate_codex_pilot_initial_claim_uniqueness_entries,
     validate_codex_pilot_prepared_initial_claim_commit,
 )
+
+PYTHON_PATHS = [
+    "src/phoenix_office/dev/codex_successor.py",
+    "tests/test_codex_successor.py",
+]
 
 FIXED_TIME = datetime(2026, 6, 26, 12, 0, tzinfo=UTC)
 
@@ -2770,6 +2778,73 @@ def test_cli_and_core_authorization_validators_return_identical_results():
         "authorization allowed paths are invalid",
         "authorization authorization_id is invalid",
     ]
+
+
+def test_bounded_python_authorization_and_claim_bind_exact_kind():
+    authorization = _valid_codex_authorization_dict()
+    authorization.update(
+        {
+            "pilot_kind": CODEX_PILOT_BOUNDED_PYTHON_KIND,
+            "objective": "Develop Python code and focused tests safely.",
+            "allowed_paths": PYTHON_PATHS,
+            "expected_pr_title": "dev: refine bounded successor policy",
+        }
+    )
+
+    validation = validate_codex_pilot_authorization_packet(authorization)
+    bundle = compose_codex_pilot_initial_claim_bundle(
+        authorization, "pilot-attempt-" + "a" * 32
+    )
+
+    assert validation["authorization_structural_valid"] is True
+    assert bundle["claim_bundle_passed"] is True
+    assert bundle["claim_record"]["pilot_kind"] == CODEX_PILOT_BOUNDED_PYTHON_KIND
+    mismatched = dict(bundle["claim_record"])
+    mismatched["pilot_kind"] = "docs-only-supervised"
+    assert validate_codex_pilot_claim_binding(
+        mismatched, authorization
+    )["claim_binding_passed"] is False
+    docs = _valid_codex_authorization_dict()
+    assert codex_pilot_authorization_fingerprint(docs) != (
+        codex_pilot_authorization_fingerprint(authorization)
+    )
+
+
+def test_shared_bounded_python_policy_rejects_ineligible_shapes():
+    assert is_safe_codex_pilot_authorization_objective(
+        "Develop Python code and focused tests safely.",
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+    assert not is_safe_codex_pilot_authorization_objective(
+        "Clarify the reviewed milestone.",
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+    assert is_safe_codex_pilot_allowed_paths(
+        PYTHON_PATHS, CODEX_PILOT_BOUNDED_PYTHON_KIND
+    )
+    assert is_safe_codex_pilot_expected_pr_title(
+        "dev: refine bounded successor policy",
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+    assert not is_safe_codex_pilot_allowed_paths(
+        ["src/phoenix_office/core/contracts.py", "tests/test_codex_core.py"],
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+    assert not is_safe_codex_pilot_expected_pr_title(
+        "docs: wrong class", CODEX_PILOT_BOUNDED_PYTHON_KIND
+    )
+    for implementation in (
+        "src/phoenix_office/dev/codex_config.py",
+        "src/phoenix_office/dev/codex_dependency.py",
+        "src/phoenix_office/dev/codex_workflow.py",
+        "src/phoenix_office/dev/codex_customer.py",
+        "src/phoenix_office/dev/codex_proposal.py",
+        "src/phoenix_office/dev/codex_template.py",
+    ):
+        assert not is_safe_codex_pilot_allowed_paths(
+            [implementation, "tests/test_codex_successor.py"],
+            CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        )
 
 
 def test_codex_pilot_claim_binding_detects_fingerprint_and_objective_mismatches():

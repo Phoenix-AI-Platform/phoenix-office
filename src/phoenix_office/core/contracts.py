@@ -380,7 +380,13 @@ class CodexPilotAuthorizationPacket(SerializableContract):
 
 CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION = "codex-pilot-authorization.v1"
 CODEX_PILOT_AUTHORIZATION_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
-CODEX_PILOT_AUTHORIZATION_KIND = "docs-only-supervised"
+CODEX_PILOT_DOCS_ONLY_KIND = "docs-only-supervised"
+CODEX_PILOT_BOUNDED_PYTHON_KIND = "bounded-python-supervised"
+CODEX_PILOT_AUTHORIZATION_KINDS = frozenset(
+    {CODEX_PILOT_DOCS_ONLY_KIND, CODEX_PILOT_BOUNDED_PYTHON_KIND}
+)
+# Backward-compatible name for the original, v1 docs-only contract.
+CODEX_PILOT_AUTHORIZATION_KIND = CODEX_PILOT_DOCS_ONLY_KIND
 CODEX_PILOT_AUTHORIZATION_DECISION_STATE = "human_authorized_for_one_run"
 CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE = "human_operator"
 CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION = (
@@ -2526,7 +2532,6 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
     expected_values = {
         "schema_version": CODEX_PILOT_AUTHORIZATION_SCHEMA_VERSION,
         "repository": CODEX_PILOT_AUTHORIZATION_REPOSITORY,
-        "pilot_kind": CODEX_PILOT_AUTHORIZATION_KIND,
         "decision_state": CODEX_PILOT_AUTHORIZATION_DECISION_STATE,
         "authorizer_role": CODEX_PILOT_AUTHORIZATION_AUTHOR_ROLE,
         "budget_metric": "tokens",
@@ -2534,6 +2539,10 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
     for field_name, expected_value in expected_values.items():
         if package.get(field_name) != expected_value:
             errors.append(f"authorization {field_name} is invalid")
+
+    pilot_kind = package.get("pilot_kind")
+    if pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS:
+        errors.append("authorization pilot_kind is invalid")
 
     for field_name in CODEX_PILOT_AUTHORIZATION_REFERENCE_FIELDS:
         if not _is_safe_identifier(package.get(field_name)):
@@ -2545,12 +2554,16 @@ def _authorization_structural_errors(package: dict[str, Any]) -> list[str]:
         if not _is_safe_authorization_json_path(package.get(field_name)):
             errors.append(f"authorization {field_name} is invalid")
     if not is_safe_codex_pilot_authorization_objective(
-        package.get("objective")
+        package.get("objective"), pilot_kind
     ):
         errors.append("authorization objective is invalid")
-    if not _is_allowed_paths(package.get("allowed_paths")):
+    if not is_safe_codex_pilot_allowed_paths(
+        package.get("allowed_paths"), pilot_kind
+    ):
         errors.append("authorization allowed paths are invalid")
-    if not _is_safe_pr_title(package.get("expected_pr_title")):
+    if not is_safe_codex_pilot_expected_pr_title(
+        package.get("expected_pr_title"), pilot_kind
+    ):
         errors.append("authorization expected_pr_title is invalid")
     if not _is_safe_branch(package.get("branch_name")):
         errors.append("authorization branch_name is invalid")
@@ -2880,7 +2893,6 @@ def _validate_claim_constants(record: dict[str, Any], errors: list[str]) -> None
             CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION
         ),
         "repository": CODEX_PILOT_AUTHORIZATION_REPOSITORY,
-        "pilot_kind": CODEX_PILOT_AUTHORIZATION_KIND,
         "objective_digest_schema_version": CODEX_PILOT_OBJECTIVE_DIGEST_SCHEMA_VERSION,
         "budget_metric": "tokens",
         "initial_lifecycle_state": "claim_created",
@@ -2888,6 +2900,8 @@ def _validate_claim_constants(record: dict[str, Any], errors: list[str]) -> None
     for field_name, expected_value in expected.items():
         if record.get(field_name) != expected_value:
             errors.append(f"{field_name} is invalid")
+    if record.get("pilot_kind") not in CODEX_PILOT_AUTHORIZATION_KINDS:
+        errors.append("pilot_kind is invalid")
 
     exact_true = ["final_ci_required", "assistant_review_required", "one_invocation_only"]
     exact_false = [
@@ -2921,9 +2935,14 @@ def _validate_claim_types_and_shapes(
         errors.append("base_commit_sha is invalid")
     if not _is_safe_branch(record.get("branch_name")):
         errors.append("branch_name is invalid")
-    if not _is_safe_pr_title(record.get("expected_pr_title")):
+    pilot_kind = record.get("pilot_kind")
+    if not is_safe_codex_pilot_expected_pr_title(
+        record.get("expected_pr_title"), pilot_kind
+    ):
         errors.append("expected_pr_title is invalid")
-    if not _is_allowed_paths(record.get("allowed_paths")):
+    if not is_safe_codex_pilot_allowed_paths(
+        record.get("allowed_paths"), pilot_kind
+    ):
         errors.append("allowed_paths are invalid")
     if record.get("validation_commands") != CODEX_PILOT_REQUIRED_VALIDATION_COMMANDS:
         errors.append("validation_commands are invalid")
@@ -3149,8 +3168,11 @@ def _is_safe_authorization_json_path(value: object) -> bool:
     )
 
 
-def is_safe_codex_pilot_authorization_objective(value: object) -> bool:
-    """Return whether an objective satisfies the existing authorization rule."""
+def is_safe_codex_pilot_authorization_objective(
+    value: object,
+    pilot_kind: object = CODEX_PILOT_DOCS_ONLY_KIND,
+) -> bool:
+    """Return whether an objective satisfies the shared class-aware rule."""
 
     if not isinstance(value, str):
         return False
@@ -3162,7 +3184,122 @@ def is_safe_codex_pilot_authorization_objective(value: object) -> bool:
     ):
         return False
     lowered = value.lower()
-    return "document" in lowered or "docs" in lowered or "documentation" in lowered
+    if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        return (
+            "document" in lowered
+            or "docs" in lowered
+            or "documentation" in lowered
+        )
+    if pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return re.search(
+            r"\b(?:code|python|tests?|development)\b", lowered
+        ) is not None
+    return False
+
+
+def is_safe_codex_pilot_allowed_paths(
+    value: object,
+    pilot_kind: object = CODEX_PILOT_DOCS_ONLY_KIND,
+) -> bool:
+    """Validate exact writable path policy for one supervised class."""
+
+    if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        return _is_allowed_paths(value)
+    if pilot_kind != CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return False
+    if not isinstance(value, list) or len(value) not in {2, 3}:
+        return False
+    if not all(isinstance(path, str) for path in value):
+        return False
+    if value != sorted(set(value)):
+        return False
+    if len({path.casefold() for path in value}) != len(value):
+        return False
+    if not all(_is_allowed_bounded_python_path(path) for path in value):
+        return False
+    return any(_is_bounded_python_implementation_path(path) for path in value) and any(
+        _is_bounded_python_test_path(path) for path in value
+    )
+
+
+def is_safe_codex_pilot_expected_pr_title(
+    value: object,
+    pilot_kind: object = CODEX_PILOT_DOCS_ONLY_KIND,
+) -> bool:
+    """Validate the existing class-specific PR-title boundary."""
+
+    if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        return _is_safe_pr_title(value)
+    if pilot_kind != CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return False
+    return bool(
+        isinstance(value, str)
+        and 6 <= len(value) <= 120
+        and value.startswith("dev: ")
+        and _is_safe_text(value, 120)
+        and "/" not in value
+        and "\\" not in value
+        and "=" not in value
+    )
+
+
+def _is_allowed_bounded_python_path(value: str) -> bool:
+    return _is_bounded_python_implementation_path(
+        value
+    ) or _is_bounded_python_test_path(value)
+
+
+def _is_bounded_python_implementation_path(value: str) -> bool:
+    prefix = "src/phoenix_office/dev/"
+    if not value.startswith(prefix) or not value.endswith(".py"):
+        return False
+    name = value.removeprefix(prefix)
+    if "/" in name or name == "__init__.py":
+        return False
+    return _is_safe_bounded_python_filename(name)
+
+
+def _is_bounded_python_test_path(value: str) -> bool:
+    prefix = "tests/"
+    if not value.startswith(prefix) or not value.endswith(".py"):
+        return False
+    name = value.removeprefix(prefix)
+    return bool(
+        "/" not in name
+        and name.startswith("test_codex_")
+        and _is_safe_bounded_python_filename(name)
+    )
+
+
+def _is_safe_bounded_python_filename(value: str) -> bool:
+    if not _is_safe_text(value, 160) or re.fullmatch(
+        r"[A-Za-z0-9_]+\.py", value
+    ) is None:
+        return False
+    tokens = set(value[:-3].lower().split("_"))
+    forbidden = {
+        "config",
+        "configuration",
+        "customer",
+        "customers",
+        "dependencies",
+        "dependency",
+        "docx",
+        "job",
+        "jobs",
+        "migration",
+        "migrations",
+        "office",
+        "proposal",
+        "record",
+        "records",
+        "schema",
+        "schemas",
+        "template",
+        "workflow",
+        "workflows",
+    }
+    return tokens.isdisjoint(forbidden)
 
 
 def _is_safe_repo_relative_path(

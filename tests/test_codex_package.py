@@ -130,6 +130,66 @@ def test_valid_package_build_round_trips_existing_validators(
     assert len(result["authorization_fingerprint"]) == 64
 
 
+def test_task_spec_v1_remains_docs_only_compatible(tmp_path: Path) -> None:
+    spec = codex_package.parse_codex_pilot_task_spec_payload(
+        _valid_spec(),
+        required_control_ids=set(cli.CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS),
+    )
+
+    assert spec.execution_class == "docs-only-supervised"
+
+
+def test_task_spec_v2_builds_bounded_python_kind(tmp_path: Path) -> None:
+    result, output = _build(
+        tmp_path,
+        schema_version="codex-pilot-task-spec.v2",
+        execution_class="bounded-python-supervised",
+        objective="Develop Python code and focused tests safely.",
+        allowed_paths=[
+            "src/phoenix_office/dev/codex_successor.py",
+            "tests/test_codex_successor.py",
+        ],
+        expected_pr_title="dev: refine bounded successor policy",
+    )
+    package = _read_package(output)
+
+    assert result["package_build_result"] == "pass"
+    assert package["evidence.json"]["pilot_kind"] == "bounded-python-supervised"
+    assert package["authorization.json"]["pilot_kind"] == (
+        "bounded-python-supervised"
+    )
+
+
+def test_task_spec_v2_unknown_class_and_untracked_python_fail_closed(
+    tmp_path: Path,
+) -> None:
+    common = {
+        "schema_version": "codex-pilot-task-spec.v2",
+        "objective": "Develop Python code and focused tests safely.",
+        "allowed_paths": [
+            "src/phoenix_office/dev/codex_successor.py",
+            "tests/test_codex_successor.py",
+        ],
+        "expected_pr_title": "dev: refine bounded successor policy",
+    }
+    with pytest.raises(CodexPilotPackageBuildError) as unknown:
+        _build(tmp_path, execution_class="unknown-supervised", **common)
+    with pytest.raises(CodexPilotPackageBuildError) as untracked:
+        _build(
+            tmp_path,
+            output_name="untracked",
+            execution_class="bounded-python-supervised",
+            allowed_paths=[
+                "src/phoenix_office/dev/codex_not_tracked.py",
+                "tests/test_codex_successor.py",
+            ],
+            **{key: value for key, value in common.items() if key != "allowed_paths"},
+        )
+
+    assert unknown.value.category == "task_spec_malformed"
+    assert untracked.value.category == "unauthorized_path"
+
+
 def test_authorization_incompatible_objective_fails_before_composition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

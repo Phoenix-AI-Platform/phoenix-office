@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +20,11 @@ from phoenix_office.dev.codex_successor import (
     CodexSuccessorProposalError,
     RepositoryState,
     SystemCodexSuccessorServices,
+    VerificationState,
     _bounded_process_environment,
+    codex_successor_proposal_fingerprint,
     parse_codex_successor_proposal_payload,
+    parse_selected_codex_successor_issue,
     propose_codex_successor,
 )
 
@@ -263,6 +266,179 @@ def test_valid_verified_candidate_returns_one_bounded_proposal(
         "tracked_paths",
         "list_open_issues",
     ]
+
+
+def _python_repository_paths(repository: Path) -> tuple[str, ...]:
+    paths = (
+        "src/phoenix_office/dev/codex_runner.py",
+        "src/phoenix_office/dev/codex_successor.py",
+        "src/phoenix_office/dev/codex_future.py",
+        "src/phoenix_office/dev/__init__.py",
+        "src/phoenix_office/core/contracts.py",
+        "src/phoenix_office/cli.py",
+        "tests/test_codex_runner.py",
+        "tests/test_codex_successor.py",
+        "tests/test_codex_wsl.py",
+        "tests/test_cli.py",
+    )
+    for path_text in paths:
+        path = repository / path_text
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# synthetic tracked source\n", encoding="utf-8")
+    return paths
+
+
+@pytest.mark.parametrize(
+    "allowed_paths",
+    [
+        [
+            "src/phoenix_office/dev/codex_successor.py",
+            "tests/test_codex_successor.py",
+        ],
+        [
+            "src/phoenix_office/dev/codex_runner.py",
+            "src/phoenix_office/dev/codex_successor.py",
+            "tests/test_codex_successor.py",
+        ],
+    ],
+)
+def test_bounded_python_valid_two_and_three_path_candidates(
+    repository: Path,
+    tmp_path: Path,
+    allowed_paths: list[str],
+) -> None:
+    tracked = _python_repository_paths(repository)
+    evidence = _write_evidence(tmp_path / "verification.json")
+    candidate = _candidate_metadata(
+        execution_class="bounded-python-supervised",
+        allowed_paths=sorted(allowed_paths),
+        expected_pr_title="dev: refine successor policy",
+        risk_class="low",
+    )
+    execution = _execution_definition(objective="Develop Python code and focused tests safely.")
+
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(paths=tracked, issues=[_issue(metadata=candidate, execution=execution)]),
+    )
+
+    assert result["category"] == "successor_proposed"
+    assert result["selected_execution_class"] == "bounded-python-supervised"
+    assert result["proposal_ready_for_architecture_review"] is True
+
+
+@pytest.mark.parametrize(
+    ("candidate_updates", "objective"),
+    [
+        ({"allowed_paths": ["src/phoenix_office/dev/codex_successor.py"]}, None),
+        (
+            {
+                "allowed_paths": [
+                    "src/phoenix_office/dev/codex_runner.py",
+                    "src/phoenix_office/dev/codex_successor.py",
+                    "tests/test_codex_runner.py",
+                    "tests/test_codex_successor.py",
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "allowed_paths": [
+                    "src/phoenix_office/dev/codex_future.py",
+                    "tests/test_codex_successor.py",
+                ]
+            },
+            None,
+        ),
+        ({"allowed_paths": [ALLOWED_PATH, "tests/test_codex_successor.py"]}, None),
+        (
+            {"allowed_paths": ["tests/test_codex_runner.py", "tests/test_codex_successor.py"]},
+            None,
+        ),
+        (
+            {
+                "allowed_paths": [
+                    "src/phoenix_office/dev/codex_runner.py",
+                    "src/phoenix_office/dev/codex_successor.py",
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "allowed_paths": [
+                    "src/phoenix_office/dev/__init__.py",
+                    "tests/test_codex_successor.py",
+                ]
+            },
+            None,
+        ),
+        (
+            {
+                "allowed_paths": [
+                    "src/phoenix_office/core/contracts.py",
+                    "tests/test_codex_successor.py",
+                ]
+            },
+            None,
+        ),
+        (
+            {"allowed_paths": ["src/phoenix_office/cli.py", "tests/test_codex_successor.py"]},
+            None,
+        ),
+        (
+            {"allowed_paths": ["src/phoenix_office/dev/codex_runner.py", "tests/test_cli.py"]},
+            None,
+        ),
+        ({"risk_class": "medium"}, None),
+        ({"expected_pr_title": "docs: wrong class"}, None),
+        ({"execution_class": "unknown-supervised"}, None),
+        ({}, "Clarify the reviewed milestone safely."),
+    ],
+)
+def test_bounded_python_ineligible_candidates_never_become_ready(
+    repository: Path,
+    tmp_path: Path,
+    candidate_updates: dict[str, object],
+    objective: str | None,
+) -> None:
+    tracked = tuple(
+        path
+        for path in _python_repository_paths(repository)
+        if path != "src/phoenix_office/dev/codex_future.py"
+    )
+    evidence = _write_evidence(tmp_path / "verification.json")
+    defaults: dict[str, object] = {
+        "execution_class": "bounded-python-supervised",
+        "allowed_paths": [
+            "src/phoenix_office/dev/codex_successor.py",
+            "tests/test_codex_successor.py",
+        ],
+        "expected_pr_title": "dev: refine successor policy",
+        "risk_class": "low",
+    }
+    defaults.update(candidate_updates)
+    execution = _execution_definition(
+        objective=objective or "Develop Python code and focused tests safely."
+    )
+
+    result = _propose(
+        repository,
+        evidence,
+        FakeServices(
+            paths=tracked,
+            issues=[_issue(metadata=_candidate_metadata(**defaults), execution=execution)],
+        ),
+    )
+
+    assert result["proposal_ready_for_architecture_review"] is False
+    assert result["category"] in {
+        "malformed_candidate_metadata",
+        "malformed_execution_definition",
+        "unsafe_allowed_path",
+    }
 
 
 def test_authorization_incompatible_objective_is_not_proposal_ready(
@@ -732,12 +908,9 @@ def test_malformed_github_candidate_payload_fails_closed(
 @pytest.mark.parametrize(
     "body",
     [
-        "```phoenix-codex-successor\n{\"schema_version\":\"bad\"}\n```",
+        '```phoenix-codex-successor\n{"schema_version":"bad"}\n```',
         "```phoenix-codex-successor\nnot-json\n```",
-        (
-            "```phoenix-codex-successor\n{}\n```\n"
-            "```phoenix-codex-successor\n{}\n```"
-        ),
+        ("```phoenix-codex-successor\n{}\n```\n```phoenix-codex-successor\n{}\n```"),
     ],
 )
 def test_malformed_explicit_candidate_metadata_fails_closed(
@@ -805,9 +978,7 @@ def test_candidate_execution_task_identity_must_match(
     result = _propose(
         repository,
         evidence,
-        FakeServices(
-            issues=[_issue(execution=_execution_definition(task_id="TASK-999"))]
-        ),
+        FakeServices(issues=[_issue(execution=_execution_definition(task_id="TASK-999"))]),
     )
 
     assert result["category"] == "candidate_execution_mismatch"
@@ -868,9 +1039,7 @@ def test_fingerprint_is_deterministic_and_binds_dependency_facts(
 ) -> None:
     evidence = _write_evidence(tmp_path / "verification.json")
     candidate = _issue(metadata=_candidate_metadata(depends_on=[390]))
-    dependencies = {
-        390: {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
-    }
+    dependencies = {390: {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}}
 
     first = _propose(
         repository,
@@ -922,12 +1091,37 @@ def test_execution_definition_is_bound_into_proposal_fingerprint(
     changed = _propose(
         repository,
         evidence,
-        FakeServices(
-            issues=[_issue(execution=_execution_definition(**{field: replacement}))]
-        ),
+        FakeServices(issues=[_issue(execution=_execution_definition(**{field: replacement}))]),
     )
 
     assert original["proposal_fingerprint"] != changed["proposal_fingerprint"]
+
+
+def test_execution_class_is_bound_into_proposal_fingerprint(
+    repository: Path,
+) -> None:
+    candidate = parse_selected_codex_successor_issue(
+        _issue(),
+        repository_root=repository,
+        tracked_paths=(ALLOWED_PATH,),
+    )
+    verification = VerificationState(VERIFICATION_ID, HEAD)
+
+    docs_fingerprint = codex_successor_proposal_fingerprint(
+        verification=verification,
+        candidate=candidate,
+        dependency_facts=(),
+    )
+    python_fingerprint = codex_successor_proposal_fingerprint(
+        verification=verification,
+        candidate=replace(
+            candidate,
+            execution_class="bounded-python-supervised",
+        ),
+        dependency_facts=(),
+    )
+
+    assert docs_fingerprint != python_fingerprint
 
 
 def test_fingerprint_and_serialization_failures_are_bounded(
@@ -987,9 +1181,7 @@ def test_system_github_adapter_uses_only_read_commands_and_bounded_environment(
         elif argv[3] == "391":
             output = json.dumps(_issue())
         else:
-            output = json.dumps(
-                {"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"}
-            )
+            output = json.dumps({"number": 390, "state": "CLOSED", "stateReason": "COMPLETED"})
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     environment = {

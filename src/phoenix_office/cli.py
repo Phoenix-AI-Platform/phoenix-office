@@ -16,8 +16,13 @@ from pydantic import ValidationError
 
 from phoenix_office.core import (
     CODEX_PILOT_AUTHORIZATION_FINGERPRINT_SCHEMA_VERSION,
+    CODEX_PILOT_AUTHORIZATION_KINDS,
+    CODEX_PILOT_DOCS_ONLY_KIND,
     codex_pilot_authorization_fingerprint,
     codex_pilot_authorization_structural_errors,
+    is_safe_codex_pilot_allowed_paths,
+    is_safe_codex_pilot_authorization_objective,
+    is_safe_codex_pilot_expected_pr_title,
 )
 from phoenix_office.dev import (
     CodexPilotPackageBuildError,
@@ -2907,7 +2912,7 @@ CODEX_RUNTIME_CAPABILITY_FIELDS = {
 
 CODEX_PILOT_EVIDENCE_SCHEMA_VERSION = "codex-pilot-evidence.v1"
 CODEX_PILOT_EVIDENCE_REPOSITORY = "Phoenix-AI-Platform/phoenix-office"
-CODEX_PILOT_EVIDENCE_KIND = "docs-only-supervised"
+CODEX_PILOT_EVIDENCE_KIND = CODEX_PILOT_DOCS_ONLY_KIND
 CODEX_PILOT_EVIDENCE_COMMAND = "dev codex-pilot-evidence"
 CODEX_PILOT_EVIDENCE_CONTROL_REVIEWERS = {
     "authentication_runner_access": "human_operator",
@@ -3071,6 +3076,7 @@ def _run_codex_pilot_preflight(
             {*evidence_blockers, "evidence input filename is unsafe"}
         )
     binding_blockers = _codex_pilot_preflight_binding_blockers(
+        handoff_package=handoff_package,
         handoff_report=handoff_report,
         evidence_report=evidence_report,
     )
@@ -3131,6 +3137,7 @@ def _run_codex_pilot_preflight(
 
 def _codex_pilot_preflight_binding_blockers(
     *,
+    handoff_package: dict[str, Any] | None,
     handoff_report: dict[str, Any],
     evidence_report: dict[str, Any],
 ) -> list[str]:
@@ -3139,8 +3146,30 @@ def _codex_pilot_preflight_binding_blockers(
         blockers.append("handoff repository is invalid")
     if evidence_report.get("repository") != CODEX_PILOT_EVIDENCE_REPOSITORY:
         blockers.append("evidence repository is invalid")
-    if evidence_report.get("pilot_kind") != CODEX_PILOT_EVIDENCE_KIND:
+    if evidence_report.get("pilot_kind") not in CODEX_PILOT_AUTHORIZATION_KINDS:
         blockers.append("evidence pilot_kind is invalid")
+    pilot_kind = evidence_report.get("pilot_kind")
+    task = _as_dict(handoff_package.get("task")) if handoff_package else {}
+    explicit_execution_class = task.get("execution_class") is not None
+    task_execution_class = task.get("execution_class")
+    if task_execution_class is None and pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        task_execution_class = CODEX_PILOT_DOCS_ONLY_KIND
+    if task_execution_class != pilot_kind:
+        blockers.append("handoff execution class does not match evidence package")
+    if explicit_execution_class or pilot_kind != CODEX_PILOT_DOCS_ONLY_KIND:
+        if not is_safe_codex_pilot_authorization_objective(
+            task.get("objective"), pilot_kind
+        ):
+            blockers.append("handoff objective is invalid for pilot kind")
+        if not is_safe_codex_pilot_allowed_paths(
+            _as_dict(task.get("allowed_resources")).get("paths"), pilot_kind
+        ):
+            blockers.append("handoff allowed paths are invalid for pilot kind")
+        if not is_safe_codex_pilot_expected_pr_title(
+            handoff_package.get("expected_pr_title") if handoff_package else None,
+            pilot_kind,
+        ):
+            blockers.append("handoff expected PR title is invalid for pilot kind")
 
     handoff_id = handoff_report.get("handoff_id")
     evidence_handoff_id = evidence_report.get("handoff_id")
@@ -3802,7 +3831,7 @@ def _validate_codex_pilot_evidence_package(package: dict[str, Any]) -> list[str]
         structural_errors.append("schema_version is invalid")
     if package.get("repository") != CODEX_PILOT_EVIDENCE_REPOSITORY:
         structural_errors.append("repository is invalid")
-    if package.get("pilot_kind") != CODEX_PILOT_EVIDENCE_KIND:
+    if package.get("pilot_kind") not in CODEX_PILOT_AUTHORIZATION_KINDS:
         structural_errors.append("pilot_kind is invalid")
 
     handoff_id = package.get("handoff_id")
@@ -3928,7 +3957,7 @@ def _safe_codex_pilot_evidence_value(
     if field_name == "repository":
         return value if value == CODEX_PILOT_EVIDENCE_REPOSITORY else None
     if field_name == "pilot_kind":
-        return value if value == CODEX_PILOT_EVIDENCE_KIND else None
+        return value if value in CODEX_PILOT_AUTHORIZATION_KINDS else None
     return value if _is_safe_evidence_identifier(value) else None
 
 
@@ -4345,8 +4374,28 @@ def _validate_codex_invocation_preflight_package(
         )
 
     task = _as_dict(package.get("task"))
-    if task.get("risk_class") != "docs-only":
-        issues.append("task.risk_class must be 'docs-only'")
+    execution_class = task.get("execution_class")
+    legacy_docs_handoff = execution_class is None
+    if legacy_docs_handoff:
+        execution_class = CODEX_PILOT_DOCS_ONLY_KIND
+    if execution_class not in CODEX_PILOT_AUTHORIZATION_KINDS:
+        issues.append("task.execution_class is invalid")
+    expected_risk = (
+        "docs-only"
+        if execution_class == CODEX_PILOT_DOCS_ONLY_KIND
+        else "low"
+    )
+    if task.get("risk_class") != expected_risk:
+        issues.append(f"task.risk_class must be {expected_risk!r}")
+    if not legacy_docs_handoff:
+        if not is_safe_codex_pilot_authorization_objective(
+            task.get("objective"), execution_class
+        ):
+            issues.append("task.objective is invalid for execution_class")
+        if not is_safe_codex_pilot_expected_pr_title(
+            package.get("expected_pr_title"), execution_class
+        ):
+            issues.append("expected_pr_title is invalid for execution_class")
 
     permissions = task.get("permissions")
     if not isinstance(permissions, dict):
@@ -4381,55 +4430,76 @@ def _validate_codex_invocation_preflight_package(
             issues.append(
                 "task.allowed_resources.paths must contain only strings"
             )
-        if not allowed_string_paths:
-            issues.append(
-                "task.allowed_resources.paths must contain at least 1 path"
-            )
-        if len(allowed_string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
-            issues.append(
-                "task.allowed_resources.paths must contain no more than "
-                f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
-            )
         normalized_allowed_paths = [
             path.replace("\\", "/") for path in allowed_string_paths
         ]
-        if len(set(normalized_allowed_paths)) != len(normalized_allowed_paths):
-            issues.append("task.allowed_resources.paths must be unique")
-        for path in normalized_allowed_paths:
-            if not _is_allowed_codex_invocation_doc_path(path):
+        if legacy_docs_handoff:
+            if not allowed_string_paths:
                 issues.append(
-                    "task.allowed_resources.paths must contain only safe "
-                    "repository-relative Markdown files under docs/process/ "
-                    "or docs/development/: "
-                    f"{path!r}"
+                    "task.allowed_resources.paths must contain at least 1 path"
                 )
+            if len(allowed_string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
+                issues.append(
+                    "task.allowed_resources.paths must contain no more than "
+                    f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
+                )
+            if len(set(normalized_allowed_paths)) != len(normalized_allowed_paths):
+                issues.append("task.allowed_resources.paths must be unique")
+            for path in normalized_allowed_paths:
+                if not _is_allowed_codex_invocation_doc_path(path):
+                    issues.append(
+                        "task.allowed_resources.paths must contain only safe "
+                        "repository-relative Markdown files under docs/process/ "
+                        "or docs/development/: "
+                        f"{path!r}"
+                    )
+        elif not is_safe_codex_pilot_allowed_paths(
+            normalized_allowed_paths, execution_class
+        ):
+            issues.append(
+                "task.allowed_resources.paths are invalid for execution_class"
+            )
         normalized_allowed_path_set = set(normalized_allowed_paths)
 
     repo_paths = package.get("required_repo_paths")
     if isinstance(repo_paths, list):
         string_paths = [path for path in repo_paths if isinstance(path, str)]
-        if not string_paths:
-            issues.append("required_repo_paths must contain at least 1 path")
-        if len(string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
-            issues.append(
-                "required_repo_paths must contain no more than "
-                f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
-            )
-        for path in string_paths:
-            normalized = path.replace("\\", "/")
-            if not _is_allowed_codex_invocation_doc_path(normalized):
+        normalized_repo_paths = [path.replace("\\", "/") for path in string_paths]
+        if legacy_docs_handoff:
+            if not string_paths:
+                issues.append("required_repo_paths must contain at least 1 path")
+            if len(string_paths) > CODEX_INVOCATION_MAX_DOC_FILES:
                 issues.append(
-                    "required_repo_paths must contain only safe "
-                    "repository-relative Markdown files under docs/process/ "
-                    "or docs/development/: "
-                    f"{path!r}"
+                    "required_repo_paths must contain no more than "
+                    f"{CODEX_INVOCATION_MAX_DOC_FILES} paths"
                 )
-            if normalized_allowed_path_set:
-                if normalized not in normalized_allowed_path_set:
+            for path, normalized in zip(string_paths, normalized_repo_paths, strict=True):
+                if not _is_allowed_codex_invocation_doc_path(normalized):
+                    issues.append(
+                        "required_repo_paths must contain only safe "
+                        "repository-relative Markdown files under docs/process/ "
+                        "or docs/development/: "
+                        f"{path!r}"
+                    )
+                if normalized_allowed_path_set and (
+                    normalized not in normalized_allowed_path_set
+                ):
                     issues.append(
                         "required_repo_paths entries must also appear in "
                         f"task.allowed_resources.paths: {path!r}"
                     )
+        else:
+            if not is_safe_codex_pilot_allowed_paths(
+                normalized_repo_paths, execution_class
+            ):
+                issues.append("required_repo_paths are invalid for execution_class")
+            if normalized_allowed_path_set and set(normalized_repo_paths) != (
+                normalized_allowed_path_set
+            ):
+                issues.append(
+                    "required_repo_paths must exactly match "
+                    "task.allowed_resources.paths"
+                )
     else:
         string_paths = []
 
