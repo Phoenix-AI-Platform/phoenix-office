@@ -12,6 +12,10 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 import phoenix_office.dev.codex_wsl as wsl_module
+from phoenix_office.core import (
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
+)
 from phoenix_office.dev.codex_runner import (
     DiffGateResult,
     SystemCodexPilotServices,
@@ -33,6 +37,12 @@ from phoenix_office.dev.codex_wsl import (
     validate_snapshot_archive,
     validate_transfer_paths,
     windows_snapshot_matches,
+)
+
+DOCS_PATH = "docs/process/status.md"
+PYTHON_PATHS = (
+    "src/phoenix_office/dev/codex_successor.py",
+    "tests/test_codex_successor.py",
 )
 
 
@@ -105,13 +115,34 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     _git(repository, "init", "--quiet")
     _git(repository, "config", "user.name", "Phoenix Test")
     _git(repository, "config", "user.email", "test@phoenix.invalid")
-    (repository / "docs").mkdir()
-    (repository / "docs" / "status.md").write_text(
+    document = repository / DOCS_PATH
+    document.parent.mkdir(parents=True)
+    document.write_text(
         "Initial status.\n",
         encoding="utf-8",
     )
     (repository / "src").mkdir()
     (repository / "src" / "safe.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", "--all")
+    _git(repository, "commit", "--quiet", "-m", "baseline")
+    return repository, _git(repository, "rev-parse", "HEAD")
+
+
+def _python_repository(tmp_path: Path) -> tuple[Path, str]:
+    repository = tmp_path / "python-repository"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Phoenix Test")
+    _git(repository, "config", "user.email", "test@phoenix.invalid")
+    for relative in (*PYTHON_PATHS, DOCS_PATH):
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "def bounded_value():\n    return 1\n"
+            if relative.endswith(".py")
+            else "Initial status.\n",
+            encoding="utf-8",
+        )
     _git(repository, "add", "--all")
     _git(repository, "commit", "--quiet", "-m", "baseline")
     return repository, _git(repository, "rev-parse", "HEAD")
@@ -163,6 +194,73 @@ def _completed(
     stderr: str = "",
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+def _simulated_shadow_patch(
+    worker: WslCodexWorker,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pilot_kind: str,
+    tracked_paths: tuple[str, ...],
+    allowed_paths: tuple[str, ...],
+    changed_paths: tuple[str, ...],
+    payloads: dict[str, bytes],
+) -> ShadowPatch | None:
+    shadow = "/home/worker/shadow"
+    baseline = ("head", "refs", "config")
+    worker._runtime_spec = _runtime(worker._canonical_repository / "runtime")
+    monkeypatch.setattr(worker, "_shadow_git_control_state", lambda _shadow: baseline)
+
+    def fake_text(_platform, argv, **_kwargs):
+        command = tuple(argv)
+        if "status" in command:
+            status = "".join(f" M {path}\0" for path in changed_paths)
+            return _completed(list(command), stdout=status)
+        if "diff" in command and "--quiet" in command:
+            return _completed(list(command))
+        if command[:2] == ("/usr/bin/test", "-L"):
+            return _completed(list(command), returncode=1)
+        if command[:2] == ("/usr/bin/test", "-f"):
+            return _completed(list(command))
+        if command[0] == "/usr/bin/readlink":
+            return _completed(list(command), stdout=f"{command[-1]}\n")
+        if command[0] == "/usr/bin/stat":
+            return _completed(list(command), stdout="regular file:1\n")
+        if "add" in command:
+            return _completed(list(command))
+        if "diff" in command and "--name-only" in command:
+            names = "".join(f"{path}\0" for path in sorted(changed_paths))
+            return _completed(list(command), stdout=names)
+        raise AssertionError(command)
+
+    def fake_bytes(_platform, argv, **_kwargs):
+        command = tuple(argv)
+        if command[0] == "/usr/bin/cat":
+            relative = command[-1].removeprefix(f"{shadow}/")
+            return subprocess.CompletedProcess(
+                list(command),
+                0,
+                payloads[relative],
+                b"",
+            )
+        if "diff" in command:
+            return subprocess.CompletedProcess(
+                list(command),
+                0,
+                b"diff --git a/bounded b/bounded\n",
+                b"",
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setattr(worker, "_run_wsl_text", fake_text)
+    monkeypatch.setattr(worker, "_run_wsl_bytes", fake_bytes)
+    return worker._validated_shadow_patch(
+        shadow,
+        tracked_paths,
+        allowed_paths,
+        baseline,
+        pilot_kind=pilot_kind,
+    )
 
 
 def test_wsl_absence_is_bounded_and_path_free(tmp_path: Path):
@@ -389,12 +487,23 @@ def test_windows_snapshot_contains_only_explicit_worker_visible_paths(tmp_path: 
     _git(repository, "commit", "--amend", "--quiet", "--no-edit")
     head = _git(repository, "rev-parse", "HEAD")
 
-    visible = ("docs/status.md",)
-    first = build_windows_snapshot(repository, head, visible)
-    second = build_windows_snapshot(repository, head, visible)
+    visible = (DOCS_PATH,)
+    first = build_windows_snapshot(
+        repository,
+        head,
+        visible,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
+    second = build_windows_snapshot(
+        repository,
+        head,
+        visible,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
 
     assert first == second
     assert first.tracked_paths == visible
+    assert first.pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND
     with tarfile.open(fileobj=io.BytesIO(first.archive), mode="r:") as archive:
         names = tuple(archive.getnames())
     assert names == visible
@@ -403,27 +512,109 @@ def test_windows_snapshot_contains_only_explicit_worker_visible_paths(tmp_path: 
     assert all(not name.startswith(".git") for name in names)
 
 
+def test_docs_snapshot_rejects_python_paths(tmp_path: Path):
+    repository, head = _python_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="worker-visible paths are invalid"):
+        build_windows_snapshot(
+            repository,
+            head,
+            PYTHON_PATHS,
+            pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        )
+
+
+def test_bounded_python_snapshot_accepts_exact_authorized_set(tmp_path: Path):
+    repository, head = _python_repository(tmp_path)
+
+    snapshot = build_windows_snapshot(
+        repository,
+        head,
+        PYTHON_PATHS,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+
+    assert snapshot.pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND
+    assert snapshot.tracked_paths == PYTHON_PATHS
+    with tarfile.open(fileobj=io.BytesIO(snapshot.archive), mode="r:") as archive:
+        assert tuple(archive.getnames()) == PYTHON_PATHS
+
+
+def test_bounded_python_snapshot_rejects_markdown(tmp_path: Path):
+    repository, head = _python_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="worker-visible paths are invalid"):
+        build_windows_snapshot(
+            repository,
+            head,
+            (DOCS_PATH,),
+            pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        )
+
+
+def test_snapshot_rejects_unknown_pilot_kind(tmp_path: Path):
+    repository, head = _repository(tmp_path)
+
+    with pytest.raises(ValueError, match="worker-visible paths are invalid"):
+        build_windows_snapshot(
+            repository,
+            head,
+            (DOCS_PATH,),
+            pilot_kind="unknown-supervised",
+        )
+
+
+def test_snapshot_match_is_bound_to_explicit_pilot_kind(tmp_path: Path):
+    repository, head = _repository(tmp_path)
+    snapshot = build_windows_snapshot(
+        repository,
+        head,
+        (DOCS_PATH,),
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
+    mismatched = WindowsSnapshot(
+        snapshot.archive,
+        snapshot.digest,
+        snapshot.tracked_paths,
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        snapshot.source_state_digest,
+    )
+
+    assert windows_snapshot_matches(repository, head, snapshot)
+    assert not windows_snapshot_matches(repository, head, mismatched)
+
+
 def test_windows_snapshot_requires_each_visible_path_at_reviewed_base(tmp_path: Path):
     repository, head = _repository(tmp_path)
 
     with pytest.raises(ValueError, match="source is unavailable"):
-        build_windows_snapshot(repository, head, ("docs/missing.md",))
+        build_windows_snapshot(
+            repository,
+            head,
+            ("docs/process/missing.md",),
+            pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        )
 
 
 def test_windows_snapshot_rejects_symlink_or_hardlink(tmp_path: Path):
     repository, _head = _repository(tmp_path)
-    target = repository / "docs" / "status.md"
-    linked = repository / "docs" / "linked.md"
+    target = repository / DOCS_PATH
+    linked = repository / "docs" / "process" / "linked.md"
     try:
         os.link(target, linked)
     except OSError:
         pytest.skip("host does not permit hardlinks")
-    _git(repository, "add", "docs/linked.md")
+    _git(repository, "add", "docs/process/linked.md")
     _git(repository, "commit", "--quiet", "-m", "hardlink")
     head = _git(repository, "rev-parse", "HEAD")
 
     with pytest.raises(ValueError, match="unsafe tracked file"):
-        build_windows_snapshot(repository, head, ("docs/status.md",))
+        build_windows_snapshot(
+            repository,
+            head,
+            (DOCS_PATH,),
+            pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        )
 
 
 def test_windows_snapshot_rejects_submodule_index_entry(tmp_path: Path):
@@ -440,7 +631,12 @@ def test_windows_snapshot_rejects_submodule_index_entry(tmp_path: Path):
     _git(repository, "reset", "--hard", commit)
 
     with pytest.raises(ValueError, match="unsupported tracked object"):
-        build_windows_snapshot(repository, commit, ("docs/status.md",))
+        build_windows_snapshot(
+            repository,
+            commit,
+            (DOCS_PATH,),
+            pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        )
 
 
 @pytest.mark.parametrize(
@@ -473,7 +669,12 @@ def test_snapshot_archive_rejects_traversal_links_and_special_files(
 
 def test_snapshot_match_detects_windows_change_during_worker(tmp_path: Path):
     repository, head = _repository(tmp_path)
-    snapshot = build_windows_snapshot(repository, head, ("docs/status.md",))
+    snapshot = build_windows_snapshot(
+        repository,
+        head,
+        (DOCS_PATH,),
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
     assert windows_snapshot_matches(repository, head, snapshot)
 
     (repository / "src" / "safe.py").write_text("VALUE = 2\n", encoding="utf-8")
@@ -501,9 +702,145 @@ def test_shadow_patch_rejects_unlisted_changed_path(
 
     assert worker._validated_shadow_patch(
         "/home/worker/shadow",
-        ("docs/status.md",),
-        ("docs/status.md",),
+        (DOCS_PATH,),
+        (DOCS_PATH,),
         baseline,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    ) is None
+
+
+def test_docs_shadow_patch_accepts_markdown_compatibly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    patch = _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        tracked_paths=(DOCS_PATH,),
+        allowed_paths=(DOCS_PATH,),
+        changed_paths=(DOCS_PATH,),
+        payloads={DOCS_PATH: b"Updated documentation.\n"},
+    )
+
+    assert patch is not None
+    assert patch.changed_paths == (DOCS_PATH,)
+
+
+def test_docs_shadow_patch_rejects_python_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+        tracked_paths=(DOCS_PATH,),
+        allowed_paths=(DOCS_PATH,),
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: b"VALUE = 2\n"},
+    ) is None
+
+
+def test_bounded_python_shadow_patch_accepts_exact_authorized_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    patch = _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=PYTHON_PATHS,
+        payloads={path: b"def bounded_value():\n    return 2\n" for path in PYTHON_PATHS},
+    )
+
+    assert patch is not None
+    assert patch.changed_paths == PYTHON_PATHS
+
+
+def test_bounded_python_shadow_patch_rejects_markdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(DOCS_PATH,),
+        payloads={DOCS_PATH: b"Updated documentation.\n"},
+    ) is None
+
+
+def test_bounded_python_shadow_patch_rejects_outside_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+    outside = "tests/test_codex_runner.py"
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(outside,),
+        payloads={outside: b"def changed():\n    return True\n"},
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b"\xff", id="non-utf8"),
+        pytest.param(b"VALUE = 'bounded'\0\n", id="nul"),
+        pytest.param(b"token=secret-value\n", id="sensitive-text"),
+    ],
+)
+def test_bounded_python_shadow_patch_rejects_unsafe_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind=CODEX_PILOT_BOUNDED_PYTHON_KIND,
+        tracked_paths=PYTHON_PATHS,
+        allowed_paths=PYTHON_PATHS,
+        changed_paths=(PYTHON_PATHS[0],),
+        payloads={PYTHON_PATHS[0]: payload},
+    ) is None
+
+
+def test_shadow_patch_rejects_unknown_pilot_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worker = WslCodexWorker(tmp_path)
+
+    assert _simulated_shadow_patch(
+        worker,
+        monkeypatch,
+        pilot_kind="unknown-supervised",
+        tracked_paths=(DOCS_PATH,),
+        allowed_paths=(DOCS_PATH,),
+        changed_paths=(DOCS_PATH,),
+        payloads={DOCS_PATH: b"Updated documentation.\n"},
     ) is None
 
 
@@ -513,7 +850,7 @@ def test_validated_patch_applies_only_to_disposable_windows_worktree(tmp_path: P
     _git(canonical, "worktree", "add", "--quiet", "-b", "codex/test", str(worktree), head)
     shadow = tmp_path / "shadow"
     _git(canonical, "clone", "--quiet", str(canonical), str(shadow))
-    changed = shadow / "docs" / "status.md"
+    changed = shadow / DOCS_PATH
     changed.write_text("Updated only in shadow.\n", encoding="utf-8")
     patch = subprocess.run(
         ["git", "diff", "--binary", "--full-index", "--no-renames"],
@@ -521,24 +858,24 @@ def test_validated_patch_applies_only_to_disposable_windows_worktree(tmp_path: P
         check=True,
         capture_output=True,
     ).stdout
-    validated = ShadowPatch(patch, ("docs/status.md",))
+    validated = ShadowPatch(patch, (DOCS_PATH,))
 
     assert apply_shadow_patch(worktree, validated)
-    assert (worktree / "docs" / "status.md").read_text(encoding="utf-8") == (
+    assert (worktree / DOCS_PATH).read_text(encoding="utf-8") == (
         "Updated only in shadow.\n"
     )
-    assert (canonical / "docs" / "status.md").read_text(encoding="utf-8") == (
+    assert (canonical / DOCS_PATH).read_text(encoding="utf-8") == (
         "Initial status.\n"
     )
 
 
 def test_apply_patch_rejects_dirty_destination(tmp_path: Path):
     repository, _head = _repository(tmp_path)
-    (repository / "docs" / "status.md").write_text("Dirty.\n", encoding="utf-8")
+    (repository / DOCS_PATH).write_text("Dirty.\n", encoding="utf-8")
 
     assert not apply_shadow_patch(
         repository,
-        ShadowPatch(b"not a patch", ("docs/status.md",)),
+        ShadowPatch(b"not a patch", (DOCS_PATH,)),
     )
 
 
@@ -562,7 +899,7 @@ def test_shadow_success_requires_cleanup(
 
     def extract(_shadow, archive, paths):
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as payload:
-            assert tuple(payload.getnames()) == ("docs/status.md",)
+            assert tuple(payload.getnames()) == (DOCS_PATH,)
         extracted_paths.append(paths)
         return True
 
@@ -578,7 +915,7 @@ def test_shadow_success_requires_cleanup(
     monkeypatch.setattr(
         worker,
         "_validated_shadow_patch",
-        lambda *_args: ShadowPatch(b"patch", ("docs/status.md",)),
+        lambda *_args, **_kwargs: ShadowPatch(b"patch", (DOCS_PATH,)),
     )
     monkeypatch.setattr(wsl_module, "apply_shadow_patch", lambda *_args: True)
     monkeypatch.setattr(worker, "_cleanup_native_workspace", lambda *_args: False)
@@ -586,14 +923,15 @@ def test_shadow_success_requires_cleanup(
     result = worker.invoke_codex(
         windows_worktree=repository,
         base_commit_sha=head,
-        allowed_paths=("docs/status.md",),
+        allowed_paths=(DOCS_PATH,),
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
         prompt="bounded prompt",
         timeout_seconds=30,
         on_started=lambda: None,
     )
 
     assert result == WslExecutionResult("failed", "wsl_temp_cleanup_failed", 3)
-    assert extracted_paths == [("docs/status.md",)]
+    assert extracted_paths == [(DOCS_PATH,)]
     assert worker.last_transfer_evidence.patch_applied
     assert not worker.last_transfer_evidence.temp_cleanup
 
@@ -870,7 +1208,8 @@ def test_shadow_cleanup_is_withheld_when_worker_exit_is_unproved(
     result = worker.invoke_codex(
         windows_worktree=repository,
         base_commit_sha=head,
-        allowed_paths=("docs/status.md",),
+        allowed_paths=(DOCS_PATH,),
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
         prompt="bounded prompt",
         timeout_seconds=30,
         on_started=lambda: None,
@@ -950,16 +1289,22 @@ def test_worker_source_has_no_shell_wrappers_or_unsafe_fallbacks():
 
 def test_snapshot_digest_is_content_bound(tmp_path: Path):
     repository, head = _repository(tmp_path)
-    snapshot = build_windows_snapshot(repository, head, ("docs/status.md",))
+    snapshot = build_windows_snapshot(
+        repository,
+        head,
+        (DOCS_PATH,),
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
 
     expected = hashlib.sha256()
-    expected.update(b"docs/status.md\0")
+    expected.update(DOCS_PATH.encode("utf-8"))
+    expected.update(b"\0")
     expected.update(b"100644\0")
-    expected.update((repository / "docs" / "status.md").read_bytes())
+    expected.update((repository / DOCS_PATH).read_bytes())
     assert snapshot.digest == expected.hexdigest()
 
     expected_source = hashlib.sha256()
-    for relative in ("docs/status.md", "src/safe.py"):
+    for relative in (DOCS_PATH, "src/safe.py"):
         expected_source.update(relative.encode("utf-8"))
         expected_source.update(b"\0")
         expected_source.update(b"100644\0")
@@ -968,7 +1313,12 @@ def test_snapshot_digest_is_content_bound(tmp_path: Path):
 
 
 def test_fake_snapshot_cannot_expose_archive_in_repr():
-    snapshot = WindowsSnapshot(b"private archive bytes", "bounded", ("docs/a.md",))
+    snapshot = WindowsSnapshot(
+        b"private archive bytes",
+        "bounded",
+        ("docs/process/a.md",),
+        CODEX_PILOT_DOCS_ONLY_KIND,
+    )
 
     assert "private archive bytes" not in repr(snapshot)
 
@@ -1046,7 +1396,7 @@ def test_real_targeted_wsl_cancellation_preserves_unrelated_process(tmp_path: Pa
 def test_real_pinned_wsl_shadow_transfer_smoke(tmp_path: Path):
     canonical, _head = _repository(tmp_path)
     process_document = canonical / "docs" / "process" / "status.md"
-    process_document.parent.mkdir()
+    process_document.parent.mkdir(parents=True, exist_ok=True)
     process_document.write_text("Initial process status.\n", encoding="utf-8")
     _git(canonical, "add", "docs/process/status.md")
     _git(canonical, "commit", "--quiet", "-m", "add process document")
@@ -1063,12 +1413,18 @@ def test_real_pinned_wsl_shadow_transfer_smoke(tmp_path: Path):
             "branch_name": branch,
             "base_commit_sha": head,
             "allowed_paths": list(allowed),
+            "pilot_kind": CODEX_PILOT_DOCS_ONLY_KIND,
         }
     )
     assert worktree_result.passed
     assert worktree_result.handle is not None
     worktree = worktree_result.handle
-    canonical_before = build_windows_snapshot(canonical, head, allowed)
+    canonical_before = build_windows_snapshot(
+        canonical,
+        head,
+        allowed,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
+    )
     started: list[bool] = []
     try:
         execution = service.invoke_codex(

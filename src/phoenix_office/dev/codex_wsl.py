@@ -20,6 +20,13 @@ from pathlib import Path, PurePosixPath
 from typing import Final
 from urllib.parse import urlsplit
 
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_KINDS,
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
+    is_safe_codex_pilot_allowed_paths,
+)
+
 WSL_CODEX_REQUIRED_VERSION: Final = "0.146.1"
 WSL_RUNTIME_PREFIX: Final = PurePosixPath(
     ".local/share/phoenix/diagnostics/task-064-codex-01461"
@@ -295,6 +302,7 @@ class WindowsSnapshot:
     archive: bytes = field(repr=False)
     digest: str
     tracked_paths: tuple[str, ...]
+    pilot_kind: str
     source_state_digest: str = field(default="", repr=False)
 
 
@@ -587,6 +595,7 @@ class WslCodexWorker:
         windows_worktree: Path,
         base_commit_sha: str,
         allowed_paths: tuple[str, ...],
+        pilot_kind: str,
         prompt: str,
         timeout_seconds: int,
         on_started: Callable[[], None],
@@ -612,6 +621,7 @@ class WslCodexWorker:
                 worktree,
                 base_commit_sha,
                 allowed_paths,
+                pilot_kind=pilot_kind,
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             return WslExecutionResult("failed", "windows_snapshot_rejected")
@@ -669,6 +679,7 @@ class WslCodexWorker:
                                 snapshot.tracked_paths,
                                 allowed_paths,
                                 baseline,
+                                pilot_kind=snapshot.pilot_kind,
                             )
                             if patch is None:
                                 result = WslExecutionResult(
@@ -1930,7 +1941,23 @@ class WslCodexWorker:
         tracked_paths: tuple[str, ...],
         allowed_paths: tuple[str, ...],
         baseline: tuple[str, str, str],
+        *,
+        pilot_kind: str,
     ) -> ShadowPatch | None:
+        if (
+            pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS
+            or not is_safe_codex_pilot_allowed_paths(
+                list(allowed_paths), pilot_kind
+            )
+        ):
+            return None
+        try:
+            if validate_transfer_paths(tracked_paths) != validate_transfer_paths(
+                allowed_paths
+            ):
+                return None
+        except ValueError:
+            return None
         platform = self._require_platform()
         if self._shadow_git_control_state(shadow) != baseline:
             return None
@@ -1970,9 +1997,13 @@ class WslCodexWorker:
         if not set(changed).issubset(set(allowed_paths)):
             return None
         for path_text in changed:
-            if not path_text.casefold().endswith(".md"):
+            if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+                path_valid = self._validate_shadow_markdown(shadow, path_text)
+            elif pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+                path_valid = self._validate_shadow_python(shadow, path_text)
+            else:
                 return None
-            if not self._validate_shadow_markdown(shadow, path_text):
+            if not path_valid:
                 return None
         added = self._run_wsl_text(
             platform,
@@ -2030,6 +2061,16 @@ class WslCodexWorker:
         return ShadowPatch(patch.stdout, tuple(sorted(changed)))
 
     def _validate_shadow_markdown(self, shadow: str, path_text: str) -> bool:
+        if not path_text.casefold().endswith(".md"):
+            return False
+        return self._validate_shadow_text_file(shadow, path_text)
+
+    def _validate_shadow_python(self, shadow: str, path_text: str) -> bool:
+        if not path_text.casefold().endswith(".py"):
+            return False
+        return self._validate_shadow_text_file(shadow, path_text)
+
+    def _validate_shadow_text_file(self, shadow: str, path_text: str) -> bool:
         platform = self._require_platform()
         absolute = f"{shadow}/{path_text}"
         symlink = self._run_wsl_text(
@@ -2230,6 +2271,8 @@ def build_windows_snapshot(
     worktree: Path,
     base_commit_sha: str,
     visible_paths: tuple[str, ...],
+    *,
+    pilot_kind: str,
 ) -> WindowsSnapshot:
     """Create a deterministic tar snapshot of explicitly worker-visible files."""
 
@@ -2248,9 +2291,14 @@ def build_windows_snapshot(
         if not path.casefold().endswith(_CONTROL_STATE_SUFFIXES)
     )
     source_paths = validate_transfer_paths(path for _mode, path in source_entries)
-    paths = validate_transfer_paths(visible_paths)
-    if not paths or any(not path.casefold().endswith(".md") for path in paths):
+    if (
+        pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS
+        or not is_safe_codex_pilot_allowed_paths(
+            list(visible_paths), pilot_kind
+        )
+    ):
         raise ValueError("worker-visible paths are invalid")
+    paths = validate_transfer_paths(visible_paths)
     entry_by_path = {path: mode for mode, path in source_entries}
     if any(path not in entry_by_path for path in paths):
         raise ValueError("worker-visible source is unavailable")
@@ -2312,6 +2360,7 @@ def build_windows_snapshot(
         buffer.getvalue(),
         digest.hexdigest(),
         paths,
+        pilot_kind,
         source_digest.hexdigest(),
     )
 
@@ -2357,12 +2406,14 @@ def windows_snapshot_matches(
             worktree,
             base_commit_sha,
             expected.tracked_paths,
+            pilot_kind=expected.pilot_kind,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return (
         current.digest == expected.digest
         and current.tracked_paths == expected.tracked_paths
+        and current.pilot_kind == expected.pilot_kind
         and current.source_state_digest == expected.source_state_digest
     )
 
