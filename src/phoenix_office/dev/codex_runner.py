@@ -407,6 +407,18 @@ def render_reviewed_codex_invocation_prompt(
     if not isinstance(task, dict):
         raise ValueError("handoff task is invalid")
     declared_paths = preflight_report["declared_changed_files"]
+    execution_class = task.get("execution_class")
+    if execution_class is None:
+        execution_class = CODEX_PILOT_DOCS_ONLY_KIND
+    if (
+        not isinstance(execution_class, str)
+        or execution_class not in CODEX_PILOT_AUTHORIZATION_KINDS
+    ):
+        raise ValueError("handoff task execution_class is invalid")
+    mandatory_boundaries = _reviewed_invocation_boundaries(
+        execution_class=execution_class,
+        declared_paths=declared_paths,
+    )
     external_checks = preflight_report["external_checks_required"]
     headings = package["required_pr_body_headings"]
     return "\n".join(
@@ -443,6 +455,21 @@ def render_reviewed_codex_invocation_prompt(
             *_prompt_bullets(headings),
             "",
             "## 9. Mandatory Execution Boundaries",
+            *mandatory_boundaries,
+            "",
+            "## 10. External Checks Not Claimed",
+            *_prompt_bullets(external_checks),
+        ]
+    )
+
+
+def _reviewed_invocation_boundaries(
+    *,
+    execution_class: str,
+    declared_paths: object,
+) -> tuple[str, ...]:
+    if execution_class == CODEX_PILOT_DOCS_ONLY_KIND:
+        return (
             "- one issue, one branch, one PR",
             "- modify only the declared documentation files",
             "- do not broaden scope",
@@ -458,10 +485,36 @@ def render_reviewed_codex_invocation_prompt(
                 "- stop without mutation when any scope or identity binding "
                 "is ambiguous"
             ),
-            "",
-            "## 10. External Checks Not Claimed",
-            *_prompt_bullets(external_checks),
-        ]
+        )
+    if execution_class != CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        raise ValueError("handoff task execution_class is invalid")
+    if (
+        not isinstance(declared_paths, list)
+        or not declared_paths
+        or any(type(path) is not str or not path for path in declared_paths)
+    ):
+        raise ValueError("reviewed Python paths are invalid")
+    reviewed_paths = ", ".join(declared_paths)
+    return (
+        "- one issue, one branch, one PR",
+        "- one reviewed attempt only",
+        f"- modify only the exact reviewed Python paths: {reviewed_paths}",
+        "- do not modify any extra path",
+        "- do not broaden scope",
+        "- do not use private customer data",
+        "- the worker must not access the network or GitHub",
+        "- the worker must not commit or push",
+        "- run and report every required validation",
+        "- Phoenix may open one PR and must stop",
+        "- never approve or merge",
+        (
+            "- do not comment, label, dispatch workflows, automatically "
+            "retry, schedule, queue, or continue in the background"
+        ),
+        (
+            "- stop without mutation when any scope or identity binding "
+            "is ambiguous"
+        ),
     )
 
 
@@ -3553,7 +3606,19 @@ def _pull_request_body(
     validation_commands: tuple[str, ...],
     pilot_kind: str = CODEX_PILOT_DOCS_ONLY_KIND,
 ) -> str:
+    if pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS:
+        raise ValueError("pilot_kind is invalid")
     python_change = pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND
+    out_of_scope_confirmation = (
+        (
+            "No worker approval or merge authority was added. No retry or "
+            "background-resume authority was added. No changes outside the "
+            "exact reviewed allowlist were permitted. No broader execution "
+            "class was granted."
+        )
+        if python_change
+        else "No product code, execution authority, approval, or merge was added."
+    )
     content = {
         "Summary": (
             "Phoenix supervised a bounded Python Codex change."
@@ -3566,9 +3631,7 @@ def _pull_request_body(
             else "Only reviewed Markdown paths were eligible for publication."
         ),
         "Changed files": "\n".join(f"- `{path}`" for path in changed_paths),
-        "Out-of-scope confirmation": (
-            "No product code, execution authority, approval, or merge was added."
-        ),
+        "Out-of-scope confirmation": out_of_scope_confirmation,
         "Validation performed": "\n".join(
             f"- `{command}`: PASS" for command in validation_commands
         ),
