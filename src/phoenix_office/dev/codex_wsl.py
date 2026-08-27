@@ -14,11 +14,19 @@ import tarfile
 import time
 import unicodedata
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Final
 from urllib.parse import urlsplit
+
+from phoenix_office.core import (
+    CODEX_PILOT_AUTHORIZATION_KINDS,
+    CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    CODEX_PILOT_DOCS_ONLY_KIND,
+    is_safe_codex_pilot_allowed_paths,
+)
 
 WSL_CODEX_REQUIRED_VERSION: Final = "0.146.1"
 WSL_RUNTIME_PREFIX: Final = PurePosixPath(
@@ -40,6 +48,7 @@ MAX_SNAPSHOT_BYTES: Final = 128_000_000
 MAX_SNAPSHOT_FILES: Final = 50_000
 MAX_PATCH_BYTES: Final = 2_000_000
 MAX_MARKDOWN_BYTES: Final = 1_000_000
+MAX_SENSITIVE_FINDINGS: Final = 10_000
 MAX_PROXY_VALUE_BYTES: Final = 4096
 LINUX_PATH: Final = "/usr/local/bin:/usr/bin:/bin"
 WSL_PROXY_NAMES: Final = (
@@ -79,6 +88,31 @@ _SENSITIVE_PATTERNS: Final = (
     re.compile(r"(?i)\b(?:password|secret|token)\s*[:=]\s*\S+"),
     re.compile(r"(?i)(?:[A-Z]:\\Users\\|/home/|/Users/)[^\s`]+"),
 )
+
+
+def _decode_bounded_utf8_text(payload: bytes) -> str | None:
+    if len(payload) > MAX_MARKDOWN_BYTES or b"\0" in payload:
+        return None
+    try:
+        return payload.decode("utf-8")
+    except UnicodeError:
+        return None
+
+
+def _bounded_sensitive_findings(
+    text: str,
+) -> Counter[tuple[int, str]] | None:
+    findings: Counter[tuple[int, str]] = Counter()
+    finding_count = 0
+    for pattern_index, pattern in enumerate(_SENSITIVE_PATTERNS):
+        for match in pattern.finditer(text):
+            finding_count += 1
+            if finding_count > MAX_SENSITIVE_FINDINGS:
+                return None
+            findings[(pattern_index, match.group(0))] += 1
+    return findings
+
+
 _LINUX_INVOCATION_SUPERVISOR: Final = """\
 import json
 import os
@@ -295,6 +329,7 @@ class WindowsSnapshot:
     archive: bytes = field(repr=False)
     digest: str
     tracked_paths: tuple[str, ...]
+    pilot_kind: str
     source_state_digest: str = field(default="", repr=False)
 
 
@@ -587,6 +622,7 @@ class WslCodexWorker:
         windows_worktree: Path,
         base_commit_sha: str,
         allowed_paths: tuple[str, ...],
+        pilot_kind: str,
         prompt: str,
         timeout_seconds: int,
         on_started: Callable[[], None],
@@ -612,6 +648,7 @@ class WslCodexWorker:
                 worktree,
                 base_commit_sha,
                 allowed_paths,
+                pilot_kind=pilot_kind,
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             return WslExecutionResult("failed", "windows_snapshot_rejected")
@@ -669,6 +706,7 @@ class WslCodexWorker:
                                 snapshot.tracked_paths,
                                 allowed_paths,
                                 baseline,
+                                pilot_kind=snapshot.pilot_kind,
                             )
                             if patch is None:
                                 result = WslExecutionResult(
@@ -1930,7 +1968,23 @@ class WslCodexWorker:
         tracked_paths: tuple[str, ...],
         allowed_paths: tuple[str, ...],
         baseline: tuple[str, str, str],
+        *,
+        pilot_kind: str,
     ) -> ShadowPatch | None:
+        if (
+            pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS
+            or not is_safe_codex_pilot_allowed_paths(
+                list(allowed_paths), pilot_kind
+            )
+        ):
+            return None
+        try:
+            if validate_transfer_paths(tracked_paths) != validate_transfer_paths(
+                allowed_paths
+            ):
+                return None
+        except ValueError:
+            return None
         platform = self._require_platform()
         if self._shadow_git_control_state(shadow) != baseline:
             return None
@@ -1970,9 +2024,13 @@ class WslCodexWorker:
         if not set(changed).issubset(set(allowed_paths)):
             return None
         for path_text in changed:
-            if not path_text.casefold().endswith(".md"):
+            if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+                path_valid = self._validate_shadow_markdown(shadow, path_text)
+            elif pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+                path_valid = self._validate_shadow_python(shadow, path_text)
+            else:
                 return None
-            if not self._validate_shadow_markdown(shadow, path_text):
+            if not path_valid:
                 return None
         added = self._run_wsl_text(
             platform,
@@ -2030,6 +2088,37 @@ class WslCodexWorker:
         return ShadowPatch(patch.stdout, tuple(sorted(changed)))
 
     def _validate_shadow_markdown(self, shadow: str, path_text: str) -> bool:
+        if not path_text.casefold().endswith(".md"):
+            return False
+        return self._validate_shadow_text_file(shadow, path_text)
+
+    def _validate_shadow_python(self, shadow: str, path_text: str) -> bool:
+        if not path_text.casefold().endswith(".py"):
+            return False
+        resulting_text = self._read_validated_shadow_text_file(shadow, path_text)
+        baseline_text = self._read_shadow_head_text_file(shadow, path_text)
+        if resulting_text is None or baseline_text is None:
+            return False
+        resulting_findings = _bounded_sensitive_findings(resulting_text)
+        baseline_findings = _bounded_sensitive_findings(baseline_text)
+        if resulting_findings is None or baseline_findings is None:
+            return False
+        return all(
+            count <= baseline_findings.get(finding, 0)
+            for finding, count in resulting_findings.items()
+        )
+
+    def _validate_shadow_text_file(self, shadow: str, path_text: str) -> bool:
+        text = self._read_validated_shadow_text_file(shadow, path_text)
+        return text is not None and not any(
+            pattern.search(text) for pattern in _SENSITIVE_PATTERNS
+        )
+
+    def _read_validated_shadow_text_file(
+        self,
+        shadow: str,
+        path_text: str,
+    ) -> str | None:
         platform = self._require_platform()
         absolute = f"{shadow}/{path_text}"
         symlink = self._run_wsl_text(
@@ -2061,24 +2150,44 @@ class WslCodexWorker:
             result is None
             for result in (symlink, file_test, realpath, metadata, payload)
         ):
-            return False
+            return None
         if symlink.returncode == 0 or file_test.returncode != 0:
-            return False
+            return None
         if realpath.returncode != 0 or not _path_within_posix(
             realpath.stdout.strip(), shadow
         ):
-            return False
+            return None
         if metadata.returncode != 0 or metadata.stdout.strip() != "regular file:1":
-            return False
-        if payload.returncode != 0 or len(payload.stdout) > MAX_MARKDOWN_BYTES:
-            return False
-        if b"\0" in payload.stdout:
-            return False
+            return None
+        if payload.returncode != 0:
+            return None
+        return _decode_bounded_utf8_text(payload.stdout)
+
+    def _read_shadow_head_text_file(
+        self,
+        shadow: str,
+        path_text: str,
+    ) -> str | None:
         try:
-            text = payload.stdout.decode("utf-8")
-        except UnicodeError:
-            return False
-        return not any(pattern.search(text) for pattern in _SENSITIVE_PATTERNS)
+            if validate_transfer_paths((path_text,)) != (path_text,):
+                return None
+        except ValueError:
+            return None
+        baseline = self._run_wsl_bytes(
+            self._require_platform(),
+            (
+                "/usr/bin/git",
+                "-C",
+                shadow,
+                "cat-file",
+                "blob",
+                f"HEAD:{path_text}",
+            ),
+            timeout=30,
+        )
+        if baseline is None or baseline.returncode != 0:
+            return None
+        return _decode_bounded_utf8_text(baseline.stdout)
 
     def _run_wsl_text(
         self,
@@ -2230,6 +2339,8 @@ def build_windows_snapshot(
     worktree: Path,
     base_commit_sha: str,
     visible_paths: tuple[str, ...],
+    *,
+    pilot_kind: str,
 ) -> WindowsSnapshot:
     """Create a deterministic tar snapshot of explicitly worker-visible files."""
 
@@ -2248,9 +2359,14 @@ def build_windows_snapshot(
         if not path.casefold().endswith(_CONTROL_STATE_SUFFIXES)
     )
     source_paths = validate_transfer_paths(path for _mode, path in source_entries)
-    paths = validate_transfer_paths(visible_paths)
-    if not paths or any(not path.casefold().endswith(".md") for path in paths):
+    if (
+        pilot_kind not in CODEX_PILOT_AUTHORIZATION_KINDS
+        or not is_safe_codex_pilot_allowed_paths(
+            list(visible_paths), pilot_kind
+        )
+    ):
         raise ValueError("worker-visible paths are invalid")
+    paths = validate_transfer_paths(visible_paths)
     entry_by_path = {path: mode for mode, path in source_entries}
     if any(path not in entry_by_path for path in paths):
         raise ValueError("worker-visible source is unavailable")
@@ -2312,6 +2428,7 @@ def build_windows_snapshot(
         buffer.getvalue(),
         digest.hexdigest(),
         paths,
+        pilot_kind,
         source_digest.hexdigest(),
     )
 
@@ -2357,12 +2474,14 @@ def windows_snapshot_matches(
             worktree,
             base_commit_sha,
             expected.tracked_paths,
+            pilot_kind=expected.pilot_kind,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
     return (
         current.digest == expected.digest
         and current.tracked_paths == expected.tracked_paths
+        and current.pilot_kind == expected.pilot_kind
         and current.source_state_digest == expected.source_state_digest
     )
 

@@ -2626,7 +2626,8 @@ def test_system_service_invokes_wsl_shadow_with_exact_authorized_identity(
         (),
         "worktrees",
         "config",
-        (ALLOWED_PATH,),
+        PYTHON_ALLOWED_PATHS,
+        "bounded-python-supervised",
     )
 
     result = service.invoke_codex(
@@ -2641,7 +2642,8 @@ def test_system_service_invokes_wsl_shadow_with_exact_authorized_identity(
         {
             "windows_worktree": handle.path,
             "base_commit_sha": BASE_SHA,
-            "allowed_paths": (ALLOWED_PATH,),
+            "allowed_paths": PYTHON_ALLOWED_PATHS,
+            "pilot_kind": "bounded-python-supervised",
             "prompt": "exact reviewed prompt",
             "timeout_seconds": 90,
             "on_started": worker.invocations[0]["on_started"],

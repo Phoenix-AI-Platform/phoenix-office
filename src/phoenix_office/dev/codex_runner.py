@@ -1748,6 +1748,7 @@ class SystemCodexPilotServices:
                 windows_worktree=worktree.path,
                 base_commit_sha=worktree.base_commit_sha,
                 allowed_paths=worktree.allowed_paths,
+                pilot_kind=worktree.pilot_kind,
                 prompt=prompt,
                 timeout_seconds=timeout_seconds,
                 on_started=on_started,
