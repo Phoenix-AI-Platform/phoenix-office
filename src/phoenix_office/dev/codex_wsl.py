@@ -51,6 +51,9 @@ MAX_MARKDOWN_BYTES: Final = 1_000_000
 MAX_SENSITIVE_FINDINGS: Final = 10_000
 MAX_PROXY_VALUE_BYTES: Final = 4096
 LINUX_PATH: Final = "/usr/local/bin:/usr/bin:/bin"
+_BOUNDED_PYTHON_REASONING_CONFIGURATION: Final = (
+    'model_reasoning_effort="medium"'
+)
 WSL_PROXY_NAMES: Final = (
     ("HTTP_PROXY", True),
     ("HTTPS_PROXY", True),
@@ -111,6 +114,14 @@ def _bounded_sensitive_findings(
                 return None
             findings[(pattern_index, match.group(0))] += 1
     return findings
+
+
+def _model_inference_arguments(pilot_kind: str) -> tuple[str, ...]:
+    if pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+        return ()
+    if pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return ("-c", _BOUNDED_PYTHON_REASONING_CONFIGURATION)
+    raise ValueError("unsupported Codex pilot kind")
 
 
 _LINUX_INVOCATION_SUPERVISOR: Final = """\
@@ -493,6 +504,7 @@ class WslCodexWorker:
                     prompt=prompt,
                     timeout_seconds=min(timeout_seconds, 120),
                     on_started=lambda: None,
+                    pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
                 )
                 if not execution.worker_exit_proved:
                     result = WslGateResult(False, "wsl_process_control_uncertain")
@@ -681,6 +693,7 @@ class WslCodexWorker:
                         prompt=prompt,
                         timeout_seconds=timeout_seconds,
                         on_started=on_started,
+                        pilot_kind=pilot_kind,
                     )
                     if not execution.worker_exit_proved:
                         result = execution
@@ -1093,6 +1106,7 @@ class WslCodexWorker:
         prompt: str,
         timeout_seconds: int,
         on_started: Callable[[], None],
+        pilot_kind: str,
     ) -> tuple[WslExecutionResult, tuple[str, ...]]:
         spec = self._runtime_spec
         if spec is None or not self._runtime_is_current(spec):
@@ -1101,6 +1115,13 @@ class WslCodexWorker:
                     "failed",
                     "wsl_codex_qualified_runtime_unavailable",
                 ),
+                (),
+            )
+        try:
+            inference_arguments = _model_inference_arguments(pilot_kind)
+        except ValueError:
+            return (
+                WslExecutionResult("failed", "wsl_codex_pilot_kind_invalid"),
                 (),
             )
         timeout_value = max(1, int(timeout_seconds))
@@ -1126,6 +1147,7 @@ class WslCodexWorker:
             "--ignore-user-config",
             "--ignore-rules",
             "--strict-config",
+            *inference_arguments,
             "--cd",
             workspace,
             "-c",
@@ -1511,6 +1533,7 @@ class WslCodexWorker:
             prompt=prompt,
             timeout_seconds=timeout_seconds,
             on_started=lambda: None,
+            pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
         )
         if execution.status != "succeeded":
             return False, execution.worker_exit_proved

@@ -98,6 +98,64 @@ def _controlled_model_worker(
     return worker, control
 
 
+def _captured_model_codex_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pilot_kind: str,
+) -> tuple[str, ...]:
+    process = _FakeModelProcess(
+        ('{"type":"turn.completed","usage":{"total_tokens":7}}\n', "")
+    )
+    worker, _control = _controlled_model_worker(tmp_path, monkeypatch, process)
+    observed: list[tuple[str, ...]] = []
+
+    def capture(argv, **_kwargs):
+        observed.append(tuple(str(argument) for argument in argv))
+        return process
+
+    monkeypatch.setattr(worker, "_host_popen", capture)
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+        pilot_kind=pilot_kind,
+    )
+
+    assert result == WslExecutionResult("succeeded", "wsl_codex_completed", 7)
+    assert messages == ()
+    assert len(observed) == 1
+    runtime = worker._runtime_spec
+    assert runtime is not None
+    executable_index = observed[0].index(str(runtime.executable))
+    return observed[0][executable_index + 1 :]
+
+
+def _expected_docs_model_arguments(workspace: str) -> tuple[str, ...]:
+    return (
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "--ephemeral",
+        "--json",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+        "--cd",
+        workspace,
+        "-c",
+        "sandbox_workspace_write.network_access=false",
+        "-c",
+        'web_search="disabled"',
+        "--color",
+        "never",
+        "-",
+    )
+
+
 def _git(cwd: Path, *arguments: str) -> str:
     completed = subprocess.run(
         ["git", *arguments],
@@ -1130,6 +1188,73 @@ def test_shadow_success_requires_cleanup(
     assert not worker.last_transfer_evidence.temp_cleanup
 
 
+def test_docs_model_argv_remains_unchanged_without_reasoning_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    arguments = _captured_model_codex_arguments(
+        tmp_path,
+        monkeypatch,
+        CODEX_PILOT_DOCS_ONLY_KIND,
+    )
+
+    assert arguments == _expected_docs_model_arguments("/home/worker/shadow")
+    assert not any("reasoning" in argument for argument in arguments)
+
+
+def test_bounded_python_model_argv_pins_only_medium_reasoning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    arguments = _captured_model_codex_arguments(
+        tmp_path,
+        monkeypatch,
+        CODEX_PILOT_BOUNDED_PYTHON_KIND,
+    )
+    expected = list(_expected_docs_model_arguments("/home/worker/shadow"))
+    insertion_index = expected.index("--cd")
+    expected[insertion_index:insertion_index] = [
+        "-c",
+        'model_reasoning_effort="medium"',
+    ]
+
+    assert arguments == tuple(expected)
+    assert arguments.count('model_reasoning_effort="medium"') == 1
+    assert "--model" not in arguments
+    assert not any(argument.startswith("model=") for argument in arguments)
+    assert not any("provider" in argument for argument in arguments)
+
+
+def test_unknown_model_pilot_kind_fails_before_process_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fail_launch(*_args, **_kwargs):
+        pytest.fail("unknown pilot kind must fail before model launch")
+
+    worker = WslCodexWorker(tmp_path, host_popen=fail_launch)
+    worker._runtime_spec = _runtime(tmp_path / "runtime")
+    monkeypatch.setattr(worker, "_runtime_is_current", lambda _spec: True)
+    monkeypatch.setattr(
+        worker,
+        "_prepare_invocation_control",
+        lambda _platform: pytest.fail(
+            "unknown pilot kind must fail before invocation control setup"
+        ),
+    )
+
+    result, messages = worker._run_model(
+        workspace="/home/worker/shadow",
+        prompt="bounded",
+        timeout_seconds=30,
+        on_started=lambda: None,
+        pilot_kind="unknown-supervised",
+    )
+
+    assert result == WslExecutionResult("failed", "wsl_codex_pilot_kind_invalid")
+    assert messages == ()
+
+
 def test_model_cancellation_terminates_target_and_proves_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1149,6 +1274,7 @@ def test_model_cancellation_terminates_target_and_proves_exit(
         prompt="bounded",
         timeout_seconds=30,
         on_started=lambda: None,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result == WslExecutionResult("cancelled", "wsl_codex_cancelled")
@@ -1191,6 +1317,7 @@ def test_model_cancellation_fails_closed_when_process_control_is_uncertain(
         prompt="bounded",
         timeout_seconds=30,
         on_started=lambda: None,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result.category == "wsl_process_control_uncertain"
@@ -1216,6 +1343,7 @@ def test_model_timeout_requires_target_exit_proof(
         prompt="bounded",
         timeout_seconds=30,
         on_started=lambda: None,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result == WslExecutionResult("timed_out", "wsl_codex_timed_out")
@@ -1240,6 +1368,7 @@ def test_model_timeout_fails_closed_when_target_exit_is_unproved(
         prompt="bounded",
         timeout_seconds=30,
         on_started=lambda: None,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result.category == "wsl_process_control_uncertain"
@@ -1273,6 +1402,7 @@ def test_invocation_start_audit_failure_terminates_and_proves_target_exit(
         prompt="bounded",
         timeout_seconds=30,
         on_started=audit_failure,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result == WslExecutionResult("failed", "invocation_start_audit_failed")
@@ -1309,6 +1439,7 @@ def test_model_success_still_requires_guest_exit_proof(
         prompt="bounded",
         timeout_seconds=30,
         on_started=lambda: None,
+        pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
     assert result == WslExecutionResult("succeeded", "wsl_codex_completed", 7)
