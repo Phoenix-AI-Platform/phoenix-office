@@ -1161,7 +1161,18 @@ def test_shadow_success_requires_cleanup(
     monkeypatch.setattr(
         worker,
         "_run_model",
-        lambda **_kwargs: (WslExecutionResult("succeeded", "ok", 3), ()),
+        lambda **_kwargs: (
+            WslExecutionResult(
+                "succeeded",
+                "ok",
+                3,
+                input_tokens=2,
+                cached_input_tokens=1,
+                output_tokens=1,
+                reasoning_output_tokens=1,
+            ),
+            (),
+        ),
     )
     monkeypatch.setattr(wsl_module, "windows_snapshot_matches", lambda *_args: True)
     monkeypatch.setattr(
@@ -1182,7 +1193,15 @@ def test_shadow_success_requires_cleanup(
         on_started=lambda: None,
     )
 
-    assert result == WslExecutionResult("failed", "wsl_temp_cleanup_failed", 3)
+    assert result == WslExecutionResult(
+        "failed",
+        "wsl_temp_cleanup_failed",
+        3,
+        input_tokens=2,
+        cached_input_tokens=1,
+        output_tokens=1,
+        reasoning_output_tokens=1,
+    )
     assert extracted_paths == [(DOCS_PATH,)]
     assert worker.last_transfer_evidence.patch_applied
     assert not worker.last_transfer_evidence.temp_cleanup
@@ -1415,7 +1434,11 @@ def test_model_success_still_requires_guest_exit_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    stdout = '{"type":"turn.completed","usage":{"total_tokens":7}}\n'
+    stdout = (
+        '{"type":"turn.completed","usage":{"total_tokens":7,'
+        '"input_tokens":5,"cached_input_tokens":2,"output_tokens":2,'
+        '"reasoning_output_tokens":1}}\n'
+    )
     worker, _control = _controlled_model_worker(
         tmp_path,
         monkeypatch,
@@ -1442,10 +1465,100 @@ def test_model_success_still_requires_guest_exit_proof(
         pilot_kind=CODEX_PILOT_DOCS_ONLY_KIND,
     )
 
-    assert result == WslExecutionResult("succeeded", "wsl_codex_completed", 7)
+    assert result == WslExecutionResult(
+        "succeeded",
+        "wsl_codex_completed",
+        7,
+        input_tokens=5,
+        cached_input_tokens=2,
+        output_tokens=2,
+        reasoning_output_tokens=1,
+    )
     assert proofs == [True]
     assert cleanups == [True]
     assert messages == ()
+
+
+def test_codex_usage_components_are_bounded_and_total_remains_authoritative():
+    valid = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":100,'
+        '"input_tokens":60,"cached_input_tokens":40,"output_tokens":30,'
+        '"reasoning_output_tokens":20}}\n'
+    )
+    missing = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":9}}\n'
+    )
+    malformed = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":101,'
+        '"input_tokens":-1,"cached_input_tokens":true,'
+        '"output_tokens":1000000001,"reasoning_output_tokens":"20"}}\n'
+    )
+    fallback = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":'
+        '{"input_tokens":3,"output_tokens":4}}\n'
+    )
+    malformed_total = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":"invalid"}}\n'
+    )
+
+    assert valid["usage_tokens"] == 100
+    assert valid["input_tokens"] == 60
+    assert valid["cached_input_tokens"] == 40
+    assert valid["output_tokens"] == 30
+    assert valid["reasoning_output_tokens"] == 20
+    assert valid["usage_tokens"] != sum(
+        int(valid[field])
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    )
+    assert all(
+        missing[field] is None
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    )
+    assert malformed["usage_tokens"] == 101
+    assert all(
+        malformed[field] is None
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    )
+    assert fallback["usage_tokens"] == 7
+    assert malformed_total["usage_tokens"] is None
+
+
+def test_only_final_turn_completed_usage_object_is_parsed_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[object] = []
+    original = wsl_module._codex_usage_telemetry
+
+    def observe(value: object) -> dict[str, int | None]:
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(wsl_module, "_codex_usage_telemetry", observe)
+
+    result = wsl_module._parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":3}}\n'
+        '{"type":"turn.completed","usage":{"total_tokens":5,'
+        '"input_tokens":4}}\n'
+    )
+
+    assert result["usage_tokens"] == 5
+    assert result["input_tokens"] == 4
+    assert calls == [{"total_tokens": 5, "input_tokens": 4}]
 
 
 def test_targeted_stop_uses_only_selected_invocation_control(

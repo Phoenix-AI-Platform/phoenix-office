@@ -269,6 +269,10 @@ class CodexExecutionResult:
     status: str
     category: str
     usage_tokens: int | None = None
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,6 +678,10 @@ def bounded_codex_pilot_run_result(
         "validation_categories": [],
         "usage_category": "usage_unknown",
         "observed_usage_tokens": None,
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
         "authorized_budget_tokens": None,
         "usage_overage_tokens": None,
         "usage_ratio_basis_points": None,
@@ -839,6 +847,7 @@ class SupervisedCodexPilotRunner:
             budget_ceiling,
         )
         result.update(usage_telemetry)
+        result.update(_bounded_usage_component_telemetry(execution))
         observed_usage = usage_telemetry["observed_usage_tokens"]
         usage_category = _usage_category(
             observed_usage if type(observed_usage) is int else None,
@@ -1344,6 +1353,21 @@ def _bounded_usage_telemetry(
     return telemetry
 
 
+def _bounded_usage_component_telemetry(
+    execution: CodexExecutionResult,
+) -> dict[str, int | None]:
+    return {
+        "input_tokens": _bounded_usage_token_count(execution.input_tokens),
+        "cached_input_tokens": _bounded_usage_token_count(
+            execution.cached_input_tokens
+        ),
+        "output_tokens": _bounded_usage_token_count(execution.output_tokens),
+        "reasoning_output_tokens": _bounded_usage_token_count(
+            execution.reasoning_output_tokens
+        ),
+    }
+
+
 def _usage_category(observed: int | None, ceiling: int) -> str:
     if observed is None:
         return "usage_unknown"
@@ -1825,9 +1849,13 @@ class SystemCodexPilotServices:
                 on_started=on_started,
             )
             return CodexExecutionResult(
-                result.status,
-                result.category,
-                result.usage_tokens,
+                status=result.status,
+                category=result.category,
+                usage_tokens=result.usage_tokens,
+                input_tokens=result.input_tokens,
+                cached_input_tokens=result.cached_input_tokens,
+                output_tokens=result.output_tokens,
+                reasoning_output_tokens=result.reasoning_output_tokens,
             )
         runtime = self.runtime_gate()
         if not runtime.passed:
@@ -2473,29 +2501,29 @@ class SystemCodexPilotServices:
                 )
                 return CodexExecutionResult("failed", category)
         if process.returncode != 0:
-            return CodexExecutionResult(
+            return _codex_execution_result_from_parsed(
                 "failed",
                 _codex_failure_category(
                     parsed["failure_category"],
                     diagnostic_category,
                     fallback="codex_nonzero_exit",
                 ),
-                parsed["usage_tokens"],
+                parsed,
             )
         if parsed["fatal"] or not parsed["turn_completed"]:
-            return CodexExecutionResult(
+            return _codex_execution_result_from_parsed(
                 "failed",
                 _codex_failure_category(
                     parsed["failure_category"],
                     diagnostic_category,
                     fallback="codex_structured_failure",
                 ),
-                parsed["usage_tokens"],
+                parsed,
             )
-        return CodexExecutionResult(
+        return _codex_execution_result_from_parsed(
             "succeeded",
             "codex_completed",
-            parsed["usage_tokens"],
+            parsed,
         )
 
     @staticmethod
@@ -3426,13 +3454,17 @@ def _consume_codex_diagnostic_stream(stream: TextIOBase) -> str | None:
 def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
     fatal = False
     turn_completed = False
-    usage_tokens: int | None = None
+    final_usage: object = None
     failure_category: str | None = None
     if not hasattr(lines, "__iter__"):
         return {
             "fatal": True,
             "turn_completed": False,
             "usage_tokens": None,
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "output_tokens": None,
+            "reasoning_output_tokens": None,
             "failure_category": None,
         }
     for line_number, line in enumerate(lines, start=1):
@@ -3441,6 +3473,10 @@ def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
                 "fatal": True,
                 "turn_completed": False,
                 "usage_tokens": None,
+                "input_tokens": None,
+                "cached_input_tokens": None,
+                "output_tokens": None,
+                "reasoning_output_tokens": None,
                 "failure_category": failure_category,
             }
         if len(line.encode("utf-8", errors="replace")) > MAX_JSONL_LINE_BYTES:
@@ -3448,6 +3484,10 @@ def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
                 "fatal": True,
                 "turn_completed": False,
                 "usage_tokens": None,
+                "input_tokens": None,
+                "cached_input_tokens": None,
+                "output_tokens": None,
+                "reasoning_output_tokens": None,
                 "failure_category": failure_category,
             }
         failure_category = _codex_failure_category(
@@ -3468,13 +3508,36 @@ def _parse_codex_jsonl_lines(lines: object) -> dict[str, object]:
             fatal = True
         if event_type == "turn.completed":
             turn_completed = True
-            usage_tokens = _usage_tokens(event.get("usage"))
+            final_usage = event.get("usage")
+    usage = _codex_usage_telemetry(final_usage)
     return {
         "fatal": fatal,
         "turn_completed": turn_completed,
-        "usage_tokens": usage_tokens,
+        **usage,
         "failure_category": failure_category,
     }
+
+
+def _codex_execution_result_from_parsed(
+    status: str,
+    category: object,
+    parsed: Mapping[str, object],
+) -> CodexExecutionResult:
+    return CodexExecutionResult(
+        status=status,
+        category=(
+            category if isinstance(category, str) else "codex_structured_failure"
+        ),
+        usage_tokens=_bounded_usage_token_count(parsed.get("usage_tokens")),
+        input_tokens=_bounded_usage_token_count(parsed.get("input_tokens")),
+        cached_input_tokens=_bounded_usage_token_count(
+            parsed.get("cached_input_tokens")
+        ),
+        output_tokens=_bounded_usage_token_count(parsed.get("output_tokens")),
+        reasoning_output_tokens=_bounded_usage_token_count(
+            parsed.get("reasoning_output_tokens")
+        ),
+    )
 
 
 def _bounded_codex_diagnostic_category(value: str) -> str | None:
@@ -3556,6 +3619,26 @@ def _usage_tokens(value: object) -> int | None:
     if input_tokens is not None and output_tokens is not None:
         return _bounded_usage_token_count(input_tokens + output_tokens)
     return None
+
+
+def _codex_usage_telemetry(value: object) -> dict[str, int | None]:
+    telemetry = {
+        "usage_tokens": _usage_tokens(value),
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+    }
+    if not isinstance(value, dict):
+        return telemetry
+    for field_name in (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    ):
+        telemetry[field_name] = _bounded_usage_token_count(value.get(field_name))
+    return telemetry
 
 
 def _bounded_usage_token_count(value: object) -> int | None:
