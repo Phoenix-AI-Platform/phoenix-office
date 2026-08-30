@@ -567,6 +567,7 @@ def _reviewed_invocation_boundaries(
         "- edit only the exact reviewed Python files listed above",
         "- do not modify any extra path",
         "- do not broaden scope",
+        "- do not use private customer data",
         "- the worker must not access the network or GitHub",
         "- the worker must not stage, commit, push, or open a pull request",
         "- run every required validation command listed above",
@@ -576,6 +577,10 @@ def _reviewed_invocation_boundaries(
             "in the background"
         ),
         "- stop within this supervised authority",
+        (
+            "- stop without mutation when any scope or identity binding "
+            "is ambiguous"
+        ),
         (
             "- Phoenix owns publication, final CI, architecture review, approval, "
             "merge, retry, replacement authorization, and background-resume "

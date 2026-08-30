@@ -3917,12 +3917,17 @@ def test_bounded_python_reviewed_invocation_keeps_only_worker_boundaries() -> No
     assert "markdown" not in section.casefold()
     assert "- one reviewed attempt only" in section
     assert "- do not modify any extra path" in section
+    assert "- do not use private customer data" in section
     assert "must not access the network or GitHub" in section
     assert "must not stage, commit, push, or open a pull request" in section
     assert "- do not approve or merge" in section
     assert "- do not retry, create a replacement authorization" in section
     assert "resume in the background" in section
     assert "- stop within this supervised authority" in section
+    assert (
+        "- stop without mutation when any scope or identity binding is ambiguous"
+        in section
+    )
     assert (
         "Phoenix owns publication, final CI, architecture review, approval, merge, "
         "retry, replacement authorization, and background-resume decisions."
