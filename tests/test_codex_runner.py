@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import io
 import json
@@ -322,7 +323,7 @@ def _python_evidence() -> dict[str, object]:
     return evidence
 
 
-def _reviewed_prompt(handoff: dict[str, object]) -> str:
+def _reviewed_preflight_report(handoff: dict[str, object]) -> dict[str, object]:
     task = handoff["task"]
     assert isinstance(task, dict)
     source = task["source"]
@@ -332,18 +333,36 @@ def _reviewed_prompt(handoff: dict[str, object]) -> str:
     allowed_paths = allowed_resources["paths"]
     assert isinstance(allowed_paths, list)
     issue_number = int(str(source["uri"]).rsplit("/", 1)[1])
+    return {
+        "source_issue_number": issue_number,
+        "repository": handoff["repository"],
+        "base_branch": handoff["base_branch"],
+        "declared_changed_files": allowed_paths,
+        "external_checks_required": list(
+            runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+        ),
+    }
+
+
+def _reviewed_prompt(handoff: dict[str, object]) -> str:
     return render_reviewed_codex_invocation_prompt(
         package=handoff,
-        preflight_report={
-            "source_issue_number": issue_number,
-            "repository": handoff["repository"],
-            "base_branch": handoff["base_branch"],
-            "declared_changed_files": allowed_paths,
-            "external_checks_required": list(
-                runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
-            ),
-        },
+        preflight_report=_reviewed_preflight_report(handoff),
     )
+
+
+def _representative_python_handoff() -> dict[str, object]:
+    handoff = _python_handoff()
+    handoff["prompt"] = (
+        "Reviewed task TASK-081: Reject successor self-dependency. "
+        "Objective: Develop Python code and focused tests that reject successor "
+        "self-dependency. Modify only these reviewed Python paths: "
+        f"{', '.join(PYTHON_ALLOWED_PATHS)}. Acceptance criteria: "
+        "1. Self-dependency is rejected. 2. Existing deterministic ranking is "
+        "preserved. Constraints: 1. Keep GitHub access read-only. "
+        "2. Do not broaden execution authority. Stop after the authorized edit."
+    )
+    return handoff
 
 
 @dataclass
@@ -3851,26 +3870,110 @@ def test_docs_reviewed_invocation_boundaries_remain_exactly_unchanged() -> None:
     )
 
 
-def test_bounded_python_reviewed_invocation_is_class_and_path_aware() -> None:
-    prompt = _reviewed_prompt(_python_handoff())
-    section = prompt.split("## 9. Mandatory Execution Boundaries", 1)[1].split(
-        "## 10. External Checks Not Claimed", 1
-    )[0]
+def test_docs_reviewed_invocation_prompt_is_byte_for_byte_unchanged() -> None:
+    prompt = _reviewed_prompt(_handoff())
 
-    assert (
-        "- modify only the exact reviewed Python paths: "
-        + ", ".join(PYTHON_ALLOWED_PATHS)
-    ) in section
-    assert all(path in section for path in PYTHON_ALLOWED_PATHS)
+    assert len(prompt) == 1862
+    assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == (
+        "2e9361d46d2fbf55180522ba570e3ca7d54a6f086758636fd7bb6300258de343"
+    )
+
+
+def test_bounded_python_reviewed_invocation_is_compact_and_deterministic() -> None:
+    handoff = _representative_python_handoff()
+    original_prompt = str(handoff["prompt"])
+    first = _reviewed_prompt(handoff)
+    second = _reviewed_prompt(handoff)
+    allowed_section = first.split("## Exact Allowed Changed Files\n", 1)[1].split(
+        "\n\n## Original Reviewed Package Prompt", 1
+    )[0]
+    validation_section = first.split("## Required Validation Commands\n", 1)[
+        1
+    ].split("\n\n## Worker Execution Boundaries", 1)[0]
+
+    assert first == second
+    assert first.count(original_prompt) == 1
+    assert first.count("## Original Reviewed Package Prompt") == 1
+    assert first.count("## Exact Allowed Changed Files") == 1
+    assert allowed_section == "\n".join(f"- {path}" for path in PYTHON_ALLOWED_PATHS)
+    assert all(first.count(f"- {path}") == 1 for path in PYTHON_ALLOWED_PATHS)
+    assert validation_section == "\n".join(
+        f"- {command}" for command in VALIDATION_COMMANDS
+    )
+    assert first.count("## Required Validation Commands") == 1
+    assert all(first.count(command) == 1 for command in VALIDATION_COMMANDS)
+    assert "Objective: Develop Python code and focused tests" in first
+    assert "Acceptance criteria: 1. Self-dependency is rejected." in first
+    assert "Constraints: 1. Keep GitHub access read-only." in first
+
+
+def test_bounded_python_reviewed_invocation_keeps_only_worker_boundaries() -> None:
+    prompt = _reviewed_prompt(_representative_python_handoff())
+    section = prompt.split("## Worker Execution Boundaries", 1)[1]
+
+    assert "- edit only the exact reviewed Python files listed above" in section
+    assert all(path not in section for path in PYTHON_ALLOWED_PATHS)
     assert "documentation" not in section.casefold()
     assert "markdown" not in section.casefold()
     assert "- one reviewed attempt only" in section
     assert "- do not modify any extra path" in section
     assert "must not access the network or GitHub" in section
-    assert "must not commit or push" in section
-    assert "- never approve or merge" in section
-    assert "automatically retry" in section
-    assert "continue in the background" in section
+    assert "must not stage, commit, push, or open a pull request" in section
+    assert "- do not approve or merge" in section
+    assert "- do not retry, create a replacement authorization" in section
+    assert "resume in the background" in section
+    assert "- stop within this supervised authority" in section
+    assert (
+        "Phoenix owns publication, final CI, architecture review, approval, merge, "
+        "retry, replacement authorization, and background-resume decisions."
+    ) in section
+    assert "## Required PR Body Headings" not in prompt
+    assert "## External Checks Not Claimed" not in prompt
+    assert all(
+        external_check not in prompt
+        for external_check in runner_module.INVOCATION_EXTERNAL_CHECKS_REQUIRED
+    )
+
+
+def test_bounded_python_compact_prompt_is_meaningfully_smaller_than_legacy() -> None:
+    handoff = _representative_python_handoff()
+    report = _reviewed_preflight_report(handoff)
+    task = handoff["task"]
+    assert isinstance(task, dict)
+    declared_paths = report["declared_changed_files"]
+    legacy_boundaries = (
+        "- one issue, one branch, one PR",
+        "- one reviewed attempt only",
+        "- modify only the exact reviewed Python paths: "
+        + ", ".join(PYTHON_ALLOWED_PATHS),
+        "- do not modify any extra path",
+        "- do not broaden scope",
+        "- do not use private customer data",
+        "- the worker must not access the network or GitHub",
+        "- the worker must not commit or push",
+        "- run and report every required validation",
+        "- Phoenix may open one PR and must stop",
+        "- never approve or merge",
+        (
+            "- do not comment, label, dispatch workflows, automatically retry, "
+            "schedule, queue, or continue in the background"
+        ),
+        (
+            "- stop without mutation when any scope or identity binding is "
+            "ambiguous"
+        ),
+    )
+    legacy = runner_module._render_full_reviewed_codex_invocation_prompt(
+        package=handoff,
+        preflight_report=report,
+        task=task,
+        declared_paths=declared_paths,
+        mandatory_boundaries=legacy_boundaries,
+    )
+    compact = _reviewed_prompt(handoff)
+
+    assert len(compact) < len(legacy)
+    assert len(compact) * 100 <= len(legacy) * 80
 
 
 @pytest.mark.parametrize(

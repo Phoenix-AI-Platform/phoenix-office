@@ -401,7 +401,7 @@ def render_reviewed_codex_invocation_prompt(
     package: dict[str, object],
     preflight_report: dict[str, object],
 ) -> str:
-    """Render the established reviewed invocation request without side effects."""
+    """Render the class-aware reviewed invocation request without side effects."""
 
     task = package["task"]
     if not isinstance(task, dict):
@@ -419,6 +419,35 @@ def render_reviewed_codex_invocation_prompt(
         execution_class=execution_class,
         declared_paths=declared_paths,
     )
+
+    if execution_class == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+        return _render_compact_bounded_python_invocation_prompt(
+            package=package,
+            preflight_report=preflight_report,
+            task=task,
+            declared_paths=declared_paths,
+            mandatory_boundaries=mandatory_boundaries,
+        )
+
+    return _render_full_reviewed_codex_invocation_prompt(
+        package=package,
+        preflight_report=preflight_report,
+        task=task,
+        declared_paths=declared_paths,
+        mandatory_boundaries=mandatory_boundaries,
+    )
+
+
+def _render_full_reviewed_codex_invocation_prompt(
+    *,
+    package: dict[str, object],
+    preflight_report: dict[str, object],
+    task: dict[str, object],
+    declared_paths: object,
+    mandatory_boundaries: tuple[str, ...],
+) -> str:
+    """Preserve the established docs-only reviewed invocation verbatim."""
+
     external_checks = preflight_report["external_checks_required"]
     headings = package["required_pr_body_headings"]
     return "\n".join(
@@ -463,6 +492,45 @@ def render_reviewed_codex_invocation_prompt(
     )
 
 
+def _render_compact_bounded_python_invocation_prompt(
+    *,
+    package: dict[str, object],
+    preflight_report: dict[str, object],
+    task: dict[str, object],
+    declared_paths: object,
+    mandatory_boundaries: tuple[str, ...],
+) -> str:
+    """Render only reviewed facts and worker-relevant bounded-Python boundaries."""
+
+    return "\n".join(
+        [
+            "# Compact Bounded-Python Supervised Invocation",
+            "",
+            "## Supervised Execution Identity",
+            f"Execution class: {CODEX_PILOT_BOUNDED_PYTHON_KIND}",
+            f"Source issue number: {preflight_report['source_issue_number']}",
+            f"Handoff ID: {package['handoff_id']}",
+            f"Task ID: {task['task_id']}",
+            f"Task title: {task['title']}",
+            f"Repository: {preflight_report['repository']}",
+            f"Base branch: {preflight_report['base_branch']}",
+            f"Expected PR title: {package['expected_pr_title']}",
+            "",
+            "## Exact Allowed Changed Files",
+            *_prompt_bullets(declared_paths),
+            "",
+            "## Original Reviewed Package Prompt",
+            str(package["prompt"]),
+            "",
+            "## Required Validation Commands",
+            *_prompt_bullets(list(VALIDATION_COMMANDS)),
+            "",
+            "## Worker Execution Boundaries",
+            *mandatory_boundaries,
+        ]
+    )
+
+
 def _reviewed_invocation_boundaries(
     *,
     execution_class: str,
@@ -494,26 +562,24 @@ def _reviewed_invocation_boundaries(
         or any(type(path) is not str or not path for path in declared_paths)
     ):
         raise ValueError("reviewed Python paths are invalid")
-    reviewed_paths = ", ".join(declared_paths)
     return (
-        "- one issue, one branch, one PR",
         "- one reviewed attempt only",
-        f"- modify only the exact reviewed Python paths: {reviewed_paths}",
+        "- edit only the exact reviewed Python files listed above",
         "- do not modify any extra path",
         "- do not broaden scope",
-        "- do not use private customer data",
         "- the worker must not access the network or GitHub",
-        "- the worker must not commit or push",
-        "- run and report every required validation",
-        "- Phoenix may open one PR and must stop",
-        "- never approve or merge",
+        "- the worker must not stage, commit, push, or open a pull request",
+        "- run every required validation command listed above",
+        "- do not approve or merge",
         (
-            "- do not comment, label, dispatch workflows, automatically "
-            "retry, schedule, queue, or continue in the background"
+            "- do not retry, create a replacement authorization, or resume "
+            "in the background"
         ),
+        "- stop within this supervised authority",
         (
-            "- stop without mutation when any scope or identity binding "
-            "is ambiguous"
+            "- Phoenix owns publication, final CI, architecture review, approval, "
+            "merge, retry, replacement authorization, and background-resume "
+            "decisions. The worker must not perform or claim those actions."
         ),
     )
 
