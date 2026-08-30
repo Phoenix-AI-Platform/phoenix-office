@@ -557,6 +557,10 @@ def test_successful_run_has_one_invocation_and_phoenix_owned_publication(tmp_pat
         "validation_categories": ["passed", "passed", "passed"],
         "usage_category": "within_budget",
         "observed_usage_tokens": 100,
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
         "authorized_budget_tokens": 50_000,
         "usage_overage_tokens": 0,
         "usage_ratio_basis_points": 20,
@@ -912,7 +916,15 @@ def test_observed_budget_excess_blocks_commit_push_and_pr(tmp_path: Path):
 
 def test_known_within_budget_usage_reports_exact_bounded_telemetry(tmp_path: Path):
     system = FakeSystem(
-        execution=CodexExecutionResult("succeeded", "codex_completed", 25_000)
+        execution=CodexExecutionResult(
+            "succeeded",
+            "codex_completed",
+            25_000,
+            input_tokens=30_000,
+            cached_input_tokens=20_000,
+            output_tokens=20_000,
+            reasoning_output_tokens=10_000,
+        )
     )
 
     result, _database_path = _run(tmp_path, system)
@@ -923,6 +935,19 @@ def test_known_within_budget_usage_reports_exact_bounded_telemetry(tmp_path: Pat
     assert result["authorized_budget_tokens"] == 50_000
     assert result["usage_overage_tokens"] == 0
     assert result["usage_ratio_basis_points"] == 5_000
+    assert result["input_tokens"] == 30_000
+    assert result["cached_input_tokens"] == 20_000
+    assert result["output_tokens"] == 20_000
+    assert result["reasoning_output_tokens"] == 10_000
+    assert sum(
+        int(result[field])
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    ) > result["authorized_budget_tokens"]
     assert all(
         type(result[field]) is int
         for field in (
@@ -934,6 +959,37 @@ def test_known_within_budget_usage_reports_exact_bounded_telemetry(tmp_path: Pat
     )
     assert system.calls.count("invoke") == 1
     assert system.calls.count("pull_request") == 1
+
+
+def test_malformed_usage_components_are_null_without_corrupting_total(
+    tmp_path: Path,
+):
+    system = FakeSystem(
+        execution=CodexExecutionResult(
+            "succeeded",
+            "codex_completed",
+            25_000,
+            input_tokens=-1,
+            cached_input_tokens=True,
+            output_tokens=runner_module.MAX_OBSERVED_USAGE_TOKENS + 1,
+            reasoning_output_tokens="invalid",  # type: ignore[arg-type]
+        )
+    )
+
+    result, _database_path = _run(tmp_path, system)
+
+    assert result["status"] == "success"
+    assert result["observed_usage_tokens"] == 25_000
+    assert result["usage_category"] == "within_budget"
+    assert all(
+        result[field] is None
+        for field in (
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        )
+    )
 
 
 def test_usage_ratio_uses_deterministic_integer_floor_math(tmp_path: Path):
@@ -2396,7 +2452,13 @@ class SuccessfulProcess:
             json.dumps(
                 {
                     "type": "turn.completed",
-                    "usage": {"total_tokens": 12},
+                    "usage": {
+                        "total_tokens": 12,
+                        "input_tokens": 9,
+                        "cached_input_tokens": 6,
+                        "output_tokens": 3,
+                        "reasoning_output_tokens": 2,
+                    },
                 }
             )
             + "\n"
@@ -2468,7 +2530,15 @@ def test_real_task_process_uses_exact_worktree_stdin_and_one_safe_launch(
         launch_spec=spec,
     )
 
-    assert result == CodexExecutionResult("succeeded", "codex_completed", 12)
+    assert result == CodexExecutionResult(
+        "succeeded",
+        "codex_completed",
+        12,
+        input_tokens=9,
+        cached_input_tokens=6,
+        output_tokens=3,
+        reasoning_output_tokens=2,
+    )
     assert started == [True]
     assert len(launches) == 1
     argv, kwargs = launches[0]
@@ -2592,7 +2662,29 @@ def test_structured_json_parser_is_bounded_and_classifies_usage():
         json.dumps(
             {
                 "type": "turn.completed",
+                "usage": {
+                    "total_tokens": 11,
+                    "input_tokens": 3,
+                    "cached_input_tokens": 2,
+                    "output_tokens": 4,
+                    "reasoning_output_tokens": 1,
+                },
+            }
+        )
+    )
+    fallback = _parse_codex_jsonl(
+        json.dumps(
+            {
+                "type": "turn.completed",
                 "usage": {"input_tokens": 3, "output_tokens": 4},
+            }
+        )
+    )
+    malformed_total = _parse_codex_jsonl(
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {"total_tokens": "invalid"},
             }
         )
     )
@@ -2602,11 +2694,40 @@ def test_structured_json_parser_is_bounded_and_classifies_usage():
     assert success == {
         "fatal": False,
         "turn_completed": True,
-        "usage_tokens": 7,
+        "usage_tokens": 11,
+        "input_tokens": 3,
+        "cached_input_tokens": 2,
+        "output_tokens": 4,
+        "reasoning_output_tokens": 1,
         "failure_category": None,
     }
+    assert fallback["usage_tokens"] == 7
+    assert malformed_total["usage_tokens"] is None
     assert fatal["fatal"] is True
     assert oversized["fatal"] is True
+
+
+def test_native_parser_reads_only_final_completed_usage_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[object] = []
+    original = runner_module._codex_usage_telemetry
+
+    def observe(value: object) -> dict[str, int | None]:
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(runner_module, "_codex_usage_telemetry", observe)
+
+    result = _parse_codex_jsonl(
+        '{"type":"turn.completed","usage":{"total_tokens":3}}\n'
+        '{"type":"turn.completed","usage":{"total_tokens":5,'
+        '"reasoning_output_tokens":2}}\n'
+    )
+
+    assert result["usage_tokens"] == 5
+    assert result["reasoning_output_tokens"] == 2
+    assert calls == [{"total_tokens": 5, "reasoning_output_tokens": 2}]
 
 
 def test_system_service_delegates_preclaim_runtime_auth_and_capability_to_wsl(
@@ -2634,7 +2755,17 @@ def test_system_service_delegates_preclaim_runtime_auth_and_capability_to_wsl(
 def test_system_service_invokes_wsl_shadow_with_exact_authorized_identity(
     tmp_path: Path,
 ):
-    worker = FakeWslWorker()
+    worker = FakeWslWorker(
+        execution_result=WslExecutionResult(
+            "succeeded",
+            "wsl_codex_completed",
+            7,
+            input_tokens=5,
+            cached_input_tokens=3,
+            output_tokens=2,
+            reasoning_output_tokens=1,
+        )
+    )
     service = SystemCodexPilotServices(tmp_path / "canonical", wsl_worker=worker)
     started: list[bool] = []
     handle = WorktreeHandle(
@@ -2656,7 +2787,15 @@ def test_system_service_invokes_wsl_shadow_with_exact_authorized_identity(
         lambda: started.append(True),
     )
 
-    assert result == CodexExecutionResult("succeeded", "wsl_codex_completed", 7)
+    assert result == CodexExecutionResult(
+        "succeeded",
+        "wsl_codex_completed",
+        7,
+        input_tokens=5,
+        cached_input_tokens=3,
+        output_tokens=2,
+        reasoning_output_tokens=1,
+    )
     assert worker.invocations == [
         {
             "windows_worktree": handle.path,
@@ -4132,6 +4271,10 @@ def test_cli_run_emits_only_bounded_result(
                 "validation_categories": [],
                 "usage_category": "usage_unknown",
                 "observed_usage_tokens": None,
+                "input_tokens": None,
+                "cached_input_tokens": None,
+                "output_tokens": None,
+                "reasoning_output_tokens": None,
                 "authorized_budget_tokens": None,
                 "usage_overage_tokens": None,
                 "usage_ratio_basis_points": None,
@@ -4157,6 +4300,10 @@ def test_cli_run_emits_only_bounded_result(
     assert exit_code == 1
     assert payload["category"] == "workspace_write_capability_unproved"
     assert payload["observed_usage_tokens"] is None
+    assert payload["input_tokens"] is None
+    assert payload["cached_input_tokens"] is None
+    assert payload["output_tokens"] is None
+    assert payload["reasoning_output_tokens"] is None
     assert payload["authorized_budget_tokens"] is None
     assert payload["usage_overage_tokens"] is None
     assert payload["usage_ratio_basis_points"] is None

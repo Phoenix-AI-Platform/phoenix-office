@@ -44,6 +44,7 @@ CAPABILITY_MARKER_CONTENT: Final = "PHOENIX_CODEX_WORKSPACE_WRITE_PROBE_V1\n"
 MAX_COMMAND_OUTPUT_BYTES: Final = 2_000_000
 MAX_JSONL_LINES: Final = 10_000
 MAX_JSONL_LINE_BYTES: Final = 1_000_000
+MAX_USAGE_COMPONENT_TOKENS: Final = 1_000_000_000
 MAX_SNAPSHOT_BYTES: Final = 128_000_000
 MAX_SNAPSHOT_FILES: Final = 50_000
 MAX_PATCH_BYTES: Final = 2_000_000
@@ -282,6 +283,27 @@ class WslExecutionResult:
     category: str
     usage_tokens: int | None = None
     worker_exit_proved: bool = True
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+
+
+def _with_wsl_execution_telemetry(
+    status: str,
+    category: str,
+    source: WslExecutionResult,
+) -> WslExecutionResult:
+    return WslExecutionResult(
+        status=status,
+        category=category,
+        usage_tokens=source.usage_tokens,
+        worker_exit_proved=source.worker_exit_proved,
+        input_tokens=source.input_tokens,
+        cached_input_tokens=source.cached_input_tokens,
+        output_tokens=source.output_tokens,
+        reasoning_output_tokens=source.reasoning_output_tokens,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,10 +724,10 @@ class WslCodexWorker:
                         base_commit_sha,
                         snapshot,
                     ):
-                        result = WslExecutionResult(
+                        result = _with_wsl_execution_telemetry(
                             "failed",
                             "windows_worktree_changed_during_wsl_run",
-                            execution.usage_tokens,
+                            execution,
                         )
                     else:
                         evidence = _replace_transfer_evidence(
@@ -722,10 +744,10 @@ class WslCodexWorker:
                                 pilot_kind=snapshot.pilot_kind,
                             )
                             if patch is None:
-                                result = WslExecutionResult(
+                                result = _with_wsl_execution_telemetry(
                                     "failed",
                                     "wsl_shadow_diff_rejected",
-                                    execution.usage_tokens,
+                                    execution,
                                 )
                             else:
                                 evidence = _replace_transfer_evidence(
@@ -734,20 +756,20 @@ class WslCodexWorker:
                                     patch_exported=True,
                                 )
                                 if not apply_shadow_patch(worktree, patch):
-                                    result = WslExecutionResult(
+                                    result = _with_wsl_execution_telemetry(
                                         "failed",
                                         "windows_patch_apply_failed",
-                                        execution.usage_tokens,
+                                        execution,
                                     )
                                 else:
                                     evidence = _replace_transfer_evidence(
                                         evidence,
                                         patch_applied=True,
                                     )
-                                    result = WslExecutionResult(
+                                    result = _with_wsl_execution_telemetry(
                                         "succeeded",
                                         "wsl_codex_completed",
-                                        execution.usage_tokens,
+                                        execution,
                                     )
         finally:
             cleanup = False
@@ -758,10 +780,10 @@ class WslCodexWorker:
         if execution is not None and not execution.worker_exit_proved:
             return execution
         if not cleanup:
-            return WslExecutionResult(
+            return _with_wsl_execution_telemetry(
                 "failed",
                 "wsl_temp_cleanup_failed",
-                result.usage_tokens,
+                result,
             )
         return result
 
@@ -1330,31 +1352,31 @@ class WslCodexWorker:
             return WslExecutionResult("timed_out", "wsl_codex_timed_out"), ()
         if process.returncode != 0:
             return (
-                WslExecutionResult(
+                _wsl_execution_result_from_parsed(
                     "failed",
                     parsed["failure_category"]
                     or diagnostic
                     or "wsl_codex_nonzero_exit",
-                    parsed["usage_tokens"],
+                    parsed,
                 ),
                 tuple(parsed["messages"]),
             )
         if parsed["fatal"] or not parsed["turn_completed"]:
             return (
-                WslExecutionResult(
+                _wsl_execution_result_from_parsed(
                     "failed",
                     parsed["failure_category"]
                     or diagnostic
                     or "wsl_codex_structured_failure",
-                    parsed["usage_tokens"],
+                    parsed,
                 ),
                 tuple(parsed["messages"]),
             )
         return (
-            WslExecutionResult(
+            _wsl_execution_result_from_parsed(
                 "succeeded",
                 "wsl_codex_completed",
-                parsed["usage_tokens"],
+                parsed,
             ),
             tuple(parsed["messages"]),
         )
@@ -2759,7 +2781,7 @@ def _path_within_posix(value: str, root: str) -> bool:
 def _parse_codex_jsonl(value: str) -> dict[str, object]:
     fatal = False
     completed = False
-    usage: int | None = None
+    final_usage: object = None
     failure: str | None = None
     messages: list[str] = []
     lines = value.splitlines()
@@ -2768,6 +2790,10 @@ def _parse_codex_jsonl(value: str) -> dict[str, object]:
             "fatal": True,
             "turn_completed": False,
             "usage_tokens": None,
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "output_tokens": None,
+            "reasoning_output_tokens": None,
             "failure_category": "wsl_codex_output_invalid",
             "messages": [],
         }
@@ -2788,7 +2814,7 @@ def _parse_codex_jsonl(value: str) -> dict[str, object]:
         event_type = event.get("type")
         if event_type == "turn.completed":
             completed = True
-            usage = _usage_tokens(event.get("usage"))
+            final_usage = event.get("usage")
         elif event_type in {"turn.failed", "error"}:
             fatal = True
             failure = "wsl_codex_structured_failure"
@@ -2798,13 +2824,38 @@ def _parse_codex_jsonl(value: str) -> dict[str, object]:
                 text = item.get("text")
                 if isinstance(text, str) and len(text) <= 4096:
                     messages.append(text)
+    usage = _codex_usage_telemetry(final_usage)
     return {
         "fatal": fatal,
         "turn_completed": completed,
-        "usage_tokens": usage,
+        **usage,
         "failure_category": failure,
         "messages": messages,
     }
+
+
+def _wsl_execution_result_from_parsed(
+    status: str,
+    category: object,
+    parsed: Mapping[str, object],
+) -> WslExecutionResult:
+    return WslExecutionResult(
+        status=status,
+        category=(
+            category if isinstance(category, str) else "wsl_codex_output_invalid"
+        ),
+        usage_tokens=(
+            parsed["usage_tokens"] if type(parsed.get("usage_tokens")) is int else None
+        ),
+        input_tokens=_bounded_usage_component(parsed.get("input_tokens")),
+        cached_input_tokens=_bounded_usage_component(
+            parsed.get("cached_input_tokens")
+        ),
+        output_tokens=_bounded_usage_component(parsed.get("output_tokens")),
+        reasoning_output_tokens=_bounded_usage_component(
+            parsed.get("reasoning_output_tokens")
+        ),
+    )
 
 
 def _bounded_codex_failure(value: str) -> str | None:
@@ -2831,6 +2882,32 @@ def _usage_tokens(value: object) -> int | None:
         for item in (input_tokens, output_tokens)
     ):
         return int(input_tokens) + int(output_tokens)
+    return None
+
+
+def _codex_usage_telemetry(value: object) -> dict[str, int | None]:
+    telemetry = {
+        "usage_tokens": _usage_tokens(value),
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+    }
+    if not isinstance(value, dict):
+        return telemetry
+    for field_name in (
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    ):
+        telemetry[field_name] = _bounded_usage_component(value.get(field_name))
+    return telemetry
+
+
+def _bounded_usage_component(value: object) -> int | None:
+    if type(value) is int and 0 <= value <= MAX_USAGE_COMPONENT_TOKENS:
+        return value
     return None
 
 

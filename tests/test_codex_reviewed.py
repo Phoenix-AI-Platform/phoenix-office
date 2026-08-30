@@ -112,6 +112,10 @@ def _success_outcome() -> ReviewedRunnerOutcome:
             "validation_categories": ["pytest_passed", "ruff_passed"],
             "usage_category": "within_budget",
             "observed_usage_tokens": 1000,
+            "input_tokens": 700,
+            "cached_input_tokens": 500,
+            "output_tokens": 300,
+            "reasoning_output_tokens": 200,
             "authorized_budget_tokens": 225000,
             "usage_overage_tokens": 0,
             "usage_ratio_basis_points": 44,
@@ -206,9 +210,43 @@ def test_success_surfaces_pr_opened_stop_and_bounded_usage(tmp_path: Path) -> No
     assert result["office_pr"] == "#389"
     assert result["office_pr_head"] is None
     assert result["observed_usage_tokens"] == 1000
+    assert result["input_tokens"] == 700
+    assert result["cached_input_tokens"] == 500
+    assert result["output_tokens"] == 300
+    assert result["reasoning_output_tokens"] == 200
     assert result["authorized_budget_tokens"] == 225000
     assert result["durable_lifecycle_state"] == "pr_opened_and_stopped"
     assert result["durable_lifecycle_terminal"] is False
+
+
+def test_reviewed_usage_components_remain_bounded(tmp_path: Path) -> None:
+    outcome = _success_outcome()
+    runner_result = dict(outcome.result)
+    runner_result.update(
+        {
+            "input_tokens": -1,
+            "cached_input_tokens": True,
+            "output_tokens": 10**9 + 1,
+            "reasoning_output_tokens": "invalid",
+        }
+    )
+    bounded_outcome = ReviewedRunnerOutcome(
+        result=runner_result,
+        execution_backend_selected=outcome.execution_backend_selected,
+        durable_lifecycle_state=outcome.durable_lifecycle_state,
+        durable_lifecycle_terminal=outcome.durable_lifecycle_terminal,
+    )
+
+    result = _execute(
+        tmp_path,
+        runner_invoker=lambda *_paths: bounded_outcome,
+    )
+
+    assert result["observed_usage_tokens"] == 1000
+    assert result["input_tokens"] is None
+    assert result["cached_input_tokens"] is None
+    assert result["output_tokens"] is None
+    assert result["reasoning_output_tokens"] is None
 
 
 def test_cli_derives_exact_pr_opened_nonterminal_lifecycle() -> None:
@@ -735,6 +773,10 @@ def test_reviewed_cli_json_remains_bounded(
     expected = codex_reviewed.blocked_reviewed_execution_result(
         "unsafe_control_root"
     )
+    assert expected["input_tokens"] is None
+    assert expected["cached_input_tokens"] is None
+    assert expected["output_tokens"] is None
+    assert expected["reasoning_output_tokens"] is None
     monkeypatch.setattr(
         cli,
         "execute_reviewed_codex_task",

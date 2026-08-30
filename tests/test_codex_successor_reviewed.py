@@ -255,6 +255,10 @@ def _reviewed_success() -> dict[str, object]:
         "execution_backend_selected": "wsl2_linux",
         "changed_paths": [ALLOWED_PATH],
         "observed_usage_tokens": 1000,
+        "input_tokens": 700,
+        "cached_input_tokens": 500,
+        "output_tokens": 300,
+        "reasoning_output_tokens": 200,
         "authorized_budget_tokens": 225000,
         "usage_overage_tokens": 0,
         "usage_ratio_basis_points": 44,
@@ -339,6 +343,10 @@ def test_valid_approved_successor_compiles_then_delegates_exactly_once(
     assert result["runner_invoked"] is True
     assert result["claim_created"] is True
     assert result["authorization_consumed"] is True
+    assert result["input_tokens"] == 700
+    assert result["cached_input_tokens"] == 500
+    assert result["output_tokens"] == 300
+    assert result["reasoning_output_tokens"] == 200
     assert result["durable_lifecycle_state"] == "pr_opened_and_stopped"
     assert result["durable_lifecycle_terminal"] is False
     assert result["architecture_approval_created"] is False
@@ -558,6 +566,10 @@ def test_package_preclaim_failure_remains_fail_closed(tmp_path: Path) -> None:
     assert result["runner_invoked"] is False
     assert result["claim_created"] is False
     assert result["authorization_consumed"] is False
+    assert result["input_tokens"] is None
+    assert result["cached_input_tokens"] is None
+    assert result["output_tokens"] is None
+    assert result["reasoning_output_tokens"] is None
 
 
 def test_reviewed_executor_exception_is_not_retried(tmp_path: Path) -> None:

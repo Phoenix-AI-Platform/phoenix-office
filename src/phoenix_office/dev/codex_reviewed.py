@@ -236,6 +236,10 @@ def _blocked_result(
         "execution_backend_selected": None,
         "changed_paths": [],
         "observed_usage_tokens": None,
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
         "authorized_budget_tokens": None,
         "usage_overage_tokens": None,
         "usage_ratio_basis_points": None,
@@ -310,6 +314,14 @@ def _combined_result(
         "changed_paths": changed_paths,
         "observed_usage_tokens": _bounded_optional_integer(
             runner.get("observed_usage_tokens")
+        ),
+        "input_tokens": _bounded_optional_integer(runner.get("input_tokens")),
+        "cached_input_tokens": _bounded_optional_integer(
+            runner.get("cached_input_tokens")
+        ),
+        "output_tokens": _bounded_optional_integer(runner.get("output_tokens")),
+        "reasoning_output_tokens": _bounded_optional_integer(
+            runner.get("reasoning_output_tokens")
         ),
         "authorized_budget_tokens": _bounded_optional_integer(
             runner.get("authorized_budget_tokens")
