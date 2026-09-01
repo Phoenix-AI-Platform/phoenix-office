@@ -34,7 +34,11 @@ from phoenix_office.core import (
 from phoenix_office.dev.codex_claim_store import (
     SQLiteCodexPilotInitialClaimStore,
 )
-from phoenix_office.dev.codex_wsl import WslCodexWorker
+from phoenix_office.dev.codex_wsl import (
+    WslCodexWorker,
+    _bounded_sensitive_findings,
+    _decode_bounded_utf8_text,
+)
 
 RUNNER_SCHEMA_VERSION: Final = "codex-pilot-run-result.v1"
 RUNNER_CLI: Final = "dev codex-pilot-run"
@@ -1954,13 +1958,36 @@ class SystemCodexPilotServices:
                 return DiffGateResult(False, "symlink_or_submodule_change")
             try:
                 payload = path.read_bytes()
-                text = payload.decode("utf-8")
-            except (OSError, UnicodeError):
+            except OSError:
                 return DiffGateResult(False, "binary_or_unreadable_change")
-            if len(payload) > MAX_MARKDOWN_BYTES or b"\0" in payload:
+            text = _decode_bounded_utf8_text(payload)
+            if text is None:
                 return DiffGateResult(False, "binary_or_unreadable_change")
-            if any(pattern.search(text) for pattern in SENSITIVE_PATTERNS):
-                return DiffGateResult(False, "sensitive_content_detected")
+            if worktree.pilot_kind == CODEX_PILOT_BOUNDED_PYTHON_KIND:
+                baseline = self._run_bytes(
+                    ["git", "cat-file", "blob", f"HEAD:{path_text}"],
+                    cwd=worktree.path,
+                    timeout=30,
+                )
+                if baseline is None or baseline.returncode != 0:
+                    return DiffGateResult(False, "binary_or_unreadable_change")
+                baseline_text = _decode_bounded_utf8_text(baseline.stdout)
+                if baseline_text is None:
+                    return DiffGateResult(False, "binary_or_unreadable_change")
+                resulting_findings = _bounded_sensitive_findings(text)
+                baseline_findings = _bounded_sensitive_findings(baseline_text)
+                if resulting_findings is None or baseline_findings is None:
+                    return DiffGateResult(False, "sensitive_content_detected")
+                if any(
+                    count > baseline_findings.get(finding, 0)
+                    for finding, count in resulting_findings.items()
+                ):
+                    return DiffGateResult(False, "sensitive_content_detected")
+            elif worktree.pilot_kind == CODEX_PILOT_DOCS_ONLY_KIND:
+                if any(pattern.search(text) for pattern in SENSITIVE_PATTERNS):
+                    return DiffGateResult(False, "sensitive_content_detected")
+            else:
+                return DiffGateResult(False, "unsafe_changed_path")
             numstat = self._run(
                 ["git", "diff", "--numstat", "HEAD", "--", path_text],
                 cwd=worktree.path,
@@ -2557,6 +2584,40 @@ class SystemCodexPilotServices:
                     completed.returncode,
                     stdout_text,
                     "",
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    @staticmethod
+    def _run_bytes(
+        argv: list[str],
+        *,
+        cwd: Path,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[bytes] | None:
+        try:
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                completed = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    stdout=stdout,
+                    stderr=stderr,
+                    shell=False,
+                    timeout=timeout,
+                )
+                stdout_size = stdout.tell()
+                stderr_size = stderr.tell()
+                if (
+                    stdout_size > MAX_SYSTEM_OUTPUT_BYTES
+                    or stderr_size > MAX_SYSTEM_OUTPUT_BYTES
+                ):
+                    return None
+                stdout.seek(0)
+                return subprocess.CompletedProcess(
+                    argv,
+                    completed.returncode,
+                    stdout.read(),
+                    b"",
                 )
         except (OSError, subprocess.TimeoutExpired):
             return None
