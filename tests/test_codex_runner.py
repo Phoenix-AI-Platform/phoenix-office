@@ -2891,7 +2891,11 @@ def _git(cwd: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _real_worktree(tmp_path: Path) -> WorktreeHandle:
+def _real_worktree(
+    tmp_path: Path,
+    *,
+    document_content: str = "Initial documentation.\n",
+) -> WorktreeHandle:
     repository = tmp_path / "repository"
     worktree = tmp_path / "worktree"
     repository.mkdir()
@@ -2900,7 +2904,7 @@ def _real_worktree(tmp_path: Path) -> WorktreeHandle:
     _git(repository, "config", "user.email", "test@phoenix.invalid")
     document = repository / ALLOWED_PATH
     document.parent.mkdir(parents=True)
-    document.write_text("Initial documentation.\n", encoding="utf-8")
+    document.write_text(document_content, encoding="utf-8")
     unrelated = repository / "src" / "safe.py"
     unrelated.parent.mkdir(parents=True)
     unrelated.write_text("VALUE = 1\n", encoding="utf-8")
@@ -2923,6 +2927,47 @@ def _real_worktree(tmp_path: Path) -> WorktreeHandle:
     )
 
 
+def _real_python_worktree(
+    tmp_path: Path,
+    *,
+    implementation_baseline: bytes | None = b"VALUE = 1\n",
+) -> WorktreeHandle:
+    repository = tmp_path / "python-repository"
+    worktree = tmp_path / "python-worktree"
+    repository.mkdir()
+    _git(repository, "init", "--quiet")
+    _git(repository, "config", "user.name", "Phoenix Test")
+    _git(repository, "config", "user.email", "test@phoenix.invalid")
+    tracked_paths = [PYTHON_ALLOWED_PATHS[1]]
+    test_path = repository / PYTHON_ALLOWED_PATHS[1]
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+    if implementation_baseline is not None:
+        implementation_path = repository / PYTHON_ALLOWED_PATHS[0]
+        implementation_path.parent.mkdir(parents=True)
+        implementation_path.write_bytes(implementation_baseline)
+        tracked_paths.insert(0, PYTHON_ALLOWED_PATHS[0])
+    _git(repository, "add", "--", *tracked_paths)
+    _git(repository, "commit", "-m", "initial")
+    head = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "worktree", "add", "-b", BRANCH, str(worktree), head)
+    service = SystemCodexPilotServices(repository)
+    control_state = service._git_control_state(worktree)
+    assert control_state is not None
+    git_refs, git_worktree_state, local_git_config = control_state
+    return WorktreeHandle(
+        worktree,
+        BRANCH,
+        head,
+        (worktree / ".git").read_bytes(),
+        git_refs,
+        git_worktree_state,
+        local_git_config,
+        PYTHON_ALLOWED_PATHS,
+        "bounded-python-supervised",
+    )
+
+
 def test_diff_gate_allows_only_authorized_utf8_markdown(tmp_path: Path):
     worktree = _real_worktree(tmp_path)
     (worktree.path / ALLOWED_PATH).write_text(
@@ -2939,49 +2984,236 @@ def test_diff_gate_allows_only_authorized_utf8_markdown(tmp_path: Path):
 
 
 def test_diff_gate_enforces_bounded_python_class_policy(tmp_path: Path) -> None:
-    repository = tmp_path / "python-repository"
-    worktree_path = tmp_path / "python-worktree"
-    repository.mkdir()
-    _git(repository, "init", "--quiet")
-    _git(repository, "config", "user.name", "Phoenix Test")
-    _git(repository, "config", "user.email", "test@phoenix.invalid")
-    allowed = (
-        "src/phoenix_office/dev/codex_successor.py",
-        "tests/test_codex_successor.py",
+    worktree = _real_python_worktree(tmp_path)
+    service = SystemCodexPilotServices(tmp_path / "python-repository")
+    (worktree.path / PYTHON_ALLOWED_PATHS[0]).write_text(
+        "VALUE = 2\n",
+        encoding="utf-8",
     )
-    for path_text in allowed:
-        path = repository / path_text
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("VALUE = 1\n", encoding="utf-8")
-    _git(repository, "add", "--", *allowed)
-    _git(repository, "commit", "-m", "initial")
-    head = _git(repository, "rev-parse", "HEAD")
-    _git(repository, "worktree", "add", "-b", BRANCH, str(worktree_path), head)
-    service = SystemCodexPilotServices(repository)
-    control_state = service._git_control_state(worktree_path)
-    assert control_state is not None
-    git_refs, git_worktree_state, local_git_config = control_state
-    worktree = WorktreeHandle(
-        worktree_path,
-        BRANCH,
-        head,
-        (worktree_path / ".git").read_bytes(),
-        git_refs,
-        git_worktree_state,
-        local_git_config,
-        allowed,
-        "bounded-python-supervised",
-    )
-    (worktree.path / allowed[0]).write_text("VALUE = 2\n", encoding="utf-8")
 
-    result = service.inspect_diff(worktree, allowed)
+    result = service.inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
     ineligible = service.inspect_diff(
         worktree,
         (ALLOWED_PATH, "tests/test_codex_successor.py"),
     )
 
-    assert result == DiffGateResult(True, "diff_allowed", (allowed[0],))
+    assert result == DiffGateResult(
+        True,
+        "diff_allowed",
+        (PYTHON_ALLOWED_PATHS[0],),
+    )
     assert ineligible == DiffGateResult(False, "unsafe_changed_path")
+
+
+def test_diff_gate_docs_whole_file_scan_rejects_existing_sensitive_finding(
+    tmp_path: Path,
+) -> None:
+    finding = "token=synthetic-fixture-value"
+    worktree = _real_worktree(
+        tmp_path,
+        document_content=f"{finding}\nInitial documentation.\n",
+    )
+    (worktree.path / ALLOWED_PATH).write_text(
+        f"{finding}\nUpdated documentation.\n",
+        encoding="utf-8",
+    )
+
+    result = SystemCodexPilotServices(tmp_path / "repository").inspect_diff(
+        worktree,
+        (ALLOWED_PATH,),
+    )
+
+    assert result == DiffGateResult(False, "sensitive_content_detected")
+
+
+@pytest.mark.parametrize(
+    ("baseline", "resulting"),
+    [
+        pytest.param(
+            b"token=synthetic-fixture-value\nVALUE = 1\n",
+            b"token=synthetic-fixture-value\nVALUE = 2\n",
+            id="identical-finding",
+        ),
+        pytest.param(
+            b"token=synthetic-fixture-value\nVALUE = 1\n",
+            b"VALUE = 2\ntoken=synthetic-fixture-value\n",
+            id="moved-finding",
+        ),
+        pytest.param(
+            b"token=synthetic-fixture-value\nVALUE = 1\n",
+            b"VALUE = 2\n",
+            id="removed-finding",
+        ),
+        pytest.param(
+            b"token=synthetic-fixture-value\ntoken=synthetic-fixture-value\n",
+            b"token=synthetic-fixture-value\nVALUE = 2\n",
+            id="decreased-finding-count",
+        ),
+    ],
+)
+def test_diff_gate_bounded_python_allows_nonincreasing_sensitive_findings(
+    tmp_path: Path,
+    baseline: bytes,
+    resulting: bytes,
+) -> None:
+    worktree = _real_python_worktree(
+        tmp_path,
+        implementation_baseline=baseline,
+    )
+    (worktree.path / PYTHON_ALLOWED_PATHS[0]).write_bytes(resulting)
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(
+        True,
+        "diff_allowed",
+        (PYTHON_ALLOWED_PATHS[0],),
+    )
+
+
+def test_diff_gate_bounded_python_allows_task086_style_existing_regex(
+    tmp_path: Path,
+) -> None:
+    baseline = (
+        b'SENSITIVE = re.compile(r"(?i)(?:[A-Z]:\\\\Users\\\\|/home/|/Users/)'
+        b'[^\\s`]+")\n'
+    )
+    resulting = baseline + b"\ndef reject_self_dependency():\n    return True\n"
+    assert any(
+        pattern.search(baseline.decode())
+        for pattern in runner_module.SENSITIVE_PATTERNS
+    )
+    worktree = _real_python_worktree(
+        tmp_path,
+        implementation_baseline=baseline,
+    )
+    (worktree.path / PYTHON_ALLOWED_PATHS[0]).write_bytes(resulting)
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(
+        True,
+        "diff_allowed",
+        (PYTHON_ALLOWED_PATHS[0],),
+    )
+
+
+@pytest.mark.parametrize(
+    ("baseline", "resulting"),
+    [
+        pytest.param(
+            b"VALUE = 1\n",
+            b"token=new-synthetic-value\n",
+            id="new-sensitive-value",
+        ),
+        pytest.param(
+            b"token=synthetic-fixture-value\n",
+            b"token=synthetic-fixture-value\ntoken=synthetic-fixture-value\n",
+            id="increased-duplicate",
+        ),
+        pytest.param(
+            b"token=old-synthetic-value\n",
+            b"token=new-synthetic-value\n",
+            id="changed-sensitive-value",
+        ),
+    ],
+)
+def test_diff_gate_bounded_python_rejects_increased_sensitive_findings(
+    tmp_path: Path,
+    baseline: bytes,
+    resulting: bytes,
+) -> None:
+    worktree = _real_python_worktree(
+        tmp_path,
+        implementation_baseline=baseline,
+    )
+    (worktree.path / PYTHON_ALLOWED_PATHS[0]).write_bytes(resulting)
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(False, "sensitive_content_detected")
+
+
+def test_diff_gate_bounded_python_baseline_read_failure_fails_closed(
+    tmp_path: Path,
+) -> None:
+    worktree = _real_python_worktree(
+        tmp_path,
+        implementation_baseline=None,
+    )
+    implementation = worktree.path / PYTHON_ALLOWED_PATHS[0]
+    implementation.parent.mkdir(parents=True)
+    implementation.write_text("VALUE = 2\n", encoding="utf-8")
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(False, "binary_or_unreadable_change")
+
+
+@pytest.mark.parametrize(
+    "baseline",
+    [
+        pytest.param(b"\xff", id="invalid-utf8"),
+        pytest.param(b"VALUE = 1\0\n", id="nul"),
+        pytest.param(
+            b"A" * (runner_module.MAX_MARKDOWN_BYTES + 1),
+            id="oversize",
+        ),
+    ],
+)
+def test_diff_gate_bounded_python_unsafe_baseline_fails_closed(
+    tmp_path: Path,
+    baseline: bytes,
+) -> None:
+    worktree = _real_python_worktree(
+        tmp_path,
+        implementation_baseline=baseline,
+    )
+    (worktree.path / PYTHON_ALLOWED_PATHS[0]).write_text(
+        "VALUE = 2\n",
+        encoding="utf-8",
+    )
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(False, "binary_or_unreadable_change")
+
+
+def test_diff_gate_does_not_infer_bounded_python_from_file_suffix(
+    tmp_path: Path,
+) -> None:
+    bounded_worktree = _real_python_worktree(tmp_path)
+    docs_worktree = WorktreeHandle(
+        bounded_worktree.path,
+        bounded_worktree.branch_name,
+        bounded_worktree.base_commit_sha,
+        bounded_worktree.git_control_bytes,
+        bounded_worktree.git_refs,
+        bounded_worktree.git_worktree_state,
+        bounded_worktree.local_git_config,
+        PYTHON_ALLOWED_PATHS,
+        "docs-only-supervised",
+    )
+    (docs_worktree.path / PYTHON_ALLOWED_PATHS[0]).write_text(
+        "VALUE = 2\n",
+        encoding="utf-8",
+    )
+
+    result = SystemCodexPilotServices(
+        tmp_path / "python-repository"
+    ).inspect_diff(docs_worktree, PYTHON_ALLOWED_PATHS)
+
+    assert result == DiffGateResult(False, "unsafe_changed_path")
 
 
 def test_runner_rejects_pilot_kind_mismatch_before_claim(tmp_path: Path) -> None:
