@@ -934,11 +934,6 @@ def _candidate_from_metadata(
         or not _safe_public_text(issue.get("title"), max_length=120)
     ):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
-    dependency_numbers = _validated_dependency_numbers(depends_on)
-    safe_paths = _validated_allowed_paths(
-        allowed_paths,
-        execution_class=execution_class,
-    )
     issue_number = issue["number"]
     if (
         type(issue_number) is not int
@@ -947,8 +942,14 @@ def _candidate_from_metadata(
         <= CODEX_PILOT_TASK_SPEC_MAX_ISSUE_NUMBER
     ):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
-    if issue_number in dependency_numbers:
-        raise CodexSuccessorProposalError("malformed_candidate_metadata")
+    dependency_numbers = _validated_dependency_numbers(
+        depends_on,
+        candidate_issue_number=issue_number,
+    )
+    safe_paths = _validated_allowed_paths(
+        allowed_paths,
+        execution_class=execution_class,
+    )
     if execution_definition is not None and execution_definition.task_id != task_id:
         raise CodexSuccessorProposalError("candidate_execution_mismatch")
     return SuccessorCandidate(
@@ -969,12 +970,16 @@ def _candidate_from_metadata(
     )
 
 
-def _validated_dependency_numbers(value: object) -> tuple[int, ...]:
+def _validated_dependency_numbers(
+    value: object,
+    *,
+    candidate_issue_number: int,
+) -> tuple[int, ...]:
     if not isinstance(value, list) or len(value) > MAX_DEPENDENCIES_PER_CANDIDATE:
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     if any(type(item) is not int or not 1 <= item <= 10**9 for item in value):
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
-    if value != sorted(set(value)):
+    if value != sorted(set(value)) or candidate_issue_number in value:
         raise CodexSuccessorProposalError("malformed_candidate_metadata")
     return tuple(value)
 

@@ -546,6 +546,49 @@ def test_dependency_issue_number_bound_remains_independent(
     assert services.calls[-1] == f"read_dependency:{dependency_issue}"
 
 
+def test_candidate_cannot_depend_on_its_own_issue_number(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    issue_number = 391
+    evidence = _write_evidence(tmp_path / "verification.json")
+    candidate = _issue(
+        issue_number,
+        metadata=_candidate_metadata(depends_on=[issue_number]),
+    )
+    services = FakeServices(issues=[candidate])
+
+    result = _propose(repository, evidence, services)
+
+    assert result["category"] == "malformed_candidate_metadata"
+    assert result["proposal_ready_for_architecture_review"] is False
+    assert result["selected_issue_number"] is None
+    assert not any(call.startswith("read_dependency:") for call in services.calls)
+
+
+def test_sorted_unique_dependencies_preserve_proposal_behavior(
+    repository: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _write_evidence(tmp_path / "verification.json")
+    candidate = _issue(metadata=_candidate_metadata(depends_on=[389, 390]))
+    dependencies = {
+        number: {
+            "number": number,
+            "state": "CLOSED",
+            "stateReason": "COMPLETED",
+        }
+        for number in (389, 390)
+    }
+    services = FakeServices(issues=[candidate], dependencies=dependencies)
+
+    result = _propose(repository, evidence, services)
+
+    assert result["category"] == "successor_proposed"
+    assert result["proposal_ready_for_architecture_review"] is True
+    assert services.calls[-2:] == ["read_dependency:389", "read_dependency:390"]
+
+
 def test_priority_descending_deterministically_selects_highest(
     repository: Path,
     tmp_path: Path,
