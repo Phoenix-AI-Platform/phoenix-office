@@ -7,12 +7,13 @@ filesystem, database, process, or window side effects.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -172,6 +173,59 @@ class DesktopFormSnapshot:
     terms_and_conditions: str
     starting_at_label: str
     total_label: str
+
+
+_DRAFT_FORMAT = "phoenix-office-desktop-draft"
+_DRAFT_MAX_BYTES = 1_048_576
+
+
+def _draft_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise DesktopFormError("Proposal draft contains duplicate fields.")
+        result[key] = value
+    return result
+
+
+def _parse_desktop_draft(data: bytes) -> DesktopFormSnapshot:
+    """Validate editable types, not proposal validity; incomplete forms are drafts."""
+    try:
+        if len(data) > _DRAFT_MAX_BYTES:
+            raise ValueError
+        document = json.loads(data.decode("utf-8"), object_pairs_hook=_draft_object)
+        if (
+            type(document) is not dict
+            or set(document) != {"format", "version", "form"}
+            or document["format"] != _DRAFT_FORMAT
+            or type(document["version"]) is not int
+            or document["version"] != 1
+        ):
+            raise ValueError
+        form = document["form"]
+        if type(form) is not dict or set(form) != {f.name for f in fields(DesktopFormSnapshot)}:
+            raise ValueError
+        for name, value in form.items():
+            if name == "scope_descriptions":
+                if type(value) is not list or any(type(row) is not str for row in value):
+                    raise ValueError
+            elif name == "is_starting_at":
+                if type(value) is not bool:
+                    raise ValueError
+            elif type(value) is not str:
+                raise ValueError
+            text_values = value if name == "scope_descriptions" else (
+                [value] if type(value) is str else []
+            )
+            for text in text_values:
+                # Refuse text that cannot be represented faithfully by the UI.
+                text.encode("utf-8")
+                if "\x00" in text:
+                    raise ValueError
+        form["scope_descriptions"] = tuple(form["scope_descriptions"])
+        return DesktopFormSnapshot(**form)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise DesktopFormError("Proposal draft is malformed or unsupported.") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +675,83 @@ class ProposalDesktopController:
             self.state.selected_job_id = ""
             self._clear_customer_edit_state()
             self._clear_job_edit_state()
+        self._invalidate_validation()
+
+    def save_proposal_draft(self, selected_path: str | Path) -> None:
+        """Exclusively create one private draft, without changing active authority."""
+        if not str(selected_path):
+            return
+        try:
+            data = (json.dumps(
+                {"format": _DRAFT_FORMAT, "version": 1, "form": asdict(self.snapshot())},
+                ensure_ascii=True, sort_keys=True, indent=2,
+            ) + "\n").encode("utf-8")
+            _parse_desktop_draft(data)
+            path = Path(selected_path)
+            self._reject_git_worktree_path("Proposal Draft", path)
+            self._reject_existing_output_path("Proposal Draft", path)
+            # Keep partial output on failure: no later pathname observation can
+            # establish exclusive ownership against another process replacing it.
+            with path.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            raise DesktopFormError(
+                "Proposal draft save failed; existing files were not overwritten. "
+                "Any partial new draft was preserved for local inspection."
+            ) from None
+
+    def open_proposal_draft(self, selected_path: str | Path) -> None:
+        """Stage parsing and read-only reconciliation before any active mutation."""
+        if not str(selected_path):
+            return
+        try:
+            with Path(selected_path).open("rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise ValueError
+                snapshot = _parse_desktop_draft(handle.read(_DRAFT_MAX_BYTES + 1))
+            candidate = DesktopFormState(**{
+                **asdict(snapshot), "scope_descriptions": list(snapshot.scope_descriptions),
+            })
+            customers: tuple[CustomerRecord, ...] = ()
+            jobs: tuple[JobRecord, ...] = ()
+            if snapshot.selected_job_id and not snapshot.selected_customer_id:
+                raise ValueError
+            if snapshot.database_path:
+                database = self._required_path("Records Database", snapshot.database_path)
+                self._reject_git_worktree_path("Records Database", database)
+                repository = self._customer_repository_factory(
+                    database, initialize=False, read_only=True,
+                )
+                customers = tuple(repository.list_customers())
+                if snapshot.selected_customer_id:
+                    if sum(c.customer_id == snapshot.selected_customer_id for c in customers) != 1:
+                        raise ValueError
+                    job_repository = self._job_repository_factory(
+                        database, initialize=False, read_only=True,
+                    )
+                    jobs = tuple(job_repository.list_jobs_for_customer(
+                        snapshot.selected_customer_id,
+                    ))
+                    if any(j.customer_id != snapshot.selected_customer_id for j in jobs):
+                        raise ValueError
+                    if snapshot.selected_job_id and sum(
+                        j.job_id == snapshot.selected_job_id for j in jobs
+                    ) != 1:
+                        raise ValueError
+            elif snapshot.selected_customer_id or snapshot.selected_job_id:
+                raise ValueError
+        except Exception:
+            raise DesktopFormError(
+                "Proposal draft could not be opened or its records could not be resolved; "
+                "the active form is unchanged."
+            ) from None
+        self.state = candidate
+        self._customers = customers
+        self._jobs = jobs
+        self._clear_customer_edit_state()
+        self._clear_job_edit_state()
         self._invalidate_validation()
 
     def create_records_database(self, selected_path: str | Path) -> Path:
@@ -1734,6 +1865,15 @@ class ProposalDesktopApp:
             text="Load Customers",
             command=self._load_customers,
         ).grid(row=3, column=2, padx=(8, 0), pady=3)
+        draft_buttons = self._ttk.Frame(frame)
+        draft_buttons.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
+        for column, (label, action) in enumerate((
+            ("Save Proposal Draft", self._save_proposal_draft),
+            ("Open Proposal Draft", self._open_proposal_draft),
+        )):
+            self._ttk.Button(draft_buttons, text=label, command=action).grid(
+                row=0, column=column, padx=(0, 8),
+            )
 
     def _build_customer_creation_section(self) -> None:
         state = self.controller.customer_creation_state
@@ -2584,6 +2724,61 @@ class ProposalDesktopApp:
         )
         if path:
             self._variables["database_path"].set(path)
+
+    def _save_proposal_draft(self) -> None:
+        selected = self._filedialog.asksaveasfilename(
+            title="Save Proposal Draft", defaultextension=".json",
+            filetypes=(("Desktop proposal draft", "*.json"),), confirmoverwrite=False,
+        )
+        if not selected:
+            return
+        try:
+            self.controller.save_proposal_draft(selected)
+        except DesktopFormError as error:
+            self._show_error(error)
+            return
+        self._status_variable.set("Proposal form saved locally; no proposal was generated.")
+
+    def _open_proposal_draft(self) -> None:
+        selected = self._filedialog.askopenfilename(
+            title="Open Proposal Draft", filetypes=(("Desktop proposal draft", "*.json"),),
+        )
+        if not selected:
+            return
+        try:
+            self.controller.open_proposal_draft(selected)
+        except DesktopFormError as error:
+            self._show_error(error)
+            return
+        self._clear_customer_and_job_widgets()
+        state = self.controller.state
+        self._updating_widgets = True
+        try:
+            for name, variable in self._variables.items():
+                variable.set(getattr(state, name))
+            self._starting_at_variable.set(state.is_starting_at)
+            for widget, value in ((self._notes_text, state.notes),
+                                  (self._terms_text, state.terms_and_conditions)):
+                widget.delete("1.0", "end")
+                widget.insert("1.0", value)
+                widget.edit_modified(False)
+            self._customer_combo.configure(values=self.controller.customer_display_labels)
+            self._job_combo.configure(values=self.controller.job_display_labels)
+            if state.selected_customer_id:
+                self._customer_combo.current(next(
+                    i for i, c in enumerate(self.controller.customers)
+                    if c.customer_id == state.selected_customer_id
+                ))
+            if state.selected_job_id:
+                self._job_combo.current(next(
+                    i for i, j in enumerate(self.controller.jobs)
+                    if j.job_id == state.selected_job_id
+                ))
+        finally:
+            self._updating_widgets = False
+        self._refresh_scope_list(0 if state.scope_descriptions else None)
+        self._show_invalidated_state()
+        self._status_variable.set("Proposal form reopened; explicit validation required.")
 
     def _create_records_database(self) -> None:
         selected = self._filedialog.asksaveasfilename(

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -649,6 +650,277 @@ def test_module_import_is_headless_safe_and_does_not_import_tkinter() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_proposal_draft_round_trip_and_authority(tmp_path: Path) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.set_text_field("notes", "Synthetic café\nsecond line")
+    controller.add_scope_item("Second synthetic scope")
+    controller.validate_draft()
+    controller.generate_draft()
+    expected = controller.snapshot()
+    before = (controller.validated_request, controller.build_result)
+    first, second = tmp_path / "draft.json", tmp_path / "second.json"
+    controller.save_proposal_draft(first)
+    controller.save_proposal_draft(second)
+    assert first.read_bytes() == second.read_bytes()
+    assert (controller.validated_request, controller.build_result) == before
+    document = json.loads(first.read_bytes())
+    assert set(document) == {"format", "version", "form"}
+    assert set(document["form"]) == set(asdict(expected))
+    controller.set_text_field("notes", "Changed")
+    read_count = len(harness.customer_factory_calls)
+    controller.open_proposal_draft(first)
+    assert controller.snapshot() == expected
+    assert len(harness.customer_factory_calls) == read_count + 1
+    assert all(not initialize and read_only
+               for _, initialize, read_only in harness.customer_factory_calls)
+    assert all(not initialize and read_only
+               for _, initialize, read_only in harness.job_factory_calls)
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert not controller.generation_enabled
+    assert not controller.open_actions_enabled
+    assert controller.customer_edit_expected_original is None
+    assert controller.job_edit_expected_original is None
+    assert not harness.customer_creation_factory_calls
+    assert not harness.job_creation_factory_calls
+    assert not harness.customer_update_factory_calls
+    assert not harness.job_update_factory_calls
+    assert len(harness.validation_calls) == 1
+    assert len(harness.build_calls) == 1
+    assert not harness.opened_paths
+
+
+@pytest.mark.parametrize("malformation", [
+    "syntax", "list", "format", "version", "bool_version", "missing", "extra",
+    "missing_field", "extra_field", "wrong_text", "wrong_bool", "wrong_scope",
+    "wrong_scope_row", "duplicate", "utf8", "oversize",
+])
+def test_invalid_proposal_draft_is_atomic(tmp_path: Path, malformation: str) -> None:
+    controller = _configured_controller(tmp_path).controller
+    controller.validate_draft()
+    controller.generate_draft()
+    before = dict(controller.__dict__)
+    document = {"format": "phoenix-office-desktop-draft", "version": 1,
+                "form": asdict(controller.snapshot())}
+    if malformation == "format":
+        document["format"] = "other"
+    elif malformation in {"version", "bool_version"}:
+        document["version"] = True if malformation == "bool_version" else 2
+    elif malformation == "missing":
+        del document["form"]
+    elif malformation == "extra":
+        document["authority"] = True
+    elif malformation == "missing_field":
+        del document["form"]["amount"]
+    elif malformation == "extra_field":
+        document["form"]["authority"] = True
+    elif malformation == "wrong_text":
+        document["form"]["amount"] = 42
+    elif malformation == "wrong_bool":
+        document["form"]["is_starting_at"] = 1
+    elif malformation == "wrong_scope":
+        document["form"]["scope_descriptions"] = "text"
+    elif malformation == "wrong_scope_row":
+        document["form"]["scope_descriptions"] = [False]
+    data = json.dumps(document).encode()
+    data = {"syntax": b"{", "list": b"[]", "duplicate": b'{"x":1,"x":2}',
+            "utf8": b"\xff", "oversize": b" " * 1_048_577}.get(malformation, data)
+    path = tmp_path / "invalid.json"
+    path.write_bytes(data)
+    with pytest.raises(proposal_desktop.DesktopFormError) as error:
+        controller.open_proposal_draft(path)
+    assert str(tmp_path) not in str(error.value)
+    assert controller.__dict__ == before
+
+
+def test_proposal_draft_existing_and_git_destinations_preserved(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    existing = tmp_path / "existing.json"
+    existing.write_bytes(b"unrelated content")
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.save_proposal_draft(existing)
+    assert existing.read_bytes() == b"unrelated content"
+    git_dir = tmp_path / "repository"
+    git_dir.mkdir()
+    (git_dir / ".git").mkdir()
+    destination = git_dir / "draft.json"
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.save_proposal_draft(destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("database_path", ""), ("selected_customer_id", "missing"),
+    ("selected_job_id", "missing"), ("selected_customer_id", ""),
+])
+def test_unresolvable_draft_records_preserve_active_state(
+    tmp_path: Path, field: str, value: str,
+) -> None:
+    controller = _configured_controller(tmp_path).controller
+    path = tmp_path / "draft.json"
+    controller.save_proposal_draft(path)
+    document = json.loads(path.read_bytes())
+    document["form"][field] = value
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = dict(controller.__dict__)
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.open_proposal_draft(path)
+    assert controller.__dict__ == before
+
+
+def test_draft_real_database_is_read_only(tmp_path: Path) -> None:
+    database = tmp_path / "records.sqlite"
+    _seed_database(database)
+    controller = proposal_desktop.ProposalDesktopController()
+    controller.set_text_field("database_path", str(database))
+    controller.load_customers()
+    controller.select_customer("customer-synthetic-001")
+    controller.select_job("job-synthetic-001")
+    before = database.read_bytes()
+    draft = tmp_path / "draft.json"
+    controller.save_proposal_draft(draft)
+    controller.open_proposal_draft(draft)
+    assert database.read_bytes() == before
+    assert not any(Path(f"{database}{suffix}").exists()
+                   for suffix in ("-wal", "-shm", "-journal"))
+    missing_database = tmp_path / "missing.sqlite"
+    document = json.loads(draft.read_text(encoding="utf-8"))
+    document["form"]["database_path"] = str(missing_database)
+    draft.write_text(json.dumps(document), encoding="utf-8")
+    state = controller.snapshot()
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.open_proposal_draft(draft)
+    assert not missing_database.exists()
+    assert database.read_bytes() == before
+    assert controller.snapshot() == state
+
+
+@pytest.mark.parametrize("text", ["bad\x00text", "bad\ud800text"])
+def test_draft_unrepresentable_ui_text_is_atomic(tmp_path: Path, text: str) -> None:
+    controller = _configured_controller(tmp_path).controller
+    path = tmp_path / "draft.json"
+    controller.save_proposal_draft(path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["form"]["notes"] = text
+    path.write_text(json.dumps(document), encoding="utf-8")
+    before = controller.snapshot()
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        controller.open_proposal_draft(path)
+    assert controller.snapshot() == before
+
+
+def test_draft_gui_save_open_restores_widgets_and_disables_actions(tmp_path: Path) -> None:
+    controller_harness = _configured_controller(tmp_path)
+    controller = controller_harness.controller
+    controller.set_text_field("notes", "Synthetic notes\nsecond line")
+    controller.set_text_field("terms_and_conditions", "Synthetic terms")
+    saved = controller.snapshot()
+    harness = _headless_app(controller)
+    app = harness.app
+    path = tmp_path / "draft.json"
+    app._filedialog = SimpleNamespace(
+        asksaveasfilename=lambda **kwargs: str(path),
+        askopenfilename=lambda **kwargs: str(path),
+    )
+    app._save_proposal_draft()
+    assert path.is_file()
+    assert not controller_harness.validation_calls
+    assert not controller_harness.build_calls
+    controller.set_text_field("notes", "Changed after save")
+    controller.validate_draft()
+    controller.generate_draft()
+    app._refresh_action_states()
+    assert harness.generate_button.state == "normal"
+    app._variables = {
+        name: FakeVariable("stale") for name, value in asdict(saved).items()
+        if type(value) is str and name not in {
+            "selected_customer_id", "selected_job_id", "notes", "terms_and_conditions",
+        }
+    }
+    app._starting_at_variable = FakeVariable()
+    app._notes_text = FakeText("stale")
+    app._terms_text = FakeText("stale")
+    app._scope_variable = FakeVariable()
+
+    class ScopeList:
+        def __init__(self) -> None:
+            self.rows: list[str] = []
+            self.selected: tuple[int, ...] = ()
+
+        def delete(self, *args: object) -> None:
+            self.rows.clear()
+            self.selected = ()
+
+        def insert(self, where: str, value: str) -> None:
+            self.rows.append(value)
+
+        def selection_set(self, index: int) -> None:
+            self.selected = (index,)
+
+        def curselection(self) -> tuple[int, ...]:
+            return self.selected
+
+        def activate(self, index: int) -> None:
+            pass
+
+        def see(self, index: int) -> None:
+            pass
+
+    scope = ScopeList()
+    app._scope_list = scope
+    app._open_proposal_draft()
+    assert not harness.messagebox.errors
+    assert controller.snapshot() == saved
+    for name, variable in app._variables.items():
+        assert variable.get() == getattr(saved, name)
+    assert app._starting_at_variable.get() == saved.is_starting_at
+    assert app._notes_text.content == saved.notes
+    assert app._terms_text.content == saved.terms_and_conditions
+    assert scope.rows == [f"{i}. {s}" for i, s in enumerate(saved.scope_descriptions, 1)]
+    assert harness.customer_combo.current() == 0
+    assert harness.job_combo.current() == 0
+    assert harness.generate_button.state == "disabled"
+    assert all(button.state == "disabled" for button in harness.open_buttons)
+    assert "explicit validation required" in harness.status_variable.get()
+    assert len(controller_harness.validation_calls) == 1
+    assert len(controller_harness.build_calls) == 1
+    assert not controller_harness.opened_paths
+
+
+@pytest.mark.parametrize("action", ["_save_proposal_draft", "_open_proposal_draft"])
+def test_draft_gui_cancellation_is_noop(tmp_path: Path, action: str) -> None:
+    controller = _configured_controller(tmp_path).controller
+    controller.validate_draft()
+    controller.generate_draft()
+    harness = _headless_app(controller)
+    harness.app._filedialog = SimpleNamespace(
+        asksaveasfilename=lambda **kwargs: "", askopenfilename=lambda **kwargs: "",
+    )
+    before = dict(controller.__dict__)
+    status = harness.status_variable.get()
+    getattr(harness.app, action)()
+    assert controller.__dict__ == before
+    assert harness.status_variable.get() == status
+    assert not harness.messagebox.errors
+
+
+def test_draft_save_failure_keeps_partial_file_and_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _configured_controller(tmp_path).controller
+    before = dict(controller.__dict__)
+    def fail_sync(_fd: int) -> None:
+        raise OSError("synthetic private failure")
+    monkeypatch.setattr(proposal_desktop.os, "fsync", fail_sync)
+    path = tmp_path / "partial.json"
+    with pytest.raises(proposal_desktop.DesktopFormError) as error:
+        controller.save_proposal_draft(path)
+    assert path.exists()
+    assert "synthetic private failure" not in str(error.value)
+    assert controller.__dict__ == before
 
 
 def test_fake_combo_matches_real_tk_negative_index_and_safe_clear_behavior() -> None:
