@@ -42,6 +42,7 @@ from phoenix_office.records import (
     RecordProposalDetails,
     SQLiteCustomerRepository,
     SQLiteJobRepository,
+    initialize_records_database,
 )
 
 CustomerRepositoryFactory = Callable[..., SQLiteCustomerRepository]
@@ -54,6 +55,10 @@ ValidationFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftValidati
 BuildFunction = Callable[[ProposalDraftBuildRequest], ProposalDraftBuildResult]
 PathOpener = Callable[[Path], None]
 Clock = Callable[[], datetime]
+RecordsDatabaseInitializer = Callable[[Path], None]
+RecordsDatabaseValidator = Callable[[Path], None]
+
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 _TEXT_FIELDS = frozenset(
     {
@@ -201,6 +206,14 @@ class _ValidatedResolvedPaths:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnedFileIdentity:
+    """Stable identity for one file exclusively created by this process."""
+
+    device: int
+    inode: int
+
+
 @dataclass(slots=True)
 class DesktopFormState:
     """Mutable controller state containing only explicit local form values."""
@@ -329,6 +342,72 @@ def _default_job_repository_factory(
     )
 
 
+def _default_records_database_validator(database_path: Path) -> None:
+    """Read both initialized tables without mutating the new database."""
+
+    customers = _default_customer_repository_factory(
+        database_path,
+        initialize=False,
+        read_only=True,
+    ).list_customers()
+    jobs = _default_job_repository_factory(
+        database_path,
+        initialize=False,
+        read_only=True,
+    ).list_jobs()
+    if customers or jobs:
+        raise DesktopFormError("New records database contains unexpected records.")
+
+
+def _file_identity(metadata: os.stat_result) -> _OwnedFileIdentity | None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_ino <= 0:
+        return None
+    return _OwnedFileIdentity(device=metadata.st_dev, inode=metadata.st_ino)
+
+
+def _created_file_identity(path: Path) -> _OwnedFileIdentity | None:
+    try:
+        metadata = path.lstat()
+    except (FileNotFoundError, OSError):
+        return None
+    return _file_identity(metadata)
+
+
+def _path_is_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _cleanup_owned_records_database(
+    database_path: Path,
+    expected_identity: _OwnedFileIdentity,
+) -> bool:
+    """Remove the claimed database only when no unowned sidecars remain."""
+
+    if _created_file_identity(database_path) != expected_identity:
+        return False
+
+    # The initializer provides no sidecar creation receipts. Neither initial
+    # absence nor a later observed identity establishes ownership of a sidecar.
+    if any(
+        not _path_is_absent(Path(f"{database_path}{suffix}"))
+        for suffix in _SQLITE_SIDECAR_SUFFIXES
+    ):
+        return False
+    if _created_file_identity(database_path) != expected_identity:
+        return False
+    try:
+        database_path.unlink()
+    except OSError:
+        return False
+    return _path_is_absent(database_path)
+
+
 def _open_local_path(path: Path) -> None:
     """Hand one explicit generated local path to the operating system."""
 
@@ -413,6 +492,12 @@ class ProposalDesktopController:
         job_update_repository_factory: JobUpdateRepositoryFactory = (
             _default_job_repository_factory
         ),
+        records_database_initializer: RecordsDatabaseInitializer = (
+            initialize_records_database
+        ),
+        records_database_validator: RecordsDatabaseValidator = (
+            _default_records_database_validator
+        ),
         path_opener: PathOpener = _open_local_path,
         clock: Clock = datetime.now,
     ) -> None:
@@ -426,6 +511,8 @@ class ProposalDesktopController:
         self._job_repository_factory = job_repository_factory
         self._job_creation_repository_factory = job_creation_repository_factory
         self._job_update_repository_factory = job_update_repository_factory
+        self._records_database_initializer = records_database_initializer
+        self._records_database_validator = records_database_validator
         self._path_opener = path_opener
         self._clock = clock
         self.state = DesktopFormState(proposal_date=clock().date().isoformat())
@@ -535,6 +622,74 @@ class ProposalDesktopController:
             self._clear_customer_edit_state()
             self._clear_job_edit_state()
         self._invalidate_validation()
+
+    def create_records_database(self, selected_path: str | Path) -> Path:
+        """Create and validate one explicit new private records database."""
+
+        self._clear_selected_database()
+        requested_path = self._required_path("New Records Database", str(selected_path))
+        try:
+            database_path, inside_worktree = _inspect_git_worktree_ancestry(
+                requested_path
+            )
+        except (OSError, RuntimeError) as exc:
+            raise DesktopFormError(
+                "Records database ancestry could not be verified; creation was blocked."
+            ) from exc
+        if inside_worktree:
+            raise DesktopFormError("Records Database must be outside every Git worktree.")
+
+        self._reject_existing_output_path("Records Database", database_path)
+        for suffix in _SQLITE_SIDECAR_SUFFIXES:
+            self._reject_existing_output_path(
+                "Records Database sidecar",
+                Path(f"{database_path}{suffix}"),
+            )
+
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        try:
+            descriptor = os.open(database_path, flags, 0o600)
+        except FileExistsError as exc:
+            raise ExistingOutputPathError(
+                "Records Database already exists; overwrite was rejected. "
+                "Choose a new filename."
+            ) from exc
+        except OSError as exc:
+            raise DesktopFormError(
+                "Records database destination could not be claimed safely."
+            ) from exc
+        try:
+            identity = _file_identity(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+        if identity is None:
+            raise DesktopFormError(
+                "Records database destination ownership could not be verified."
+            )
+
+        try:
+            self._reject_git_worktree_path("Records Database", database_path)
+            self._records_database_initializer(database_path)
+            self._records_database_validator(database_path)
+            self._reject_git_worktree_path("Records Database", database_path)
+            if _created_file_identity(database_path) != identity:
+                raise DesktopFormError(
+                    "Records database identity changed during initialization."
+                )
+        except Exception as exc:
+            if not _cleanup_owned_records_database(database_path, identity):
+                raise DesktopFormError(
+                    "Records database creation failed and cleanup ownership could not "
+                    "be verified; no database was selected."
+                ) from exc
+            raise DesktopFormError(
+                "Records database creation failed; no database was selected."
+            ) from exc
+
+        self.state.database_path = str(database_path)
+        return database_path
 
     def set_starting_at(self, value: bool) -> None:
         normalized = bool(value)
@@ -1228,6 +1383,16 @@ class ProposalDesktopController:
         self.customer_edit_state = CustomerEditState()
         self._customer_edit_expected_original = None
 
+    def _clear_selected_database(self) -> None:
+        self.state.database_path = ""
+        self._customers = ()
+        self._jobs = ()
+        self.state.selected_customer_id = ""
+        self.state.selected_job_id = ""
+        self._clear_customer_edit_state()
+        self._clear_job_edit_state()
+        self._invalidate_validation()
+
     def _populate_customer_edit_state(self, customer: CustomerRecord) -> None:
         self.customer_edit_state = CustomerEditState(
             customer_id=customer.customer_id,
@@ -1528,6 +1693,11 @@ class ProposalDesktopApp:
             value=state.database_path,
             browse_command=self._browse_database,
         )
+        self._ttk.Button(
+            frame,
+            text="Create New Records Database",
+            command=self._create_records_database,
+        ).grid(row=0, column=3, padx=(8, 0), pady=3)
         self._labeled_entry(
             frame,
             row=1,
@@ -2414,6 +2584,46 @@ class ProposalDesktopApp:
         )
         if path:
             self._variables["database_path"].set(path)
+
+    def _create_records_database(self) -> None:
+        selected = self._filedialog.asksaveasfilename(
+            title="Create new records database",
+            defaultextension=".sqlite3",
+            filetypes=(
+                ("SQLite database", "*.sqlite *.sqlite3 *.db"),
+                ("All files", "*"),
+            ),
+            confirmoverwrite=False,
+        )
+        if not selected:
+            return
+
+        try:
+            database_path = self.controller.create_records_database(selected)
+            self._updating_widgets = True
+            try:
+                self._variables["database_path"].set(str(database_path))
+            finally:
+                self._updating_widgets = False
+            self._clear_customer_and_job_widgets()
+            self._set_summary(())
+            self._status_variable.set(
+                "New records database created and selected; customer creation is ready."
+            )
+            self._refresh_action_states()
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._updating_widgets = True
+            try:
+                self._variables["database_path"].set("")
+            finally:
+                self._updating_widgets = False
+            self._clear_customer_and_job_widgets()
+            self._set_summary(())
+            self._status_variable.set(
+                "Records database creation failed; no database was selected."
+            )
+            self._refresh_action_states()
+            self._show_error(exc)
 
     def _browse_template(self) -> None:
         path = self._filedialog.askopenfilename(

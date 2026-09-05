@@ -694,6 +694,349 @@ def test_initial_defaults_are_explicit_and_do_not_invent_business_values() -> No
     assert controller.customer_edit_expected_original is None
 
 
+def test_new_records_database_uses_existing_initializer_then_validates_before_selection(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, Path]] = []
+    controller: proposal_desktop.ProposalDesktopController
+
+    def initialize(database_path: Path) -> None:
+        assert controller.state.database_path == ""
+        events.append(("initialize", database_path))
+        proposal_desktop.initialize_records_database(database_path)
+
+    def validate(database_path: Path) -> None:
+        assert controller.state.database_path == ""
+        events.append(("validate", database_path))
+        assert SQLiteCustomerRepository(
+            database_path,
+            initialize=False,
+            read_only=True,
+        ).list_customers() == []
+        assert SQLiteJobRepository(
+            database_path,
+            initialize=False,
+            read_only=True,
+        ).list_jobs() == []
+
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=initialize,
+        records_database_validator=validate,
+        clock=lambda: NOW,
+    )
+    database_path = tmp_path / "new-records.sqlite3"
+
+    created = controller.create_records_database(database_path)
+
+    resolved = database_path.resolve()
+    assert created == resolved
+    assert events == [("initialize", resolved), ("validate", resolved)]
+    assert controller.state.database_path == str(resolved)
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+
+
+def test_new_records_database_is_immediately_usable_for_explicit_customer_creation(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    database_path = tmp_path / "new-records.sqlite3"
+
+    controller.create_records_database(database_path)
+
+    assert SQLiteCustomerRepository(
+        database_path,
+        initialize=False,
+        read_only=True,
+    ).list_customers() == []
+    assert SQLiteJobRepository(
+        database_path,
+        initialize=False,
+        read_only=True,
+    ).list_jobs() == []
+    controller.set_customer_creation_field("customer_id", "customer-created-089")
+    controller.set_customer_creation_field("display_name", "Synthetic Customer")
+    created = controller.create_customer()
+    assert created.customer_id == "customer-created-089"
+    assert controller.customers == (created,)
+    assert controller.jobs == ()
+
+
+def test_new_records_database_refuses_existing_destination_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "existing.sqlite3"
+    original = b"existing-database-content"
+    database_path.write_bytes(original)
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=lambda _path: pytest.fail("initializer called"),
+        records_database_validator=lambda _path: pytest.fail("validator called"),
+        clock=lambda: NOW,
+    )
+    controller.set_text_field("database_path", str(tmp_path / "previous.sqlite3"))
+
+    with pytest.raises(
+        proposal_desktop.ExistingOutputPathError,
+        match="already exists; overwrite was rejected",
+    ):
+        controller.create_records_database(database_path)
+
+    assert database_path.read_bytes() == original
+    assert controller.state.database_path == ""
+    assert controller.customers == ()
+    assert controller.jobs == ()
+
+
+def test_new_records_database_refuses_existing_sidecar_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "new-records.sqlite3"
+    sidecar = Path(f"{database_path}-wal")
+    original = b"existing-sidecar-content"
+    sidecar.write_bytes(original)
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=lambda _path: pytest.fail("initializer called"),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(
+        proposal_desktop.ExistingOutputPathError,
+        match="sidecar already exists; overwrite was rejected",
+    ):
+        controller.create_records_database(database_path)
+
+    assert not database_path.exists()
+    assert sidecar.read_bytes() == original
+    assert controller.state.database_path == ""
+
+
+def test_new_records_database_refuses_git_worktree_destination_before_creation(
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "repository"
+    (worktree / ".git").mkdir(parents=True)
+    database_path = worktree / "private" / "records.sqlite3"
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=lambda _path: pytest.fail("initializer called"),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="outside every Git worktree",
+    ):
+        controller.create_records_database(database_path)
+
+    assert not database_path.exists()
+    assert controller.state.database_path == ""
+
+
+def test_new_records_database_fails_closed_when_ancestry_cannot_be_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=lambda _path: pytest.fail("initializer called"),
+        clock=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        proposal_desktop,
+        "_inspect_git_worktree_ancestry",
+        lambda _path: (_ for _ in ()).throw(PermissionError("private-path-detail")),
+    )
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="ancestry could not be verified; creation was blocked",
+    ) as error:
+        controller.create_records_database(tmp_path / "new-records.sqlite3")
+
+    assert "private-path-detail" not in str(error.value)
+    assert controller.state.database_path == ""
+
+
+def test_failed_initialization_invalidates_authority_and_cleans_owned_artifacts(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    database_path = tmp_path / "failed-records.sqlite3"
+
+    def fail_after_partial_creation(path: Path) -> None:
+        path.write_bytes(b"owned-partial-database")
+        raise RuntimeError("synthetic initialization failure")
+
+    controller._records_database_initializer = fail_after_partial_creation
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="creation failed; no database was selected",
+    ):
+        controller.create_records_database(database_path)
+
+    assert controller.state.database_path == ""
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert controller.generation_enabled is False
+    assert controller.open_actions_enabled is False
+    assert not database_path.exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_failed_initialization_preserves_independent_late_sidecar(
+    tmp_path: Path, suffix: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    database_path = tmp_path / "failed-records.sqlite3"
+    sidecar = Path(f"{database_path}{suffix}")
+    original = b"independently-created-sidecar"
+
+    def initialize_then_fail(path: Path) -> None:
+        # This callback runs after the destination/sidecar absence checks.
+        assert not sidecar.exists()
+        sidecar.write_bytes(original)
+        raise RuntimeError("synthetic initialization failure")
+
+    controller._records_database_initializer = initialize_then_fail
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="cleanup ownership could not be verified",
+    ) as error:
+        controller.create_records_database(database_path)
+
+    assert sidecar.read_bytes() == original
+    assert database_path.exists()
+    assert str(database_path) not in str(error.value)
+    assert controller.state.database_path == ""
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert not controller.generation_enabled
+    assert not controller.open_actions_enabled
+
+
+def test_failed_initialization_preserves_replaced_ambiguously_owned_file(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    database_path = tmp_path / "ambiguous-records.sqlite3"
+    replacement = tmp_path / "replacement.sqlite3"
+    replacement_content = b"independently-created-content"
+    replacement.write_bytes(replacement_content)
+
+    def replace_claimed_file_then_fail(path: Path) -> None:
+        path.unlink()
+        replacement.replace(path)
+        raise RuntimeError("synthetic replacement")
+
+    controller._records_database_initializer = replace_claimed_file_then_fail
+
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="cleanup ownership could not be verified",
+    ):
+        controller.create_records_database(database_path)
+
+    assert database_path.read_bytes() == replacement_content
+    assert controller.state.database_path == ""
+
+
+def test_new_records_database_dialog_cancellation_is_a_complete_no_op(
+    tmp_path: Path,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    app_harness = _headless_app(controller)
+    state_before = controller.snapshot()
+    status_before = app_harness.status_variable.value
+    customer_values_before = app_harness.customer_combo.values
+    job_values_before = app_harness.job_combo.values
+
+    app_harness.app._create_records_database()
+
+    assert app_harness.filedialog.save_calls == [
+        {
+            "title": "Create new records database",
+            "defaultextension": ".sqlite3",
+            "filetypes": (
+                ("SQLite database", "*.sqlite *.sqlite3 *.db"),
+                ("All files", "*"),
+            ),
+            "confirmoverwrite": False,
+        }
+    ]
+    assert controller.snapshot() == state_before
+    assert app_harness.status_variable.value == status_before
+    assert app_harness.customer_combo.values == customer_values_before
+    assert app_harness.job_combo.values == job_values_before
+    assert app_harness.messagebox.errors == []
+
+
+def test_new_records_database_dialog_selects_only_successful_database(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController(clock=lambda: NOW)
+    app_harness = _headless_app(controller)
+    database_path = tmp_path / "selected-records.sqlite3"
+    app_harness.filedialog.save_result = str(database_path)
+
+    app_harness.app._create_records_database()
+
+    resolved = database_path.resolve()
+    assert controller.state.database_path == str(resolved)
+    assert app_harness.app._variables["database_path"].value == str(resolved)
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.job_combo.values == ()
+    assert app_harness.status_variable.value == (
+        "New records database created and selected; customer creation is ready."
+    )
+    assert app_harness.messagebox.errors == []
+
+
+def test_new_records_database_gui_failure_does_not_expose_private_path(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "private-name.sqlite3"
+
+    def fail_with_private_path(path: Path) -> None:
+        path.write_bytes(b"partial")
+        raise RuntimeError(f"failed at {path}")
+
+    controller = proposal_desktop.ProposalDesktopController(
+        records_database_initializer=fail_with_private_path,
+        clock=lambda: NOW,
+    )
+    app_harness = _headless_app(controller)
+    app_harness.filedialog.save_result = str(database_path)
+
+    app_harness.app._create_records_database()
+
+    assert controller.state.database_path == ""
+    assert app_harness.app._variables["database_path"].value == ""
+    assert app_harness.status_variable.value == (
+        "Records database creation failed; no database was selected."
+    )
+    assert len(app_harness.messagebox.errors) == 1
+    _title, message, _parent = app_harness.messagebox.errors[0]
+    assert str(database_path) not in message
+    assert "private-name" not in message
+    assert not database_path.exists()
+
+
 def test_explicit_customer_fields_construct_only_the_persisted_customer_values(
     tmp_path: Path,
 ) -> None:
@@ -3817,7 +4160,15 @@ def test_source_adds_no_logging_network_shell_or_private_service_reimplementatio
     assert "_proposal_summary_lines" not in source
     assert "save_customer(" not in source
     assert "save_job(" not in source
-    assert "initialize_records_database" not in source
+    assert "initialize_records_database" in source
+    assert "CREATE TABLE" not in source
+
+
+def test_desktop_exposes_explicit_new_records_database_action() -> None:
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
+
+    assert 'text="Create New Records Database"' in source
+    assert "command=self._create_records_database" in source
 
 
 def test_main_loads_toolkit_lazily_creates_one_root_and_runs_event_loop(
