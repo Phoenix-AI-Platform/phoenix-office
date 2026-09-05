@@ -387,36 +387,25 @@ def _cleanup_owned_records_database(
     database_path: Path,
     expected_identity: _OwnedFileIdentity,
 ) -> bool:
-    """Remove only the exact database attempt and its newly observed sidecars."""
+    """Remove the claimed database only when no unowned sidecars remain."""
 
     if _created_file_identity(database_path) != expected_identity:
         return False
 
-    observed: list[tuple[Path, _OwnedFileIdentity]] = []
-    for path in (
-        *(Path(f"{database_path}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES),
-        database_path,
+    # The initializer provides no sidecar creation receipts. Neither initial
+    # absence nor a later observed identity establishes ownership of a sidecar.
+    if any(
+        not _path_is_absent(Path(f"{database_path}{suffix}"))
+        for suffix in _SQLITE_SIDECAR_SUFFIXES
     ):
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return False
-        identity = _file_identity(metadata)
-        if identity is None:
-            return False
-        observed.append((path, identity))
-
-    for path, identity in observed:
-        if _created_file_identity(path) != identity:
-            return False
-        try:
-            path.unlink()
-        except OSError:
-            return False
-
-    return all(_path_is_absent(path) for path, _identity in observed)
+        return False
+    if _created_file_identity(database_path) != expected_identity:
+        return False
+    try:
+        database_path.unlink()
+    except OSError:
+        return False
+    return _path_is_absent(database_path)
 
 
 def _open_local_path(path: Path) -> None:

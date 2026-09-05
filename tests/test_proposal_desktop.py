@@ -867,15 +867,9 @@ def test_failed_initialization_invalidates_authority_and_cleans_owned_artifacts(
     controller.validate_draft()
     controller.generate_draft()
     database_path = tmp_path / "failed-records.sqlite3"
-    sidecars = tuple(
-        Path(f"{database_path}{suffix}")
-        for suffix in ("-wal", "-shm", "-journal")
-    )
 
     def fail_after_partial_creation(path: Path) -> None:
         path.write_bytes(b"owned-partial-database")
-        for sidecar in sidecars:
-            sidecar.write_bytes(b"owned-partial-sidecar")
         raise RuntimeError("synthetic initialization failure")
 
     controller._records_database_initializer = fail_after_partial_creation
@@ -896,7 +890,43 @@ def test_failed_initialization_invalidates_authority_and_cleans_owned_artifacts(
     assert controller.generation_enabled is False
     assert controller.open_actions_enabled is False
     assert not database_path.exists()
-    assert all(not sidecar.exists() for sidecar in sidecars)
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_failed_initialization_preserves_independent_late_sidecar(
+    tmp_path: Path, suffix: str,
+) -> None:
+    harness = _configured_controller(tmp_path)
+    controller = harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    database_path = tmp_path / "failed-records.sqlite3"
+    sidecar = Path(f"{database_path}{suffix}")
+    original = b"independently-created-sidecar"
+
+    def initialize_then_fail(path: Path) -> None:
+        # This callback runs after the destination/sidecar absence checks.
+        assert not sidecar.exists()
+        sidecar.write_bytes(original)
+        raise RuntimeError("synthetic initialization failure")
+
+    controller._records_database_initializer = initialize_then_fail
+    with pytest.raises(
+        proposal_desktop.DesktopFormError,
+        match="cleanup ownership could not be verified",
+    ) as error:
+        controller.create_records_database(database_path)
+
+    assert sidecar.read_bytes() == original
+    assert database_path.exists()
+    assert str(database_path) not in str(error.value)
+    assert controller.state.database_path == ""
+    assert controller.customers == ()
+    assert controller.jobs == ()
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert not controller.generation_enabled
+    assert not controller.open_actions_enabled
 
 
 def test_failed_initialization_preserves_replaced_ambiguously_owned_file(
