@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import stat
 import subprocess
 from collections.abc import Callable, Mapping
@@ -35,6 +36,72 @@ _TERMINAL_LIFECYCLE_STATES: Final = {
     "timed_out",
 }
 _NONTERMINAL_LIFECYCLE_STATES: Final = {"pr_opened_and_stopped"}
+_EXTERNAL_PR_DISPOSITIONS: Final = {
+    "approved_unmerged",
+    "changes_requested",
+    "closed_unmerged",
+    "merged",
+}
+
+
+class ExternalPrDispositionError(ValueError):
+    """A bounded external PR disposition could not be recorded safely."""
+
+
+def record_external_pr_disposition(
+    reviewed_result: Mapping[str, object],
+    *,
+    office_pr: str,
+    office_pr_head: str,
+    disposition: str,
+    merge_commit_sha: str | None = None,
+) -> dict[str, object]:
+    """Return a copy recording explicit external facts; perform no external action."""
+
+    if (
+        not isinstance(reviewed_result, Mapping)
+        or len(reviewed_result) > 100
+        or reviewed_result.get("schema_version") != REVIEWED_EXECUTION_SCHEMA_VERSION
+        or reviewed_result.get("pr_created_by_runner") is not True
+        or reviewed_result.get("worker_may_merge") is not False
+        or reviewed_result.get("pr_merged") is not False
+        or reviewed_result.get("office_pr_head") is not None
+        or "external_pr_disposition" in reviewed_result
+        or "external_merge_commit_sha" in reviewed_result
+    ):
+        raise ExternalPrDispositionError("reviewed_result_not_recordable")
+    recorded_pr = reviewed_result.get("office_pr")
+    if (
+        not _is_bounded_pr_identity(recorded_pr)
+        or not _is_bounded_pr_identity(office_pr)
+        or office_pr != recorded_pr
+    ):
+        raise ExternalPrDispositionError("pull_request_identity_mismatch")
+    if not isinstance(disposition, str) or disposition not in _EXTERNAL_PR_DISPOSITIONS:
+        raise ExternalPrDispositionError("external_pr_disposition_invalid")
+    if not _is_commit_sha(office_pr_head):
+        raise ExternalPrDispositionError("pull_request_head_invalid")
+    if disposition == "merged":
+        if not _is_commit_sha(merge_commit_sha):
+            raise ExternalPrDispositionError("merge_commit_sha_invalid")
+    elif merge_commit_sha is not None:
+        raise ExternalPrDispositionError("merge_commit_sha_contradictory")
+
+    recorded = dict(reviewed_result)
+    recorded["external_pr_disposition"] = disposition
+    recorded["office_pr_head"] = office_pr_head
+    recorded["external_merge_commit_sha"] = merge_commit_sha
+    recorded["pr_merged"] = disposition == "merged"
+    recorded["worker_may_merge"] = False
+    return recorded
+
+
+def _is_bounded_pr_identity(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"pr-[1-9][0-9]{0,9}", value) is not None
+
+
+def _is_commit_sha(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
 @dataclass(frozen=True, slots=True)
