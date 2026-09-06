@@ -9,7 +9,10 @@ from typing import Any
 import pytest
 
 from phoenix_office import cli
-from phoenix_office.dev.codex_reviewed import blocked_reviewed_execution_result
+from phoenix_office.dev.codex_reviewed import (
+    REVIEWED_EXECUTION_SCHEMA_VERSION,
+    blocked_reviewed_execution_result,
+)
 from phoenix_office.dev.codex_successor import (
     REPOSITORY_IDENTITY,
     SUCCESSOR_CANDIDATE_SCHEMA_VERSION,
@@ -19,9 +22,12 @@ from phoenix_office.dev.codex_successor import (
     propose_codex_successor,
 )
 from phoenix_office.dev.codex_successor_reviewed import (
+    CYCLE_ADVANCEMENT_SCHEMA_VERSION,
     SUCCESSOR_REVIEWED_EXECUTION_SCHEMA_VERSION,
     SUCCESSOR_TASK_SPEC_FILENAME,
+    ReviewedCycleAdvancementError,
     execute_approved_codex_successor,
+    reviewed_cycle_advancement_evidence,
 )
 from phoenix_office.dev.codex_successor_task_spec import (
     ARCHITECTURE_APPROVAL_DECISION,
@@ -35,6 +41,7 @@ ALLOWED_PATH = "docs/development/progress_dashboard.md"
 ISSUE_NUMBER = 398
 TASK_ID = "TASK-079"
 VERIFICATION_ID = "12345678-1234-4234-9234-123456789abc"
+_MISSING = object()
 
 
 def _head() -> str:
@@ -608,6 +615,184 @@ def test_public_result_is_bounded_and_authority_remains_phoenix_owned(
     assert result["worker_may_approve"] is False
     assert result["worker_may_merge"] is False
     assert result["pr_merged"] is False
+
+
+def _dispositioned_reviewed_result(
+    disposition: str,
+) -> dict[str, object]:
+    merged = disposition == "merged"
+    return {
+        "schema_version": REVIEWED_EXECUTION_SCHEMA_VERSION,
+        "status": "success",
+        "category": "pr_opened_and_stopped",
+        "task_id": "TASK-091",
+        "issue_number": 420,
+        "pr_created_by_runner": True,
+        "office_pr": "pr-421",
+        "office_pr_head": "1" * 40,
+        "external_pr_disposition": disposition,
+        "external_merge_commit_sha": "2" * 40 if merged else None,
+        "worker_may_merge": False,
+        "pr_merged": merged,
+    }
+
+
+@pytest.mark.parametrize(
+    ("disposition", "cycle_state", "successor_eligible"),
+    [
+        ("approved_unmerged", "awaiting_external_merge", False),
+        ("changes_requested", "revision_required", False),
+        ("closed_unmerged", "closed_without_merge", False),
+        ("merged", "merged_complete", True),
+    ],
+)
+def test_reviewed_cycle_advancement_maps_only_explicit_disposition(
+    disposition: str,
+    cycle_state: str,
+    successor_eligible: bool,
+) -> None:
+    original = _dispositioned_reviewed_result(disposition)
+    before = json.loads(json.dumps(original))
+
+    evidence = reviewed_cycle_advancement_evidence(original)
+
+    assert original == before
+    assert evidence["schema_version"] == CYCLE_ADVANCEMENT_SCHEMA_VERSION
+    assert evidence["status"] == "success"
+    assert evidence["category"] == "reviewed_cycle_advanced"
+    assert evidence["cycle_state"] == cycle_state
+    assert evidence["successor_eligible"] is successor_eligible
+    assert evidence["next_base_sha"] == ("2" * 40 if successor_eligible else None)
+    assert evidence["office_pr"] == "pr-421"
+    assert evidence["office_pr_head"] == "1" * 40
+    assert evidence["external_pr_disposition"] == disposition
+    assert evidence["successor_selected"] is False
+    assert evidence["architecture_approval_created"] is False
+    assert evidence["successor_execution_started"] is False
+    assert evidence["worker_may_approve"] is False
+    assert evidence["worker_may_merge"] is False
+    assert "selected_task_id" not in evidence
+    assert "selected_issue_number" not in evidence
+    assert "proposal_fingerprint" not in evidence
+
+
+@pytest.mark.parametrize(
+    ("updates", "category"),
+    [
+        ({"external_pr_disposition": None}, "external_pr_disposition_invalid"),
+        ({"external_pr_disposition": "unsupported"}, "external_pr_disposition_invalid"),
+        ({"office_pr": "#421"}, "pull_request_identity_invalid"),
+        ({"office_pr": "pr-0"}, "pull_request_identity_invalid"),
+        ({"office_pr": "pr-" + "1" * 20}, "pull_request_identity_invalid"),
+        ({"office_pr_head": "short"}, "pull_request_head_invalid"),
+        ({"office_pr_head": "A" * 40}, "pull_request_head_invalid"),
+        ({"office_pr_head": "1" * 41}, "pull_request_head_invalid"),
+        ({"pr_merged": True}, "external_pr_disposition_contradictory"),
+        ({"external_merge_commit_sha": "2" * 40}, "external_pr_disposition_contradictory"),
+    ],
+)
+def test_reviewed_cycle_advancement_rejects_malformed_or_contradictory_input(
+    updates: dict[str, object],
+    category: str,
+) -> None:
+    original = _dispositioned_reviewed_result("changes_requested")
+    original.update(updates)
+    before = dict(original)
+
+    with pytest.raises(ReviewedCycleAdvancementError) as error:
+        reviewed_cycle_advancement_evidence(original)
+
+    assert str(error.value) == category
+    assert original == before
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"schema_version": "wrong"},
+        {"pr_created_by_runner": False},
+        {"worker_may_merge": True},
+        {"external_pr_disposition": _MISSING},
+        {"external_merge_commit_sha": _MISSING},
+        {"cycle_state": "merged_complete"},
+        {"successor_eligible": False},
+    ],
+)
+def test_reviewed_cycle_advancement_rejects_wrong_or_previously_advanced_input(
+    updates: dict[str, object],
+) -> None:
+    original = _dispositioned_reviewed_result("approved_unmerged")
+    for key, value in updates.items():
+        if value is _MISSING:
+            original.pop(key)
+        else:
+            original[key] = value
+
+    with pytest.raises(
+        ReviewedCycleAdvancementError,
+        match="^reviewed_cycle_input_invalid$",
+    ):
+        reviewed_cycle_advancement_evidence(original)
+
+
+def test_reviewed_cycle_advancement_rejects_unbounded_input_mapping() -> None:
+    original = _dispositioned_reviewed_result("approved_unmerged")
+    original.update({f"extra_{index}": index for index in range(101)})
+
+    with pytest.raises(
+        ReviewedCycleAdvancementError,
+        match="^reviewed_cycle_input_invalid$",
+    ):
+        reviewed_cycle_advancement_evidence(original)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"external_merge_commit_sha": None},
+        {"external_merge_commit_sha": "bad"},
+        {"external_merge_commit_sha": "B" * 40},
+        {"pr_merged": False},
+    ],
+)
+def test_merged_cycle_requires_exact_recorded_merge_facts(
+    updates: dict[str, object],
+) -> None:
+    original = _dispositioned_reviewed_result("merged")
+    original.update(updates)
+
+    with pytest.raises(ReviewedCycleAdvancementError):
+        reviewed_cycle_advancement_evidence(original)
+
+
+def test_cycle_advancement_does_not_call_execution_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("execution service called")
+
+    monkeypatch.setattr(
+        "phoenix_office.dev.codex_successor_reviewed.execute_approved_codex_successor",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "phoenix_office.dev.codex_successor_reviewed.build_approved_codex_successor_task_spec",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "phoenix_office.dev.codex_successor_reviewed.execute_reviewed_codex_task",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "phoenix_office.dev.codex_successor_reviewed.SystemCodexSuccessorServices",
+        forbidden,
+    )
+
+    evidence = reviewed_cycle_advancement_evidence(
+        _dispositioned_reviewed_result("merged")
+    )
+
+    assert evidence["cycle_state"] == "merged_complete"
 
 
 def test_cli_executes_existing_approval_once_and_returns_bounded_json(
