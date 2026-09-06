@@ -691,6 +691,154 @@ def test_public_result_exposes_no_absolute_control_paths(tmp_path: Path) -> None
     assert result["pr_merged"] is False
 
 
+def _recordable_reviewed_result(tmp_path: Path) -> dict[str, object]:
+    result = _execute(tmp_path)
+    result["office_pr"] = "pr-389"
+    return result
+
+
+@pytest.mark.parametrize(
+    "disposition",
+    ["approved_unmerged", "changes_requested", "closed_unmerged"],
+)
+def test_records_external_unmerged_pr_dispositions_without_authority(
+    tmp_path: Path,
+    disposition: str,
+) -> None:
+    original = _recordable_reviewed_result(tmp_path)
+    before = json.loads(json.dumps(original))
+
+    recorded = codex_reviewed.record_external_pr_disposition(
+        original,
+        office_pr="pr-389",
+        office_pr_head="1" * 40,
+        disposition=disposition,
+    )
+
+    assert original == before
+    assert recorded is not original
+    assert recorded["external_pr_disposition"] == disposition
+    assert recorded["office_pr"] == "pr-389"
+    assert recorded["office_pr_head"] == "1" * 40
+    assert recorded["external_merge_commit_sha"] is None
+    assert recorded["pr_merged"] is False
+    assert recorded["worker_may_merge"] is False
+    for key, value in original.items():
+        if key != "office_pr_head":
+            assert recorded[key] == value
+
+
+def test_records_explicit_external_merge_as_observation_only(tmp_path: Path) -> None:
+    original = _recordable_reviewed_result(tmp_path)
+
+    recorded = codex_reviewed.record_external_pr_disposition(
+        original,
+        office_pr="pr-389",
+        office_pr_head="2" * 40,
+        disposition="merged",
+        merge_commit_sha="3" * 40,
+    )
+
+    assert recorded["external_pr_disposition"] == "merged"
+    assert recorded["office_pr_head"] == "2" * 40
+    assert recorded["external_merge_commit_sha"] == "3" * 40
+    assert recorded["pr_merged"] is True
+    assert recorded["worker_may_merge"] is False
+    assert original["pr_merged"] is False
+
+
+@pytest.mark.parametrize(
+    ("updates", "category"),
+    [
+        ({"office_pr": "pr-390"}, "pull_request_identity_mismatch"),
+        ({"office_pr": "#389"}, "pull_request_identity_mismatch"),
+        ({"office_pr_head": None}, "pull_request_head_invalid"),
+        ({"office_pr_head": "A" * 40}, "pull_request_head_invalid"),
+        ({"office_pr_head": "1" * 41}, "pull_request_head_invalid"),
+        ({"disposition": "unknown"}, "external_pr_disposition_invalid"),
+        ({"disposition": ["merged"]}, "external_pr_disposition_invalid"),
+        ({"disposition": "merged"}, "merge_commit_sha_invalid"),
+        (
+            {"disposition": "merged", "merge_commit_sha": "short"},
+            "merge_commit_sha_invalid",
+        ),
+        (
+            {"disposition": "changes_requested", "merge_commit_sha": "3" * 40},
+            "merge_commit_sha_contradictory",
+        ),
+    ],
+)
+def test_external_pr_disposition_rejects_malformed_or_contradictory_facts(
+    tmp_path: Path,
+    updates: dict[str, object],
+    category: str,
+) -> None:
+    original = _recordable_reviewed_result(tmp_path)
+    before = dict(original)
+    facts: dict[str, object] = {
+        "office_pr": "pr-389",
+        "office_pr_head": "1" * 40,
+        "disposition": "approved_unmerged",
+        "merge_commit_sha": None,
+    }
+    facts.update(updates)
+
+    with pytest.raises(codex_reviewed.ExternalPrDispositionError) as error:
+        codex_reviewed.record_external_pr_disposition(original, **facts)  # type: ignore[arg-type]
+
+    assert str(error.value) == category
+    assert original == before
+
+
+@pytest.mark.parametrize(
+    "result_update",
+    [
+        {"pr_created_by_runner": False, "office_pr": None},
+        {"worker_may_merge": True},
+        {"pr_merged": True},
+        {"office_pr_head": "1" * 40},
+        {"schema_version": "unsupported"},
+    ],
+)
+def test_external_pr_disposition_rejects_nonrecordable_results(
+    tmp_path: Path,
+    result_update: dict[str, object],
+) -> None:
+    original = _recordable_reviewed_result(tmp_path)
+    original.update(result_update)
+
+    with pytest.raises(
+        codex_reviewed.ExternalPrDispositionError,
+        match="^reviewed_result_not_recordable$",
+    ):
+        codex_reviewed.record_external_pr_disposition(
+            original,
+            office_pr="pr-389",
+            office_pr_head="1" * 40,
+            disposition="approved_unmerged",
+        )
+
+
+def test_external_pr_disposition_cannot_be_recorded_twice(tmp_path: Path) -> None:
+    recorded = codex_reviewed.record_external_pr_disposition(
+        _recordable_reviewed_result(tmp_path),
+        office_pr="pr-389",
+        office_pr_head="1" * 40,
+        disposition="approved_unmerged",
+    )
+
+    with pytest.raises(
+        codex_reviewed.ExternalPrDispositionError,
+        match="^reviewed_result_not_recordable$",
+    ):
+        codex_reviewed.record_external_pr_disposition(
+            recorded,
+            office_pr="pr-389",
+            office_pr_head="1" * 40,
+            disposition="approved_unmerged",
+        )
+
+
 def test_existing_package_only_command_does_not_invoke_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
