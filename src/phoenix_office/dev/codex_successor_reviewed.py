@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final
 
 from phoenix_office.dev.codex_reviewed import (
+    REVIEWED_EXECUTION_SCHEMA_VERSION,
     PackageInspector,
     RunnerInvoker,
     blocked_reviewed_execution_result,
@@ -26,10 +27,96 @@ SUCCESSOR_REVIEWED_EXECUTION_SCHEMA_VERSION: Final = (
     "codex-successor-reviewed-execution-result.v1"
 )
 SUCCESSOR_TASK_SPEC_FILENAME: Final = "task-spec.json"
+CYCLE_ADVANCEMENT_SCHEMA_VERSION: Final = (
+    "codex-reviewed-cycle-advancement-evidence.v1"
+)
 _CATEGORY_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]{0,79}")
+_PR_IDENTITY_PATTERN: Final = re.compile(r"pr-[1-9][0-9]{0,9}")
+_COMMIT_SHA_PATTERN: Final = re.compile(r"[0-9a-f]{40}")
+_CYCLE_STATES: Final = {
+    "approved_unmerged": "awaiting_external_merge",
+    "changes_requested": "revision_required",
+    "closed_unmerged": "closed_without_merge",
+    "merged": "merged_complete",
+}
+_ADVANCEMENT_FIELDS: Final = {
+    "cycle_state",
+    "next_base_sha",
+    "successor_eligible",
+    "successor_selected",
+    "successor_execution_started",
+}
 
 TaskSpecBuilder = Callable[..., dict[str, object]]
 ReviewedExecutor = Callable[..., dict[str, object]]
+
+
+class ReviewedCycleAdvancementError(ValueError):
+    """Disposition evidence cannot be advanced safely."""
+
+
+def reviewed_cycle_advancement_evidence(
+    reviewed_result: Mapping[str, object],
+) -> dict[str, object]:
+    """Classify one explicit external disposition without external operations."""
+
+    if (
+        not isinstance(reviewed_result, Mapping)
+        or len(reviewed_result) > 100
+        or reviewed_result.get("schema_version") != REVIEWED_EXECUTION_SCHEMA_VERSION
+        or reviewed_result.get("pr_created_by_runner") is not True
+        or reviewed_result.get("worker_may_merge") is not False
+        or any(field in reviewed_result for field in _ADVANCEMENT_FIELDS)
+        or "external_pr_disposition" not in reviewed_result
+        or "external_merge_commit_sha" not in reviewed_result
+    ):
+        raise ReviewedCycleAdvancementError("reviewed_cycle_input_invalid")
+
+    office_pr = reviewed_result.get("office_pr")
+    office_pr_head = reviewed_result.get("office_pr_head")
+    disposition = reviewed_result.get("external_pr_disposition")
+    merge_commit_sha = reviewed_result.get("external_merge_commit_sha")
+    if not _is_pr_identity(office_pr):
+        raise ReviewedCycleAdvancementError("pull_request_identity_invalid")
+    if not _is_commit_sha(office_pr_head):
+        raise ReviewedCycleAdvancementError("pull_request_head_invalid")
+    if not isinstance(disposition, str) or disposition not in _CYCLE_STATES:
+        raise ReviewedCycleAdvancementError("external_pr_disposition_invalid")
+
+    merged = disposition == "merged"
+    if reviewed_result.get("pr_merged") is not merged:
+        raise ReviewedCycleAdvancementError("external_pr_disposition_contradictory")
+    if merged:
+        if not _is_commit_sha(merge_commit_sha):
+            raise ReviewedCycleAdvancementError("merge_commit_sha_invalid")
+    elif merge_commit_sha is not None:
+        raise ReviewedCycleAdvancementError("external_pr_disposition_contradictory")
+
+    return {
+        "schema_version": CYCLE_ADVANCEMENT_SCHEMA_VERSION,
+        "status": "success",
+        "category": "reviewed_cycle_advanced",
+        "cycle_state": _CYCLE_STATES[disposition],
+        "office_pr": office_pr,
+        "office_pr_head": office_pr_head,
+        "external_pr_disposition": disposition,
+        "external_merge_commit_sha": merge_commit_sha,
+        "next_base_sha": merge_commit_sha if merged else None,
+        "successor_eligible": merged,
+        "successor_selected": False,
+        "architecture_approval_created": False,
+        "successor_execution_started": False,
+        "worker_may_approve": False,
+        "worker_may_merge": False,
+    }
+
+
+def _is_pr_identity(value: object) -> bool:
+    return isinstance(value, str) and _PR_IDENTITY_PATTERN.fullmatch(value) is not None
+
+
+def _is_commit_sha(value: object) -> bool:
+    return isinstance(value, str) and _COMMIT_SHA_PATTERN.fullmatch(value) is not None
 
 
 def execute_approved_codex_successor(
