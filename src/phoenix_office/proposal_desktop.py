@@ -12,6 +12,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime
@@ -504,6 +505,99 @@ def is_path_inside_git_worktree(path: Path) -> bool:
 
     _, inside_worktree = _inspect_git_worktree_ancestry(path)
     return inside_worktree
+
+
+_PREFERENCE_FIELDS = ("database_path", "template_path", "output_root")
+_PREFERENCES_MAX_BYTES = 32_768
+
+
+def _parse_workspace_preferences(data: bytes) -> dict[str, str]:
+    try:
+        if len(data) > _PREFERENCES_MAX_BYTES:
+            raise ValueError
+        document = json.loads(data.decode("utf-8"), object_pairs_hook=_draft_object)
+        if (
+            type(document) is not dict
+            or set(document) != {"format", "version", "workspace"}
+            or document["format"] != "phoenix-office-desktop-preferences"
+            or type(document["version"]) is not int
+            or document["version"] != 1
+        ):
+            raise ValueError
+        workspace = document["workspace"]
+        if type(workspace) is not dict or set(workspace) != set(_PREFERENCE_FIELDS):
+            raise ValueError
+        for value in workspace.values():
+            if type(value) is not str or len(value) > 4096:
+                raise ValueError
+            value.encode("utf-8")
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise ValueError
+        return workspace
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise DesktopFormError("Workspace preferences are malformed or unsupported.") from None
+
+
+def _check_preferences_location(path: Path) -> None:
+    if not path.is_absolute() or str(path).startswith(("\\\\", "//")):
+        raise DesktopFormError("Private workspace preferences location is unavailable.")
+    for item in (path, *path.parents):
+        if item.is_symlink() or (
+            hasattr(item, "is_junction") and item.is_junction()
+        ):
+            raise DesktopFormError("Private workspace preferences location is unsafe.")
+    if is_path_inside_git_worktree(path):
+        raise DesktopFormError("Private workspace preferences location is unsafe.")
+
+
+def _workspace_preferences_path() -> Path:
+    if sys.platform == "win32":
+        root = os.environ.get("LOCALAPPDATA")
+        if not root:
+            raise DesktopFormError("Private workspace preferences location is unavailable.")
+        base = Path(root)
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    path = base / "PhoenixOffice" / "workspace-preferences.json"
+    _check_preferences_location(path)
+    return path
+
+
+def _read_workspace_preferences(path: Path) -> dict[str, str]:
+    _check_preferences_location(path)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _PREFERENCES_MAX_BYTES:
+        raise DesktopFormError("Workspace preferences are malformed or unsupported.")
+    with path.open("rb") as stream:
+        return _parse_workspace_preferences(stream.read(_PREFERENCES_MAX_BYTES + 1))
+
+
+def _write_workspace_preferences(path: Path, workspace: dict[str, str]) -> None:
+    data = (json.dumps({
+        "format": "phoenix-office-desktop-preferences", "version": 1,
+        "workspace": workspace,
+    }, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
+    _parse_workspace_preferences(data)
+    _check_preferences_location(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_preferences_location(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _check_preferences_location(path)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def propose_identity_free_output_paths(
@@ -1703,6 +1797,7 @@ class ProposalDesktopApp:
         toolkit: tuple[object, object, object, object] | None = None,
     ) -> None:
         self.controller = controller or ProposalDesktopController()
+        self._restore_workspace_preferences()
         self._tk, self._ttk, self._filedialog, self._messagebox = (
             toolkit or _load_tkinter()
         )
@@ -1717,6 +1812,33 @@ class ProposalDesktopApp:
         self._bind_state_changes()
         self._refresh_scope_list(0)
         self._refresh_action_states()
+
+    def _restore_workspace_preferences(self) -> None:
+        self._remembered_workspace = dict.fromkeys(_PREFERENCE_FIELDS, "")
+        self._preferences_path: Path | None = None
+        try:
+            self._preferences_path = _workspace_preferences_path()
+            workspace = _read_workspace_preferences(self._preferences_path)
+        except (OSError, ValueError, RuntimeError):
+            return
+        if not workspace:
+            return
+        self._remembered_workspace = workspace
+        self.controller._clear_selected_database()
+        for name, value in workspace.items():
+            self.controller.set_text_field(name, value)
+
+    def _remember_workspace_path(self, name: str, value: str) -> None:
+        try:
+            if self._preferences_path is None:
+                raise DesktopFormError("Private workspace preferences are unavailable.")
+            updated = {**self._remembered_workspace, name: value}
+            _write_workspace_preferences(self._preferences_path, updated)
+            self._remembered_workspace = updated
+        except (OSError, ValueError, RuntimeError):
+            self._status_variable.set(
+                "Workspace selection succeeded; preferences could not be saved."
+            )
 
     def _build_widgets(self) -> None:
         tk = self._tk
@@ -2724,6 +2846,7 @@ class ProposalDesktopApp:
         )
         if path:
             self._variables["database_path"].set(path)
+            self._remember_workspace_path("database_path", path)
 
     def _save_proposal_draft(self) -> None:
         selected = self._filedialog.asksaveasfilename(
@@ -2806,6 +2929,7 @@ class ProposalDesktopApp:
                 "New records database created and selected; customer creation is ready."
             )
             self._refresh_action_states()
+            self._remember_workspace_path("database_path", str(database_path))
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._updating_widgets = True
             try:
@@ -2827,6 +2951,7 @@ class ProposalDesktopApp:
         )
         if path:
             self._variables["template_path"].set(path)
+            self._remember_workspace_path("template_path", path)
 
     def _browse_output_root(self) -> None:
         path = self._filedialog.askdirectory(title="Select private output root")
@@ -2845,6 +2970,8 @@ class ProposalDesktopApp:
         finally:
             self._updating_widgets = False
         self._show_invalidated_state()
+
+        self._remember_workspace_path("output_root", str(Path(path)))
 
     def _browse_docx_output(self) -> None:
         current = Path(self.controller.state.proposal_docx_output_path)

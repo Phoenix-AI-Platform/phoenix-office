@@ -48,6 +48,215 @@ ROOT = Path(__file__).parents[1]
 TEMPLATE = ROOT / "tests" / "fixtures" / "templates" / "a1_proposal_template.docx"
 
 
+def _preferences_bytes(**updates: object) -> bytes:
+    document = {
+        "format": "phoenix-office-desktop-preferences", "version": 1,
+        "workspace": {"database_path": "synthetic.sqlite3",
+                      "template_path": "synthetic.docx", "output_root": "synthetic-output"},
+    }
+    document.update(updates)
+    return json.dumps(document).encode("utf-8")
+
+
+def test_preferences_missing_and_startup_path_only(
+    private_preferences_location: Path, tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    before = controller.snapshot()
+    app._restore_workspace_preferences()
+    assert controller.snapshot() == before
+    private_preferences_location.parent.mkdir()
+    private_preferences_location.write_bytes(_preferences_bytes())
+    app._restore_workspace_preferences()
+    expected = asdict(before)
+    expected.update(json.loads(_preferences_bytes())["workspace"])
+    assert asdict(controller.snapshot()) == expected
+    assert controller.customers == controller.jobs == ()
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert not controller.generation_enabled and not controller.open_actions_enabled
+    assert controller.customer_edit_expected_original is None
+    assert controller.job_edit_expected_original is None
+    assert not (tmp_path / "synthetic.sqlite3").exists()
+
+
+@pytest.mark.parametrize("data", [
+    b"not json", b"\xff", b"[]", b"{}", b" " * 32769,
+    _preferences_bytes(version=True), _preferences_bytes(version=2),
+    _preferences_bytes(format="other"), _preferences_bytes(extra="forbidden"),
+    _preferences_bytes(workspace=[]), _preferences_bytes(workspace={}),
+    _preferences_bytes().replace(b'"synthetic.sqlite3"', b'false'),
+    _preferences_bytes().replace(b'"synthetic.sqlite3"', b'"bad\\u0000path"'),
+    _preferences_bytes().replace(b'"synthetic.sqlite3"', b'"bad\\npath"'),
+    _preferences_bytes().replace(b'"synthetic.sqlite3"', b'"\\ud800"'),
+    _preferences_bytes().replace(b'"version": 1', b'"version": 1, "version": 1'),
+    _preferences_bytes().replace(b'"database_path":', b'"customer_id":"x","database_path":'),
+], ids=lambda data: hashlib.sha256(data).hexdigest()[:12])
+def test_invalid_preferences_startup_is_atomic_noop(
+    data: bytes, private_preferences_location: Path,
+) -> None:
+    private_preferences_location.parent.mkdir()
+    private_preferences_location.write_bytes(data)
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    before = controller.snapshot()
+    app._restore_workspace_preferences()
+    assert controller.snapshot() == before
+    assert controller.customers == controller.jobs == ()
+    assert private_preferences_location.read_bytes() == data
+
+
+def test_preferences_atomic_deterministic_and_replace_failure(
+    private_preferences_location: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = private_preferences_location
+    workspace = json.loads(_preferences_bytes())["workspace"]
+    proposal_desktop._write_workspace_preferences(path, workspace)
+    original = path.read_bytes()
+    proposal_desktop._write_workspace_preferences(path, dict(reversed(list(workspace.items()))))
+    assert path.read_bytes() == original
+    def fail(*args: object) -> None:
+        raise OSError("synthetic failure")
+    monkeypatch.setattr(proposal_desktop.os, "replace", fail)
+    with pytest.raises(OSError):
+        proposal_desktop._write_workspace_preferences(
+            path, {**workspace, "output_root": "changed"}
+        )
+    assert path.read_bytes() == original
+    assert list(path.parent.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("action,field", [
+    ("_browse_database", "database_path"), ("_browse_template", "template_path"),
+    ("_browse_output_root", "output_root"), ("_create_records_database", "database_path"),
+])
+def test_explicit_workspace_actions_persist_only_selected_path(
+    action: str, field: str, private_preferences_location: Path, tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    controller.state.notes = "synthetic proposal content must not persist"
+    controller.state.template_path = "unselected draft template"
+    app = _headless_app(controller).app
+    selected = str(tmp_path / "selected")
+    app._filedialog = SimpleNamespace(
+        askopenfilename=lambda **kw: selected, askdirectory=lambda **kw: selected,
+        asksaveasfilename=lambda **kw: selected,
+    )
+    getattr(app, action)()
+    document = json.loads(private_preferences_location.read_bytes())
+    assert document["workspace"] == {
+        name: selected if name == field else "" for name in proposal_desktop._PREFERENCE_FIELDS
+    }
+    assert set(document) == {"format", "version", "workspace"}
+    assert not controller.generation_enabled and not controller.open_actions_enabled
+
+
+@pytest.mark.parametrize("action", [
+    "_browse_database", "_browse_template", "_browse_output_root", "_create_records_database",
+])
+def test_workspace_cancellation_never_persists(
+    action: str, private_preferences_location: Path,
+) -> None:
+    app = _headless_app(proposal_desktop.ProposalDesktopController()).app
+    before = app.controller.snapshot()
+    app._filedialog = SimpleNamespace(
+        askopenfilename=lambda **kw: "", askdirectory=lambda **kw: "",
+        asksaveasfilename=lambda **kw: "",
+    )
+    getattr(app, action)()
+    assert app.controller.snapshot() == before
+    assert not private_preferences_location.exists()
+
+
+def test_failed_creation_does_not_persist_and_write_failure_keeps_selection(
+    tmp_path: Path, private_preferences_location: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _headless_app(proposal_desktop.ProposalDesktopController()).app
+    destination = tmp_path / "existing"
+    destination.write_bytes(b"preserve")
+    app._filedialog.save_result = str(destination)
+    app._create_records_database()
+    assert not private_preferences_location.exists()
+    assert destination.read_bytes() == b"preserve"
+    def fail(*args: object) -> None:
+        raise OSError("private path not for display")
+    monkeypatch.setattr(proposal_desktop, "_write_workspace_preferences", fail)
+    selected = tmp_path / "new.sqlite3"
+    app._filedialog.save_result = str(selected)
+    app._create_records_database()
+    assert app.controller.state.database_path == str(selected)
+    assert selected.exists()
+    assert app._status_variable.get() == (
+        "Workspace selection succeeded; preferences could not be saved."
+    )
+
+
+def test_preferences_git_location_refused(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / "settings" / "preferences.json"
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        proposal_desktop._write_workspace_preferences(
+            path, json.loads(_preferences_bytes())["workspace"]
+        )
+    assert not path.parent.exists()
+
+
+def test_missing_preferences_preserves_supplied_form(tmp_path: Path) -> None:
+    controller = _configured_controller(tmp_path).controller
+    before = controller.snapshot()
+    _headless_app(controller).app._restore_workspace_preferences()
+    assert controller.snapshot() == before
+
+
+def test_startup_reads_once_without_record_or_proposal_operations(
+    private_preferences_location: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_preferences_location.parent.mkdir()
+    private_preferences_location.write_bytes(_preferences_bytes())
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Startup must not access records or proposal services")
+    controller = proposal_desktop.ProposalDesktopController(
+        customer_repository_factory=forbidden, job_repository_factory=forbidden,
+        records_database_initializer=forbidden, records_database_validator=forbidden,
+        validation_function=forbidden, build_function=forbidden, path_opener=forbidden,
+    )
+    for name in ("_build_widgets", "_bind_state_changes", "_refresh_scope_list",
+                 "_refresh_action_states"):
+        monkeypatch.setattr(proposal_desktop.ProposalDesktopApp, name, lambda *args: None)
+    app = proposal_desktop.ProposalDesktopApp(
+        object(), controller=controller, toolkit=(object(),) * 4,
+    )
+    assert app.controller.state.database_path == "synthetic.sqlite3"
+    assert app.controller.state.selected_customer_id == ""
+    assert app.controller.state.selected_job_id == ""
+    assert not controller.open_actions_enabled and not controller.generation_enabled
+
+
+def test_restore_clears_even_matching_database_selection_and_authority(
+    tmp_path: Path, private_preferences_location: Path,
+) -> None:
+    controller = _configured_controller(tmp_path).controller
+    controller.validate_draft()
+    workspace = {name: getattr(controller.state, name)
+                 for name in proposal_desktop._PREFERENCE_FIELDS}
+    proposal_desktop._write_workspace_preferences(private_preferences_location, workspace)
+    app = _headless_app(controller).app
+    app._restore_workspace_preferences()
+    assert controller.customers == controller.jobs == ()
+    assert controller.state.selected_customer_id == controller.state.selected_job_id == ""
+    assert controller.validated_request is None and controller.build_result is None
+    assert controller.customer_edit_expected_original is None
+    assert controller.job_edit_expected_original is None
+
+
+@pytest.fixture(autouse=True)
+def private_preferences_location(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "private-settings" / "workspace-preferences.json"
+    monkeypatch.setattr(proposal_desktop, "_workspace_preferences_path", lambda: path)
+    return path
+
+
 def _customer(
     customer_id: str = "customer-synthetic-001",
     display_name: str = "Synthetic Customer",
@@ -218,6 +427,8 @@ def _headless_app(
     job_creation_status_variable = FakeVariable("No job creation requested.")
     job_edit_status_variable = FakeVariable("Select an existing job to edit.")
     app.controller = controller
+    app._preferences_path = proposal_desktop._workspace_preferences_path()
+    app._remembered_workspace = dict.fromkeys(proposal_desktop._PREFERENCE_FIELDS, "")
     app._root = object()
     app._messagebox = messagebox
     app._filedialog = filedialog
@@ -226,6 +437,7 @@ def _headless_app(
         name: FakeVariable(str(getattr(controller.state, name)))
         for name in (
             "database_path",
+            "template_path",
             "output_root",
             "output_folder",
             "proposal_input_json_output_path",
