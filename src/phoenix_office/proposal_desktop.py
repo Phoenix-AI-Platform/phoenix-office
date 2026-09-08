@@ -1865,6 +1865,14 @@ class ProposalDesktopApp:
             lambda event: canvas.itemconfigure(window, width=event.width),
         )
 
+        self._status_variable = self._tk.StringVar(value="Ready to begin.")
+        self._next_action_variable = self._tk.StringVar(value="Next action: choose a workspace.")
+        self._stage_variables = {
+            name: self._tk.StringVar(value="Needs attention")
+            for name in ("workspace", "customer", "job", "proposal", "review")
+        }
+        self._build_guided_header()
+
         self._build_workspace_section()
         self._build_customer_creation_section()
         self._build_customer_edit_section()
@@ -1873,6 +1881,40 @@ class ProposalDesktopApp:
         self._build_job_edit_section()
         self._build_details_section()
         self._build_actions_section()
+
+    def _build_guided_header(self) -> None:
+        header = self._ttk.LabelFrame(
+            self._form,
+            text="Guided Proposal Workspace",
+            padding=10,
+        )
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        self._ttk.Label(
+            header,
+            textvariable=self._status_variable,
+            font=("TkDefaultFont", 11, "bold"),
+            wraplength=820,
+        ).grid(row=0, column=0, sticky="w")
+        self._ttk.Label(
+            header,
+            textvariable=self._next_action_variable,
+            wraplength=820,
+        ).grid(row=1, column=0, sticky="w", pady=(3, 8))
+        stages = self._ttk.Frame(header)
+        stages.grid(row=2, column=0, sticky="ew")
+        for column, (key, title) in enumerate((
+            ("workspace", "1. Workspace"),
+            ("customer", "2. Customer"),
+            ("job", "3. Job"),
+            ("proposal", "4. Proposal"),
+            ("review", "5. Review & Generate"),
+        )):
+            cell = self._ttk.Frame(stages, padding=(4, 2))
+            cell.grid(row=0, column=column, sticky="ew")
+            stages.columnconfigure(column, weight=1)
+            self._ttk.Label(cell, text=title).pack(anchor="w")
+            self._ttk.Label(cell, textvariable=self._stage_variables[key]).pack(anchor="w")
 
     def _section(self, title: str, row: int) -> object:
         frame = self._ttk.LabelFrame(self._form, text=title, padding=10)
@@ -1937,7 +1979,7 @@ class ProposalDesktopApp:
 
     def _build_workspace_section(self) -> None:
         state = self.controller.state
-        frame = self._section("Step 1 — Private Workspace and Existing Customer", 0)
+        frame = self._section("Step 1 — Workspace", 1)
         self._labeled_entry(
             frame,
             row=0,
@@ -1999,7 +2041,7 @@ class ProposalDesktopApp:
 
     def _build_customer_creation_section(self) -> None:
         state = self.controller.customer_creation_state
-        frame = self._section("Create Customer — Explicit Local Insert", 1)
+        frame = self._section("Step 2 — Customer: Create", 2)
         for row, (label, name, value) in enumerate(
             (
                 ("Customer ID", "customer_id", state.customer_id),
@@ -2078,7 +2120,7 @@ class ProposalDesktopApp:
 
     def _build_customer_edit_section(self) -> None:
         state = self.controller.customer_edit_state
-        frame = self._section("Edit Customer — Guarded Existing-Record Update", 2)
+        frame = self._section("Step 2 — Customer: Edit", 3)
         fields = (
             ("Customer ID", "customer_id", state.customer_id),
             ("Display Name", "display_name", state.display_name),
@@ -2152,7 +2194,7 @@ class ProposalDesktopApp:
         )
 
     def _build_job_section(self) -> None:
-        frame = self._section("Step 2 — Existing Job", 3)
+        frame = self._section("Step 3 — Job", 4)
         self._ttk.Label(frame, text="Existing Job").grid(
             row=0,
             column=0,
@@ -2171,7 +2213,7 @@ class ProposalDesktopApp:
 
     def _build_job_creation_section(self) -> None:
         state = self.controller.job_creation_state
-        frame = self._section("Create Job — Explicit Local Insert", 4)
+        frame = self._section("Step 3 — Job: Create", 5)
         fields = (
             ("Job ID", "job_id", state.job_id),
             ("Job Name", "job_name", state.job_name),
@@ -2273,7 +2315,7 @@ class ProposalDesktopApp:
 
     def _build_job_edit_section(self) -> None:
         state = self.controller.job_edit_state
-        frame = self._section("Edit Job — Guarded Existing-Record Update", 5)
+        frame = self._section("Step 3 — Job: Edit", 6)
         fields = (
             ("Job ID", "job_id", state.job_id),
             ("Customer ID", "customer_id", state.customer_id),
@@ -2375,7 +2417,7 @@ class ProposalDesktopApp:
 
     def _build_details_section(self) -> None:
         state = self.controller.state
-        frame = self._section("Step 3 — Explicit Proposal Details", 6)
+        frame = self._section("Step 4 — Proposal", 7)
         row = 0
         for label, name, value, browse_command in (
             ("Proposal Date", "proposal_date", state.proposal_date, None),
@@ -2487,7 +2529,7 @@ class ProposalDesktopApp:
         return widget
 
     def _build_actions_section(self) -> None:
-        frame = self._section("Step 4 — Validate, Generate, and Open", 7)
+        frame = self._section("Step 5 — Review & Generate", 8)
         buttons = self._ttk.Frame(frame)
         buttons.grid(row=0, column=0, columnspan=3, sticky="ew")
         self._validate_button = self._ttk.Button(
@@ -2540,12 +2582,9 @@ class ProposalDesktopApp:
             sticky="ew",
             pady=(10, 3),
         )
-        self._status_variable = self._tk.StringVar(value="Validation required.")
-        self._ttk.Label(
-            frame,
-            textvariable=self._status_variable,
-            wraplength=760,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self._ttk.Label(frame, text="Status is shown at the top of the workspace.").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
 
     def _bind_state_changes(self) -> None:
         for name, variable in self._variables.items():
@@ -3372,6 +3411,7 @@ class ProposalDesktopApp:
         self._refresh_action_states()
 
     def _refresh_action_states(self) -> None:
+        self._refresh_guided_progress()
         self._generate_button.configure(
             state="normal" if self.controller.generation_enabled else "disabled"
         )
@@ -3379,6 +3419,43 @@ class ProposalDesktopApp:
         self._open_json_button.configure(state=open_state)
         self._open_docx_button.configure(state=open_state)
         self._open_folder_button.configure(state=open_state)
+
+    def _refresh_guided_progress(self) -> None:
+        if not hasattr(self, "_stage_variables"):
+            return
+        state = self.controller.state
+        workspace = all(
+            bool(getattr(state, name, ""))
+            for name in ("database_path", "template_path", "output_root")
+        )
+        customer = bool(state.selected_customer_id)
+        job = bool(state.selected_job_id)
+        proposal = bool(self.controller.validated_request)
+        review = bool(self.controller.build_result or self.controller.generation_enabled)
+        statuses = {
+            "workspace": "Complete" if workspace else "Needs attention",
+            "customer": "Complete" if customer else "Needs attention",
+            "job": "Complete" if job else "Needs attention",
+            "proposal": "Validated" if proposal else "Needs attention",
+            "review": "Complete" if self.controller.build_result else (
+                "Validated" if review else "Needs attention"
+            ),
+        }
+        for key, value in statuses.items():
+            self._stage_variables[key].set(value)
+        if not workspace:
+            next_action = "Next action: select or create the records workspace."
+        elif not customer:
+            next_action = "Next action: load and explicitly select a customer, or create one."
+        elif not job:
+            next_action = "Next action: load and explicitly select a job, or create one."
+        elif not proposal:
+            next_action = "Next action: validate the proposal."
+        elif not self.controller.build_result:
+            next_action = "Next action: generate the proposal draft."
+        else:
+            next_action = "Next action: open a generated artifact when ready."
+        self._next_action_variable.set(next_action)
 
 
 def main() -> int:

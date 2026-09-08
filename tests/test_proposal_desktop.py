@@ -233,6 +233,52 @@ def test_startup_reads_once_without_record_or_proposal_operations(
     assert not controller.open_actions_enabled and not controller.generation_enabled
 
 
+def test_guided_workspace_has_five_stages_and_derives_next_action_from_state() -> None:
+    source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
+    for label in (
+        "1. Workspace", "2. Customer", "3. Job", "4. Proposal",
+        "5. Review & Generate", "Guided Proposal Workspace",
+    ):
+        assert label in source
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._stage_variables = {
+        name: FakeVariable() for name in ("workspace", "customer", "job", "proposal", "review")
+    }
+    app._next_action_variable = FakeVariable()
+    app._refresh_guided_progress()
+    assert app._stage_variables["workspace"].value == "Needs attention"
+    assert app._stage_variables["proposal"].value == "Needs attention"
+    assert app._stage_variables["proposal"].value != "Ready for review"
+    assert app._next_action_variable.value.startswith("Next action:")
+    controller.state.database_path = "db.sqlite3"
+    controller.state.template_path = "template.docx"
+    controller.state.output_root = "output"
+    app._refresh_guided_progress()
+    assert app._stage_variables["workspace"].value == "Complete"
+    assert app._stage_variables["customer"].value == "Needs attention"
+    assert controller.customers == controller.jobs == ()
+
+
+def test_guided_proposal_stage_uses_canonical_validation_and_build_authority() -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._stage_variables = {
+        name: FakeVariable() for name in ("workspace", "customer", "job", "proposal", "review")
+    }
+    app._next_action_variable = FakeVariable()
+    app._refresh_guided_progress()
+    assert app._stage_variables["proposal"].value != "Ready for review"
+    assert app._stage_variables["review"].value == "Needs attention"
+    controller._validated_request = object()  # type: ignore[assignment]
+    app._refresh_guided_progress()
+    assert app._stage_variables["proposal"].value == "Validated"
+    assert app._stage_variables["review"].value == "Needs attention"
+    controller._build_result = object()  # type: ignore[assignment]
+    app._refresh_guided_progress()
+    assert app._stage_variables["review"].value == "Complete"
+
+
 def test_restore_clears_even_matching_database_selection_and_authority(
     tmp_path: Path, private_preferences_location: Path,
 ) -> None:
