@@ -260,6 +260,42 @@ def test_guided_workspace_has_five_stages_and_derives_next_action_from_state() -
     assert controller.customers == controller.jobs == ()
 
 
+def test_recent_work_is_bounded_deduplicated_and_kind_path_only(tmp_path: Path) -> None:
+    path = tmp_path / "recent-work.json"
+    entries = [
+        {"kind": "draft", "path": str(tmp_path / f"draft-{i}.json")}
+        for i in range(proposal_desktop._RECENT_WORK_MAX_ENTRIES + 2)
+    ]
+    entries.append(entries[2])
+    kept = entries[-proposal_desktop._RECENT_WORK_MAX_ENTRIES:]
+    proposal_desktop._write_recent_work(path, kept)
+    parsed = proposal_desktop._read_recent_work(path)
+    assert len(parsed) == proposal_desktop._RECENT_WORK_MAX_ENTRIES
+    assert set(parsed[-1]) == {"kind", "path"}
+    assert parsed[-1] == entries[2]
+
+
+def test_recent_work_missing_and_malformed_are_empty_or_refused(tmp_path: Path) -> None:
+    path = tmp_path / "missing.json"
+    assert proposal_desktop._read_recent_work(path) == []
+    path.write_bytes(b"not-json")
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        proposal_desktop._read_recent_work(path)
+
+
+def test_recent_work_selection_does_not_open_until_explicit_action(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController(
+        path_opener=lambda _: pytest.fail("not yet")
+    )
+    app = _headless_app(controller).app
+    app._recent_entries = [{"kind": "proposal_json", "path": str(tmp_path / "output.json")}]
+    app._selected_recent_entry = lambda: app._recent_entries[0]
+    app._open_selected_recent_button = FakeButton()
+    app._open_selected_file_button = FakeButton()
+    app._refresh_recent_actions()
+    assert app._open_selected_file_button.state == "normal"
+
+
 def test_guided_proposal_stage_uses_canonical_validation_and_build_authority() -> None:
     controller = proposal_desktop.ProposalDesktopController()
     app = _headless_app(controller).app
