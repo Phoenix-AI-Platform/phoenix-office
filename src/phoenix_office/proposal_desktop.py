@@ -630,6 +630,8 @@ def _parse_recent_work(data: bytes) -> list[dict[str, str]]:
                 raise ValueError
             if not path or len(path) > 4096 or "\x00" in path:
                 raise ValueError
+            if not Path(path).is_absolute() or path.startswith(("\\\\", "//")):
+                raise ValueError
             key = (kind, path)
             if key in seen:
                 raise ValueError
@@ -3028,11 +3030,14 @@ class ProposalDesktopApp:
         )
         if not selected:
             return
+        self._open_explicit_draft(selected)
+
+    def _open_explicit_draft(self, selected: str | Path) -> bool:
         try:
             self.controller.open_proposal_draft(selected)
         except DesktopFormError as error:
             self._show_error(error)
-            return
+            return False
         self._clear_customer_and_job_widgets()
         state = self.controller.state
         self._updating_widgets = True
@@ -3063,6 +3068,7 @@ class ProposalDesktopApp:
         self._show_invalidated_state()
         self._status_variable.set("Proposal form reopened; explicit validation required.")
         self._record_recent_work("draft", selected)
+        return True
 
     def _create_records_database(self) -> None:
         selected = self._filedialog.asksaveasfilename(
@@ -3459,8 +3465,7 @@ class ProposalDesktopApp:
         path = Path(entry["path"])
         try:
             if entry["kind"] == "draft":
-                self.controller.open_proposal_draft(path)
-                self._status_variable.set("Proposal form reopened; explicit validation required.")
+                self._open_explicit_draft(path)
             elif entry["kind"] in {"proposal_json", "proposal_docx"}:
                 if not path.is_file():
                     raise DesktopFormError("The selected recent file is unavailable.")

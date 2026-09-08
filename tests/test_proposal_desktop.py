@@ -283,6 +283,26 @@ def test_recent_work_missing_and_malformed_are_empty_or_refused(tmp_path: Path) 
         proposal_desktop._read_recent_work(path)
 
 
+def test_recent_work_rejects_relative_paths(tmp_path: Path) -> None:
+    payload = {
+        "format": proposal_desktop._RECENT_WORK_FORMAT,
+        "version": 1,
+        "entries": [{"kind": "draft", "path": "relative/draft.json"}],
+    }
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        proposal_desktop._parse_recent_work(json.dumps(payload).encode())
+
+
+def test_recent_draft_open_uses_shared_task090_desktop_path(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._recent_entries = [{"kind": "draft", "path": str(tmp_path / "draft.json")}]
+    app._selected_recent_entry = lambda: app._recent_entries[0]
+    app._open_explicit_draft = lambda path: setattr(app, "opened_draft", path) or True
+    app._open_selected_recent()
+    assert app.opened_draft == Path(app._recent_entries[0]["path"])
+
+
 def test_recent_work_selection_does_not_open_until_explicit_action(tmp_path: Path) -> None:
     controller = proposal_desktop.ProposalDesktopController(
         path_opener=lambda _: pytest.fail("not yet")
