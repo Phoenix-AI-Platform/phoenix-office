@@ -3430,18 +3430,13 @@ class ProposalDesktopApp:
         )
         customer = bool(state.selected_customer_id)
         job = bool(state.selected_job_id)
-        proposal = bool(
-            customer
-            and job
-            and state.item_description.strip()
-            and bool(state.output_folder)
-        )
-        review = bool(self.controller.validated_request)
+        proposal = bool(self.controller.validated_request)
+        review = bool(self.controller.build_result or self.controller.generation_enabled)
         statuses = {
             "workspace": "Complete" if workspace else "Needs attention",
             "customer": "Complete" if customer else "Needs attention",
             "job": "Complete" if job else "Needs attention",
-            "proposal": "Ready for review" if proposal else "Needs attention",
+            "proposal": "Validated" if proposal else "Needs attention",
             "review": "Complete" if self.controller.build_result else (
                 "Validated" if review else "Needs attention"
             ),
@@ -3455,8 +3450,6 @@ class ProposalDesktopApp:
         elif not job:
             next_action = "Next action: load and explicitly select a job, or create one."
         elif not proposal:
-            next_action = "Next action: complete the proposal details."
-        elif not review:
             next_action = "Next action: validate the proposal."
         elif not self.controller.build_result:
             next_action = "Next action: generate the proposal draft."
