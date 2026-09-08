@@ -317,6 +317,57 @@ def test_recent_draft_open_uses_shared_task090_desktop_path(tmp_path: Path) -> N
     assert app.opened_draft == Path(app._recent_entries[0]["path"])
 
 
+def test_generated_panel_is_neutral_without_current_build(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._generated_status_variable = FakeVariable()
+    app._generated_docx_variable = FakeVariable()
+    app._generated_json_variable = FakeVariable()
+    app._generated_folder_variable = FakeVariable()
+    app._generated_docx_button = FakeButton()
+    app._generated_folder_button = FakeButton()
+    app._recent_entries = [{"kind": "proposal_docx", "path": str(tmp_path / "old.docx")}]
+    app._refresh_generated_panel()
+    assert app._generated_status_variable.get() == "No generated proposal yet."
+    assert app._generated_docx_button.state == "disabled"
+    assert app._generated_folder_button.state == "disabled"
+
+
+def test_generated_panel_uses_current_build_and_existing_open_authority(
+    tmp_path: Path,
+) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._generated_status_variable = FakeVariable()
+    app._generated_docx_variable = FakeVariable()
+    app._generated_json_variable = FakeVariable()
+    app._generated_folder_variable = FakeVariable()
+    app._generated_docx_button = FakeButton()
+    app._generated_folder_button = FakeButton()
+    docx = tmp_path / "proposal.docx"
+    proposal_json = tmp_path / "proposal_input.json"
+    controller._build_result = SimpleNamespace(
+        proposal_docx_path=docx,
+        proposal_input_json_path=proposal_json,
+    )
+    app._refresh_generated_panel()
+    assert app._generated_status_variable.get() == "Proposal generated successfully"
+    assert app._generated_docx_variable.get() == docx.name
+    assert app._generated_json_variable.get() == proposal_json.name
+    assert app._generated_folder_variable.get() == tmp_path.name
+    assert app._generated_docx_button.state == "normal"
+    assert app._generated_folder_button.state == "normal"
+
+    opened: list[str] = []
+    controller._path_opener = lambda path: opened.append(str(path))
+    app._open_docx()
+    app._open_folder()
+    assert opened == [str(docx), str(tmp_path)]
+    controller._build_result = None
+    app._refresh_generated_panel()
+    assert app._generated_docx_button.state == "disabled"
+
+
 def test_recent_work_selection_does_not_open_until_explicit_action(tmp_path: Path) -> None:
     controller = proposal_desktop.ProposalDesktopController(
         path_opener=lambda _: pytest.fail("not yet")
