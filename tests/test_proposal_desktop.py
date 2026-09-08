@@ -293,6 +293,20 @@ def test_recent_work_rejects_relative_paths(tmp_path: Path) -> None:
         proposal_desktop._parse_recent_work(json.dumps(payload).encode())
 
 
+@pytest.mark.parametrize("version", [True, "1", 1.0, 2])
+def test_recent_work_requires_strict_version_one(version: object) -> None:
+    payload = {
+        "format": proposal_desktop._RECENT_WORK_FORMAT,
+        "version": version,
+        "entries": [],
+    }
+    if version == 1 and type(version) is int:
+        assert proposal_desktop._parse_recent_work(json.dumps(payload).encode()) == []
+    else:
+        with pytest.raises(proposal_desktop.DesktopFormError):
+            proposal_desktop._parse_recent_work(json.dumps(payload).encode())
+
+
 def test_recent_draft_open_uses_shared_task090_desktop_path(tmp_path: Path) -> None:
     controller = proposal_desktop.ProposalDesktopController()
     app = _headless_app(controller).app
@@ -1202,6 +1216,38 @@ def test_draft_gui_save_open_restores_widgets_and_disables_actions(tmp_path: Pat
     assert len(controller_harness.validation_calls) == 1
     assert len(controller_harness.build_calls) == 1
     assert not controller_harness.opened_paths
+
+    class RecentList:
+        def __init__(self) -> None:
+            self.selected = (0,)
+        def curselection(self) -> tuple[int, ...]:
+            return self.selected
+        def delete(self, *_args: object) -> None:
+            pass
+        def insert(self, *_args: object) -> None:
+            pass
+
+    app._recent_path = tmp_path / "recent-work.json"
+    app._recent_list = RecentList()
+    app._recent_entries = [
+        {"kind": "draft", "path": str(tmp_path / "older.json")},
+        {"kind": "draft", "path": str(path)},
+    ]
+    app._open_selected_recent()
+    assert controller.snapshot() == saved
+    assert app._notes_text.content == saved.notes
+    assert app._terms_text.content == saved.terms_and_conditions
+    assert app._recent_entries[-1] == {"kind": "draft", "path": str(path)}
+    assert app._recent_entries.count({"kind": "draft", "path": str(path)}) == 1
+
+    before_state = controller.snapshot()
+    before_widgets = {name: variable.get() for name, variable in app._variables.items()}
+    app._recent_entries = [{"kind": "draft", "path": str(tmp_path / "missing.json")}]
+    app._open_selected_recent()
+    assert controller.snapshot() == before_state
+    assert {name: variable.get() for name, variable in app._variables.items()} == before_widgets
+    assert app._notes_text.content == saved.notes
+    assert app._terms_text.content == saved.terms_and_conditions
 
 
 @pytest.mark.parametrize("action", ["_save_proposal_draft", "_open_proposal_draft"])

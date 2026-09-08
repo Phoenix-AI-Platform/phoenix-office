@@ -615,7 +615,11 @@ def _parse_recent_work(data: bytes) -> list[dict[str, str]]:
         document = json.loads(data.decode("utf-8"), object_pairs_hook=_draft_object)
         if type(document) is not dict or set(document) != {"format", "version", "entries"}:
             raise ValueError
-        if document["format"] != _RECENT_WORK_FORMAT or document["version"] != 1:
+        if (
+            document["format"] != _RECENT_WORK_FORMAT
+            or type(document["version"]) is not int
+            or document["version"] != 1
+        ):
             raise ValueError
         entries = document["entries"]
         if type(entries) is not list or len(entries) > _RECENT_WORK_MAX_ENTRIES:
@@ -666,6 +670,7 @@ def _write_recent_work(path: Path, entries: list[dict[str, str]]) -> None:
     _parse_recent_work(payload)
     _check_preferences_location(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_preferences_location(path)
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as stream:
@@ -673,6 +678,7 @@ def _write_recent_work(path: Path, entries: list[dict[str, str]]) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        _check_preferences_location(path)
         os.replace(temporary, path)
     finally:
         if temporary is not None and temporary.exists():
