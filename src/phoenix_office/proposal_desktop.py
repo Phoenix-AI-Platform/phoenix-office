@@ -2710,8 +2710,41 @@ class ProposalDesktopApp:
             sticky="ew",
             pady=(10, 3),
         )
+        handoff = self._ttk.LabelFrame(frame, text="Generated Proposal")
+        handoff.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 3))
+        handoff.columnconfigure(1, weight=1)
+        self._generated_status_variable = self._tk.StringVar(
+            value="No generated proposal yet."
+        )
+        self._generated_docx_variable = self._tk.StringVar(value="")
+        self._generated_json_variable = self._tk.StringVar(value="")
+        self._generated_folder_variable = self._tk.StringVar(value="")
+        self._ttk.Label(handoff, textvariable=self._generated_status_variable).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(4, 4)
+        )
+        for row, label, variable in (
+            (1, "DOCX", self._generated_docx_variable),
+            (2, "Proposal JSON", self._generated_json_variable),
+            (3, "Output folder", self._generated_folder_variable),
+        ):
+            self._ttk.Label(handoff, text=f"{label}:").grid(
+                row=row, column=0, sticky="w", padx=(0, 8), pady=2
+            )
+            self._ttk.Label(handoff, textvariable=variable).grid(
+                row=row, column=1, sticky="w", pady=2
+            )
+        handoff_buttons = self._ttk.Frame(handoff)
+        handoff_buttons.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 4))
+        self._generated_docx_button = self._ttk.Button(
+            handoff_buttons, text="Open Proposal DOCX", command=self._open_docx
+        )
+        self._generated_folder_button = self._ttk.Button(
+            handoff_buttons, text="Open Output Folder", command=self._open_folder
+        )
+        self._generated_docx_button.grid(row=0, column=0)
+        self._generated_folder_button.grid(row=0, column=1, padx=(6, 0))
         self._ttk.Label(frame, text="Status is shown at the top of the workspace.").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0)
+            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
     def _bind_state_changes(self) -> None:
@@ -3590,6 +3623,7 @@ class ProposalDesktopApp:
 
     def _refresh_action_states(self) -> None:
         self._refresh_guided_progress()
+        self._refresh_generated_panel()
         self._generate_button.configure(
             state="normal" if self.controller.generation_enabled else "disabled"
         )
@@ -3597,6 +3631,26 @@ class ProposalDesktopApp:
         self._open_json_button.configure(state=open_state)
         self._open_docx_button.configure(state=open_state)
         self._open_folder_button.configure(state=open_state)
+
+    def _refresh_generated_panel(self) -> None:
+        if not hasattr(self, "_generated_status_variable"):
+            return
+        result = self.controller.build_result
+        if result is None:
+            self._generated_status_variable.set("No generated proposal yet.")
+            self._generated_docx_variable.set("")
+            self._generated_json_variable.set("")
+            self._generated_folder_variable.set("")
+            self._generated_docx_button.configure(state="disabled")
+            self._generated_folder_button.configure(state="disabled")
+            return
+        self._generated_status_variable.set("Proposal generated successfully")
+        self._generated_docx_variable.set(Path(result.proposal_docx_path).name)
+        self._generated_json_variable.set(Path(result.proposal_input_json_path).name)
+        self._generated_folder_variable.set(Path(result.proposal_input_json_path).parent.name)
+        open_state = "normal" if self.controller.open_actions_enabled else "disabled"
+        self._generated_docx_button.configure(state=open_state)
+        self._generated_folder_button.configure(state=open_state)
 
     def _refresh_guided_progress(self) -> None:
         if not hasattr(self, "_stage_variables"):
