@@ -509,6 +509,10 @@ def is_path_inside_git_worktree(path: Path) -> bool:
 
 _PREFERENCE_FIELDS = ("database_path", "template_path", "output_root")
 _PREFERENCES_MAX_BYTES = 32_768
+_RECENT_WORK_FORMAT = "phoenix-office-desktop-recent-work"
+_RECENT_WORK_MAX_BYTES = 32_768
+_RECENT_WORK_MAX_ENTRIES = 12
+_RECENT_WORK_KINDS = frozenset(("draft", "proposal_docx", "proposal_json"))
 
 
 def _parse_workspace_preferences(data: bytes) -> dict[str, str]:
@@ -591,6 +595,87 @@ def _write_workspace_preferences(path: Path, workspace: dict[str, str]) -> None:
         with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as stream:
             temporary = Path(stream.name)
             stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _check_preferences_location(path)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _recent_work_path() -> Path:
+    return _workspace_preferences_path().with_name("recent-work.json")
+
+
+def _parse_recent_work(data: bytes) -> list[dict[str, str]]:
+    try:
+        if len(data) > _RECENT_WORK_MAX_BYTES:
+            raise ValueError
+        document = json.loads(data.decode("utf-8"), object_pairs_hook=_draft_object)
+        if type(document) is not dict or set(document) != {"format", "version", "entries"}:
+            raise ValueError
+        if (
+            document["format"] != _RECENT_WORK_FORMAT
+            or type(document["version"]) is not int
+            or document["version"] != 1
+        ):
+            raise ValueError
+        entries = document["entries"]
+        if type(entries) is not list or len(entries) > _RECENT_WORK_MAX_ENTRIES:
+            raise ValueError
+        result: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in entries:
+            if type(entry) is not dict or set(entry) != {"kind", "path"}:
+                raise ValueError
+            kind, path = entry["kind"], entry["path"]
+            if kind not in _RECENT_WORK_KINDS or type(path) is not str:
+                raise ValueError
+            if not path or len(path) > 4096 or "\x00" in path:
+                raise ValueError
+            if not Path(path).is_absolute() or path.startswith(("\\\\", "//")):
+                raise ValueError
+            key = (kind, path)
+            if key in seen:
+                raise ValueError
+            seen.add(key)
+            result.append({"kind": kind, "path": path})
+        return result
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise DesktopFormError("Recent work history is malformed or unsupported.") from None
+
+
+def _read_recent_work(path: Path) -> list[dict[str, str]]:
+    _check_preferences_location(path)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _RECENT_WORK_MAX_BYTES:
+        raise DesktopFormError("Recent work history is malformed or unsupported.")
+    with path.open("rb") as stream:
+        return _parse_recent_work(stream.read(_RECENT_WORK_MAX_BYTES + 1))
+
+
+def _write_recent_work(path: Path, entries: list[dict[str, str]]) -> None:
+    payload = json.dumps(
+        {
+            "format": _RECENT_WORK_FORMAT,
+            "version": 1,
+            "entries": entries[-_RECENT_WORK_MAX_ENTRIES:],
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8") + b"\n"
+    _parse_recent_work(payload)
+    _check_preferences_location(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _check_preferences_location(path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         _check_preferences_location(path)
@@ -1798,6 +1883,7 @@ class ProposalDesktopApp:
     ) -> None:
         self.controller = controller or ProposalDesktopController()
         self._restore_workspace_preferences()
+        self._restore_recent_work()
         self._tk, self._ttk, self._filedialog, self._messagebox = (
             toolkit or _load_tkinter()
         )
@@ -1812,6 +1898,33 @@ class ProposalDesktopApp:
         self._bind_state_changes()
         self._refresh_scope_list(0)
         self._refresh_action_states()
+
+    def _restore_recent_work(self) -> None:
+        self._recent_path: Path | None = None
+        self._recent_entries: list[dict[str, str]] = []
+        try:
+            self._recent_path = _recent_work_path()
+            self._recent_entries = _read_recent_work(self._recent_path)
+        except (OSError, ValueError, RuntimeError):
+            self._recent_entries = []
+
+    def _record_recent_work(self, kind: str, path: str | Path) -> None:
+        if kind not in _RECENT_WORK_KINDS:
+            return
+        if getattr(self, "_recent_path", None) is None:
+            return
+        entry = {"kind": kind, "path": str(Path(path).expanduser().resolve(strict=False))}
+        entries = [row for row in getattr(self, "_recent_entries", [])
+                   if (row["kind"], row["path"]) != (entry["kind"], entry["path"])]
+        entries.append(entry)
+        try:
+            _write_recent_work(self._recent_path, entries)
+            self._recent_entries = entries[-_RECENT_WORK_MAX_ENTRIES:]
+            self._refresh_recent_work()
+        except (OSError, ValueError, RuntimeError):
+            self._status_variable.set(
+                "Workspace action succeeded; recent work could not be saved."
+            )
 
     def _restore_workspace_preferences(self) -> None:
         self._remembered_workspace = dict.fromkeys(_PREFERENCE_FIELDS, "")
@@ -1901,8 +2014,22 @@ class ProposalDesktopApp:
             textvariable=self._next_action_variable,
             wraplength=820,
         ).grid(row=1, column=0, sticky="w", pady=(3, 8))
+        recent = self._ttk.LabelFrame(header, text="Recent Work", padding=6)
+        recent.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        recent.columnconfigure(0, weight=1)
+        self._recent_list = self._tk.Listbox(recent, height=4, exportselection=False)
+        self._recent_list.grid(row=0, column=0, rowspan=2, sticky="ew")
+        self._recent_list.bind("<<ListboxSelect>>", lambda _event: self._refresh_recent_actions())
+        self._open_selected_recent_button = self._ttk.Button(
+            recent, text="Open Selected Draft", command=self._open_selected_recent
+        )
+        self._open_selected_recent_button.grid(row=0, column=1, padx=(6, 0), sticky="ew")
+        self._open_selected_file_button = self._ttk.Button(
+            recent, text="Open Selected File", command=self._open_selected_recent
+        )
+        self._open_selected_file_button.grid(row=1, column=1, padx=(6, 0), sticky="ew")
         stages = self._ttk.Frame(header)
-        stages.grid(row=2, column=0, sticky="ew")
+        stages.grid(row=4, column=0, sticky="ew")
         for column, (key, title) in enumerate((
             ("workspace", "1. Workspace"),
             ("customer", "2. Customer"),
@@ -1915,6 +2042,7 @@ class ProposalDesktopApp:
             stages.columnconfigure(column, weight=1)
             self._ttk.Label(cell, text=title).pack(anchor="w")
             self._ttk.Label(cell, textvariable=self._stage_variables[key]).pack(anchor="w")
+        self._refresh_recent_work()
 
     def _section(self, title: str, row: int) -> object:
         frame = self._ttk.LabelFrame(self._form, text=title, padding=10)
@@ -2900,6 +3028,7 @@ class ProposalDesktopApp:
             self._show_error(error)
             return
         self._status_variable.set("Proposal form saved locally; no proposal was generated.")
+        self._record_recent_work("draft", selected)
 
     def _open_proposal_draft(self) -> None:
         selected = self._filedialog.askopenfilename(
@@ -2907,11 +3036,14 @@ class ProposalDesktopApp:
         )
         if not selected:
             return
+        self._open_explicit_draft(selected)
+
+    def _open_explicit_draft(self, selected: str | Path) -> bool:
         try:
             self.controller.open_proposal_draft(selected)
         except DesktopFormError as error:
             self._show_error(error)
-            return
+            return False
         self._clear_customer_and_job_widgets()
         state = self.controller.state
         self._updating_widgets = True
@@ -2941,6 +3073,8 @@ class ProposalDesktopApp:
         self._refresh_scope_list(0 if state.scope_descriptions else None)
         self._show_invalidated_state()
         self._status_variable.set("Proposal form reopened; explicit validation required.")
+        self._record_recent_work("draft", selected)
+        return True
 
     def _create_records_database(self) -> None:
         selected = self._filedialog.asksaveasfilename(
@@ -3280,6 +3414,8 @@ class ProposalDesktopApp:
                 "Generated local artifacts:\n"
                 f"{result.proposal_input_json_path}\n{result.proposal_docx_path}"
             )
+            self._record_recent_work("proposal_json", result.proposal_input_json_path)
+            self._record_recent_work("proposal_docx", result.proposal_docx_path)
             self._refresh_action_states()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             if self.controller.validated_request is None:
@@ -3302,6 +3438,48 @@ class ProposalDesktopApp:
 
     def _open_folder(self) -> None:
         self._run_open_action(self.controller.open_output_folder)
+
+    def _refresh_recent_work(self) -> None:
+        if not hasattr(self, "_recent_list"):
+            return
+        self._recent_list.delete(0, "end")
+        for entry in getattr(self, "_recent_entries", []):
+            self._recent_list.insert("end", f"{entry['kind']}: {Path(entry['path']).name}")
+        self._refresh_recent_actions()
+
+    def _selected_recent_entry(self) -> dict[str, str] | None:
+        if not hasattr(self, "_recent_list"):
+            return None
+        selected = self._recent_list.curselection()
+        return self._recent_entries[selected[0]] if selected else None
+
+    def _refresh_recent_actions(self) -> None:
+        entry = self._selected_recent_entry()
+        if not hasattr(self, "_open_selected_recent_button"):
+            return
+        self._open_selected_recent_button.configure(
+            state="normal" if entry and entry["kind"] == "draft" else "disabled"
+        )
+        self._open_selected_file_button.configure(
+            state="normal" if entry and entry["kind"] != "draft" else "disabled"
+        )
+
+    def _open_selected_recent(self) -> None:
+        entry = self._selected_recent_entry()
+        if entry is None:
+            return
+        path = Path(entry["path"])
+        try:
+            if entry["kind"] == "draft":
+                self._open_explicit_draft(path)
+            elif entry["kind"] in {"proposal_json", "proposal_docx"}:
+                if not path.is_file():
+                    raise DesktopFormError("The selected recent file is unavailable.")
+                self.controller._path_opener(path)
+            else:
+                raise DesktopFormError("The selected recent item is unsupported.")
+        except Exception as exc:  # noqa: BLE001 - local GUI boundary.
+            self._show_error(exc)
 
     def _run_open_action(self, action: Callable[[], None]) -> None:
         try:

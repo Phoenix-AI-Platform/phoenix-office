@@ -260,6 +260,76 @@ def test_guided_workspace_has_five_stages_and_derives_next_action_from_state() -
     assert controller.customers == controller.jobs == ()
 
 
+def test_recent_work_is_bounded_deduplicated_and_kind_path_only(tmp_path: Path) -> None:
+    path = tmp_path / "recent-work.json"
+    entries = [
+        {"kind": "draft", "path": str(tmp_path / f"draft-{i}.json")}
+        for i in range(proposal_desktop._RECENT_WORK_MAX_ENTRIES + 2)
+    ]
+    entries.append(entries[2])
+    kept = entries[-proposal_desktop._RECENT_WORK_MAX_ENTRIES:]
+    proposal_desktop._write_recent_work(path, kept)
+    parsed = proposal_desktop._read_recent_work(path)
+    assert len(parsed) == proposal_desktop._RECENT_WORK_MAX_ENTRIES
+    assert set(parsed[-1]) == {"kind", "path"}
+    assert parsed[-1] == entries[2]
+
+
+def test_recent_work_missing_and_malformed_are_empty_or_refused(tmp_path: Path) -> None:
+    path = tmp_path / "missing.json"
+    assert proposal_desktop._read_recent_work(path) == []
+    path.write_bytes(b"not-json")
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        proposal_desktop._read_recent_work(path)
+
+
+def test_recent_work_rejects_relative_paths(tmp_path: Path) -> None:
+    payload = {
+        "format": proposal_desktop._RECENT_WORK_FORMAT,
+        "version": 1,
+        "entries": [{"kind": "draft", "path": "relative/draft.json"}],
+    }
+    with pytest.raises(proposal_desktop.DesktopFormError):
+        proposal_desktop._parse_recent_work(json.dumps(payload).encode())
+
+
+@pytest.mark.parametrize("version", [True, "1", 1.0, 2])
+def test_recent_work_requires_strict_version_one(version: object) -> None:
+    payload = {
+        "format": proposal_desktop._RECENT_WORK_FORMAT,
+        "version": version,
+        "entries": [],
+    }
+    if version == 1 and type(version) is int:
+        assert proposal_desktop._parse_recent_work(json.dumps(payload).encode()) == []
+    else:
+        with pytest.raises(proposal_desktop.DesktopFormError):
+            proposal_desktop._parse_recent_work(json.dumps(payload).encode())
+
+
+def test_recent_draft_open_uses_shared_task090_desktop_path(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._recent_entries = [{"kind": "draft", "path": str(tmp_path / "draft.json")}]
+    app._selected_recent_entry = lambda: app._recent_entries[0]
+    app._open_explicit_draft = lambda path: setattr(app, "opened_draft", path) or True
+    app._open_selected_recent()
+    assert app.opened_draft == Path(app._recent_entries[0]["path"])
+
+
+def test_recent_work_selection_does_not_open_until_explicit_action(tmp_path: Path) -> None:
+    controller = proposal_desktop.ProposalDesktopController(
+        path_opener=lambda _: pytest.fail("not yet")
+    )
+    app = _headless_app(controller).app
+    app._recent_entries = [{"kind": "proposal_json", "path": str(tmp_path / "output.json")}]
+    app._selected_recent_entry = lambda: app._recent_entries[0]
+    app._open_selected_recent_button = FakeButton()
+    app._open_selected_file_button = FakeButton()
+    app._refresh_recent_actions()
+    assert app._open_selected_file_button.state == "normal"
+
+
 def test_guided_proposal_stage_uses_canonical_validation_and_build_authority() -> None:
     controller = proposal_desktop.ProposalDesktopController()
     app = _headless_app(controller).app
@@ -1146,6 +1216,38 @@ def test_draft_gui_save_open_restores_widgets_and_disables_actions(tmp_path: Pat
     assert len(controller_harness.validation_calls) == 1
     assert len(controller_harness.build_calls) == 1
     assert not controller_harness.opened_paths
+
+    class RecentList:
+        def __init__(self) -> None:
+            self.selected = (0,)
+        def curselection(self) -> tuple[int, ...]:
+            return self.selected
+        def delete(self, *_args: object) -> None:
+            pass
+        def insert(self, *_args: object) -> None:
+            pass
+
+    app._recent_path = tmp_path / "recent-work.json"
+    app._recent_list = RecentList()
+    app._recent_entries = [
+        {"kind": "draft", "path": str(tmp_path / "older.json")},
+        {"kind": "draft", "path": str(path)},
+    ]
+    app._open_selected_recent()
+    assert controller.snapshot() == saved
+    assert app._notes_text.content == saved.notes
+    assert app._terms_text.content == saved.terms_and_conditions
+    assert app._recent_entries[-1] == {"kind": "draft", "path": str(path)}
+    assert app._recent_entries.count({"kind": "draft", "path": str(path)}) == 1
+
+    before_state = controller.snapshot()
+    before_widgets = {name: variable.get() for name, variable in app._variables.items()}
+    app._recent_entries = [{"kind": "draft", "path": str(tmp_path / "missing.json")}]
+    app._open_selected_recent()
+    assert controller.snapshot() == before_state
+    assert {name: variable.get() for name, variable in app._variables.items()} == before_widgets
+    assert app._notes_text.content == saved.notes
+    assert app._terms_text.content == saved.terms_and_conditions
 
 
 @pytest.mark.parametrize("action", ["_save_proposal_draft", "_open_proposal_draft"])
