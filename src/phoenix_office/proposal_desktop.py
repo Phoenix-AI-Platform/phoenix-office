@@ -1960,9 +1960,19 @@ class ProposalDesktopApp:
         root.title("Phoenix Office Proposal Draft")
         root.minsize(900, 700)
 
+        self._status_variable = self._tk.StringVar(value="Ready to begin.")
+        self._next_action_variable = self._tk.StringVar(value="Next action: choose a workspace.")
+        self._stage_variables = {
+            name: self._tk.StringVar(value="Needs attention")
+            for name in ("workspace", "customer", "job", "proposal", "review")
+        }
+        self._stage_sections = {}
+        self._build_guided_header()
+
         container = ttk.Frame(root)
         container.pack(fill="both", expand=True)
         canvas = tk.Canvas(container, highlightthickness=0)
+        self._form_canvas = canvas
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         self._form = ttk.Frame(canvas, padding=12)
         window = canvas.create_window((0, 0), window=self._form, anchor="nw")
@@ -1978,13 +1988,7 @@ class ProposalDesktopApp:
             lambda event: canvas.itemconfigure(window, width=event.width),
         )
 
-        self._status_variable = self._tk.StringVar(value="Ready to begin.")
-        self._next_action_variable = self._tk.StringVar(value="Next action: choose a workspace.")
-        self._stage_variables = {
-            name: self._tk.StringVar(value="Needs attention")
-            for name in ("workspace", "customer", "job", "proposal", "review")
-        }
-        self._build_guided_header()
+        self._build_recent_work_section()
 
         self._build_workspace_section()
         self._build_customer_creation_section()
@@ -1997,11 +2001,11 @@ class ProposalDesktopApp:
 
     def _build_guided_header(self) -> None:
         header = self._ttk.LabelFrame(
-            self._form,
+            self._root,
             text="Guided Proposal Workspace",
             padding=10,
         )
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.pack(fill="x", padx=12, pady=(8, 0))
         header.columnconfigure(0, weight=1)
         self._ttk.Label(
             header,
@@ -2014,8 +2018,32 @@ class ProposalDesktopApp:
             textvariable=self._next_action_variable,
             wraplength=820,
         ).grid(row=1, column=0, sticky="w", pady=(3, 8))
-        recent = self._ttk.LabelFrame(header, text="Recent Work", padding=6)
-        recent.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        stages = self._ttk.Frame(header)
+        stages.grid(row=2, column=0, sticky="ew")
+        for column, (key, title) in enumerate((
+            ("workspace", "1. Workspace"),
+            ("customer", "2. Customer"),
+            ("job", "3. Job"),
+            ("proposal", "4. Proposal"),
+            ("review", "5. Review & Generate"),
+        )):
+            cell = self._ttk.Frame(stages, padding=(4, 2))
+            cell.grid(row=0, column=column, sticky="ew")
+            stages.columnconfigure(column, weight=1)
+            self._ttk.Button(
+                cell, text=title, command=lambda stage=key: self._navigate_stage(stage)
+            ).pack(anchor="w")
+            self._ttk.Label(cell, textvariable=self._stage_variables[key]).pack(anchor="w")
+
+    def _navigate_stage(self, stage: str) -> None:
+        """Move the viewport only; navigation grants no workflow authority."""
+        section = self._stage_sections[stage]
+        height = self._form.winfo_height()
+        self._form_canvas.yview_moveto(section.winfo_y() / max(1, height))
+
+    def _build_recent_work_section(self) -> None:
+        recent = self._ttk.LabelFrame(self._form, text="Recent Work", padding=6)
+        recent.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         recent.columnconfigure(0, weight=1)
         self._recent_list = self._tk.Listbox(recent, height=4, exportselection=False)
         self._recent_list.grid(row=0, column=0, rowspan=2, sticky="ew")
@@ -2028,20 +2056,6 @@ class ProposalDesktopApp:
             recent, text="Open Selected File", command=self._open_selected_recent
         )
         self._open_selected_file_button.grid(row=1, column=1, padx=(6, 0), sticky="ew")
-        stages = self._ttk.Frame(header)
-        stages.grid(row=4, column=0, sticky="ew")
-        for column, (key, title) in enumerate((
-            ("workspace", "1. Workspace"),
-            ("customer", "2. Customer"),
-            ("job", "3. Job"),
-            ("proposal", "4. Proposal"),
-            ("review", "5. Review & Generate"),
-        )):
-            cell = self._ttk.Frame(stages, padding=(4, 2))
-            cell.grid(row=0, column=column, sticky="ew")
-            stages.columnconfigure(column, weight=1)
-            self._ttk.Label(cell, text=title).pack(anchor="w")
-            self._ttk.Label(cell, textvariable=self._stage_variables[key]).pack(anchor="w")
         self._refresh_recent_work()
 
     def _section(self, title: str, row: int) -> object:
@@ -2049,6 +2063,9 @@ class ProposalDesktopApp:
         frame.grid(row=row, column=0, sticky="ew", pady=(0, 10))
         frame.columnconfigure(1, weight=1)
         self._form.columnconfigure(0, weight=1)
+        stage = {1: "workspace", 2: "customer", 4: "job", 7: "proposal", 8: "review"}.get(row)
+        if stage is not None:
+            self._stage_sections[stage] = frame
         return frame
 
     def _string_variable(self, name: str, value: str) -> object:
