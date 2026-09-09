@@ -22,6 +22,39 @@ pip install -e ".[dev]"
 
 ## Quick Start — Proposal Generation
 
+### Internal Windows V1 desktop launch
+
+In the canonical local checkout, use the existing Phoenix Office Python environment.
+The source/developer launch remains:
+
+```powershell
+python -m phoenix_office.proposal_desktop
+```
+
+Refresh installed entry-point metadata explicitly from that checkout without
+reinstalling dependencies:
+
+```powershell
+python -m pip install -e . --no-deps
+```
+
+With that environment active, the installed GUI launch is:
+
+```powershell
+phoenix-office-desktop
+```
+
+Both launch paths use the same desktop application. The existing `phoenix-office`
+CLI remains unchanged. This is not a standalone portable EXE or frozen installer;
+the installed Python environment is still required. This task does not automatically
+create a Windows Desktop shortcut. After acceptance, an operator may explicitly
+create a shortcut to the installed `phoenix-office-desktop` launcher.
+
+Launching does not authorize record creation, validation, generation, or file opening;
+those remain explicit desktop actions.
+
+### Python proposal example
+
 ```python
 from datetime import date
 from decimal import Decimal

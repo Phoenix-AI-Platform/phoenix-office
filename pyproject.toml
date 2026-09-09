@@ -16,6 +16,9 @@ dependencies = [
 [project.scripts]
 phoenix-office = "phoenix_office.cli:main"
 
+[project.gui-scripts]
+phoenix-office-desktop = "phoenix_office.proposal_desktop:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
