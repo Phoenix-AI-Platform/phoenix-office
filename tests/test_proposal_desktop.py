@@ -233,6 +233,94 @@ def test_startup_reads_once_without_record_or_proposal_operations(
     assert not controller.open_actions_enabled and not controller.generation_enabled
 
 
+def test_output_widgets_show_distinct_labels_and_lexical_context_without_mutation() -> None:
+    widgets = []
+
+    class Widget:
+        def __init__(self, parent=None, **options):
+            self.options = options
+            widgets.append(self)
+
+        def grid(self, **options):
+            pass
+
+        def columnconfigure(self, *args, **options):
+            pass
+
+        def bind(self, *args):
+            pass
+
+        def insert(self, *args):
+            pass
+
+        def edit_modified(self, *args):
+            pass
+
+    controller = proposal_desktop.ProposalDesktopController()
+    prefix = "C:/synthetic/" + "long-parent/" * 40
+    controller.state.output_root = prefix + "save-area"
+    controller.state.output_folder = prefix + "save-area/proposal-one"
+    controller.state.proposal_docx_output_path = prefix + "save-area/proposal-one/customer.docx"
+    controller.state.proposal_input_json_output_path = prefix + "save-area/proposal-one/data.json"
+    before = repr(vars(controller))
+    app = _headless_app(controller).app
+    app._form = Widget()
+    app._stage_sections = {}
+    app._tk = SimpleNamespace(StringVar=FakeVariable, BooleanVar=FakeVariable,
+                              Listbox=Widget, Text=Widget)
+    app._ttk = SimpleNamespace(LabelFrame=Widget, Frame=Widget, Label=Widget,
+                               Entry=Widget, Button=Widget, Combobox=Widget, Checkbutton=Widget)
+    app._build_workspace_section()
+    app._build_details_section()
+    labels = [widget.options.get("text", "") for widget in widgets]
+    for label in ("Proposal Save Location", "Current Proposal Folder",
+                  "Proposal Document (DOCX)", "Companion Data (JSON)"):
+        assert label in labels
+    guidance = next(text for text in labels if "permitted output area" in text)
+    assert "within it" in guidance
+    assert "customer-facing document" in guidance
+    assert "does not choose paths or validate them" in guidance
+    assert app._destination_summary_variable.get() == (
+        "Save location: save-area\nCurrent folder: proposal-one\n"
+        "Primary DOCX filename: customer.docx\nCompanion JSON filename: data.json"
+    )
+    for field in ("output_root", "output_folder", "proposal_docx_output_path",
+                  "proposal_input_json_output_path"):
+        assert app._variables[field].get() == getattr(controller.state, field)
+    assert repr(vars(controller)) == before
+    controller.state.proposal_docx_output_path = "x" * 1000
+    app._refresh_destination_summary()
+    assert len(app._destination_summary_variable.get()) < 400
+    assert controller.state.proposal_docx_output_path == "x" * 1000
+    controller.state.proposal_docx_output_path = ""
+    app._refresh_destination_summary()
+    assert "Primary DOCX filename: Not specified" in app._destination_summary_variable.get()
+
+
+@pytest.mark.parametrize("label", ["Output Root", "Output Folder", "Proposal DOCX",
+                                  "Proposal Input JSON"])
+def test_unsafe_output_refusal_keeps_condition_and_translates_only_display(
+    tmp_path: Path, label: str,
+) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    path = tmp_path / "synthetic-output"
+    before = repr(vars(controller))
+    with pytest.raises(proposal_desktop.DesktopFormError) as caught:
+        controller._reject_git_worktree_path(label, path)
+    assert str(caught.value) == f"{label} must be outside every Git worktree."
+    app._show_error(caught.value)
+    message = app._messagebox.errors[-1][1]
+    assert "normal local work/output folder" in message
+    assert "outside the Phoenix application" in message
+    assert "source-code workspaces" in message
+    assert str(path) not in message
+    assert len(message) < 300
+    assert repr(vars(controller)) == before
+    assert not path.exists()
+
+
 def test_persistent_guidance_and_navigation_use_existing_state_only() -> None:
     widgets = []
 
@@ -4802,7 +4890,7 @@ def test_gui_job_selection_failure_clears_job_combo_and_generation_authority(
     assert harness.opened_paths == []
 
 
-def test_gui_successful_generation_reports_selected_docx_path(
+def test_gui_successful_generation_reports_concise_status_without_artifact_paths(
     tmp_path: Path,
 ) -> None:
     harness = _configured_controller(tmp_path)
@@ -4817,8 +4905,14 @@ def test_gui_successful_generation_reports_selected_docx_path(
 
     assert harness.build_calls == [validated_request]
     assert harness.build_calls[0] is validated_request
-    assert str(selected) in app_harness.status_variable.value
-    assert app_harness.status_variable.value.startswith("Generated local artifacts")
+    assert str(selected) not in app_harness.status_variable.value
+    assert (
+        str(controller.build_result.proposal_input_json_path)
+        not in app_harness.status_variable.value
+    )
+    assert app_harness.status_variable.value == (
+        "Proposal generated successfully. Review the Generated Proposal panel below."
+    )
     assert all(button.state == "normal" for button in app_harness.open_buttons)
     assert harness.opened_paths == []
     assert app_harness.messagebox.errors == []
