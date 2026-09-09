@@ -62,6 +62,23 @@ RecordsDatabaseValidator = Callable[[Path], None]
 
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
+
+def _recent_work_label(entry: dict[str, str]) -> str:
+    """Bounded lexical identity only; never inspect the referenced file."""
+    kinds = {"draft": "Draft", "proposal_docx": "Proposal DOCX", "proposal_json": "Proposal Data"}
+    parts = entry["path"].replace("\\", "/").rstrip("/").split("/")
+
+    def display_part(value: str, limit: int) -> str:
+        clean = "".join(character if character.isprintable() else "?" for character in value)
+        return clean if len(clean) <= limit else clean[: limit - 1] + "…"
+
+    filename = display_part(parts[-1] or "Unnamed file", 40)
+    parent = parts[-2] if len(parts) > 1 else ""
+    if not parent or parent.endswith(":"):
+        parent = "Root folder"
+    return f"{kinds[entry['kind']]} — {filename} — {display_part(parent, 28)}"
+
+
 _TEXT_FIELDS = frozenset(
     {
         "database_path",
@@ -2042,7 +2059,9 @@ class ProposalDesktopApp:
         self._form_canvas.yview_moveto(section.winfo_y() / max(1, height))
 
     def _build_recent_work_section(self) -> None:
-        recent = self._ttk.LabelFrame(self._form, text="Recent Work", padding=6)
+        recent = self._ttk.LabelFrame(
+            self._form, text="Recent Work — most recent first; select, then open", padding=6
+        )
         recent.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         recent.columnconfigure(0, weight=1)
         self._recent_list = self._tk.Listbox(recent, height=4, exportselection=False)
@@ -3534,15 +3553,17 @@ class ProposalDesktopApp:
         if not hasattr(self, "_recent_list"):
             return
         self._recent_list.delete(0, "end")
-        for entry in getattr(self, "_recent_entries", []):
-            self._recent_list.insert("end", f"{entry['kind']}: {Path(entry['path']).name}")
+        self._displayed_recent_entries = tuple(reversed(getattr(self, "_recent_entries", [])))
+        for entry in self._displayed_recent_entries:
+            self._recent_list.insert("end", _recent_work_label(entry))
         self._refresh_recent_actions()
 
     def _selected_recent_entry(self) -> dict[str, str] | None:
         if not hasattr(self, "_recent_list"):
             return None
         selected = self._recent_list.curselection()
-        return self._recent_entries[selected[0]] if selected else None
+        entries = getattr(self, "_displayed_recent_entries", ())
+        return entries[selected[0]] if selected and 0 <= selected[0] < len(entries) else None
 
     def _refresh_recent_actions(self) -> None:
         entry = self._selected_recent_entry()

@@ -469,6 +469,93 @@ def test_recent_work_requires_strict_version_one(version: object) -> None:
             proposal_desktop._parse_recent_work(json.dumps(payload).encode())
 
 
+@pytest.mark.parametrize("kind,label", [
+    ("draft", "Draft"), ("proposal_docx", "Proposal DOCX"), ("proposal_json", "Proposal Data"),
+])
+def test_recent_labels_are_bounded_lexical_identity(kind: str, label: str) -> None:
+    first = {"kind": kind, "path": "C:/private/demo-one/proposal.docx"}
+    second = {"kind": kind, "path": "C:/private/demo-two/proposal.docx"}
+    rendered = proposal_desktop._recent_work_label(first)
+    assert rendered == f"{label} — proposal.docx — demo-one"
+    assert rendered != proposal_desktop._recent_work_label(second)
+    assert "C:" not in rendered and "private" not in rendered
+    long = {"kind": kind, "path": "C:/" + "a" * 200 + "/" + "b" * 200 + ".json"}
+    before = dict(long)
+    assert len(proposal_desktop._recent_work_label(long)) <= 87
+    assert long == before
+    assert "Root folder" in proposal_desktop._recent_work_label({"kind": kind, "path": "C:/x"})
+    assert "\n" not in proposal_desktop._recent_work_label({"kind": kind, "path": "/a\n/b\t"})
+
+
+def test_recent_render_order_and_explicit_actions_match_visible_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened = []
+    controller = proposal_desktop.ProposalDesktopController(path_opener=opened.append)
+    harness = _headless_app(controller)
+    app = harness.app
+    artifact = tmp_path / "proposal.docx"
+    artifact.write_bytes(b"synthetic")
+    entries = [
+        {"kind": "proposal_docx", "path": str(artifact)},
+        {"kind": "draft", "path": str(tmp_path / "draft.json")},
+    ]
+    original = json.dumps(entries)
+
+    class RecentList:
+        rows: list[str]
+        selected = ()
+        def delete(self, *_args: object) -> None:
+            self.rows = []
+            self.selected = ()
+        def insert(self, _index: str, text: str) -> None:
+            self.rows.append(text)
+        def curselection(self) -> tuple[int, ...]:
+            return self.selected
+
+    app._recent_list = RecentList()
+    app._recent_entries = entries
+    app._open_selected_recent_button = FakeButton()
+    app._open_selected_file_button = FakeButton()
+    drafts = []
+    app._open_explicit_draft = drafts.append
+    before = controller.snapshot()
+    with monkeypatch.context() as patch:
+        def forbidden(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("list presentation must not inspect files or persist anything")
+        for name in ("stat", "open", "resolve", "iterdir", "glob"):
+            patch.setattr(Path, name, forbidden)
+        patch.setattr(proposal_desktop, "_write_recent_work", forbidden)
+        app._refresh_recent_work()
+        assert app._recent_list.rows == [
+            proposal_desktop._recent_work_label(e) for e in reversed(entries)
+        ]
+        for index, entry in enumerate(reversed(entries)):
+            app._recent_list.selected = (index,)
+            app._refresh_recent_actions()
+            assert app._selected_recent_entry() == entry
+            assert app._open_selected_recent_button.state == (
+                "normal" if index == 0 else "disabled"
+            )
+            assert app._open_selected_file_button.state == ("disabled" if index == 0 else "normal")
+        assert not opened and not drafts
+    assert json.dumps(entries) == original
+    app._recent_list.selected = (0,)
+    app._open_selected_recent()
+    assert drafts == [Path(entries[1]["path"])]
+    app._recent_list.selected = (1,)
+    app._open_selected_recent()
+    assert opened == [artifact]
+    assert controller.snapshot() == before
+    assert controller.build_result is None
+    assert controller.validated_request is None
+    artifact.unlink()
+    app._open_selected_recent()
+    assert len(opened) == 1
+    assert harness.messagebox.errors
+    assert controller.snapshot() == before
+
+
 def test_recent_draft_open_uses_shared_task090_desktop_path(tmp_path: Path) -> None:
     controller = proposal_desktop.ProposalDesktopController()
     app = _headless_app(controller).app
@@ -1446,6 +1533,7 @@ def test_draft_gui_save_open_restores_widgets_and_disables_actions(tmp_path: Pat
         {"kind": "draft", "path": str(tmp_path / "older.json")},
         {"kind": "draft", "path": str(path)},
     ]
+    app._refresh_recent_work()
     app._open_selected_recent()
     assert controller.snapshot() == saved
     assert app._notes_text.content == saved.notes
@@ -1456,6 +1544,7 @@ def test_draft_gui_save_open_restores_widgets_and_disables_actions(tmp_path: Pat
     before_state = controller.snapshot()
     before_widgets = {name: variable.get() for name, variable in app._variables.items()}
     app._recent_entries = [{"kind": "draft", "path": str(tmp_path / "missing.json")}]
+    app._refresh_recent_work()
     app._open_selected_recent()
     assert controller.snapshot() == before_state
     assert {name: variable.get() for name, variable in app._variables.items()} == before_widgets
