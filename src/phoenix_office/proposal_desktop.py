@@ -2149,7 +2149,7 @@ class ProposalDesktopApp:
         self._labeled_entry(
             frame,
             row=2,
-            label="Output Root",
+            label="Proposal Save Location",
             name="output_root",
             value=state.output_root,
             browse_command=self._browse_output_root,
@@ -2577,18 +2577,18 @@ class ProposalDesktopApp:
                 None,
             ),
             ("Total Label", "total_label", state.total_label, None),
-            ("Output Folder", "output_folder", state.output_folder, None),
+            ("Current Proposal Folder", "output_folder", state.output_folder, None),
             (
-                "Proposal Input JSON",
-                "proposal_input_json_output_path",
-                state.proposal_input_json_output_path,
-                None,
-            ),
-            (
-                "Proposal DOCX",
+                "Proposal Document (DOCX)",
                 "proposal_docx_output_path",
                 state.proposal_docx_output_path,
                 self._browse_docx_output,
+            ),
+            (
+                "Companion Data (JSON)",
+                "proposal_input_json_output_path",
+                state.proposal_input_json_output_path,
+                None,
             ),
         ):
             self._labeled_entry(
@@ -2600,6 +2600,9 @@ class ProposalDesktopApp:
                 browse_command=browse_command,
             )
             row += 1
+
+        self._build_destination_guidance(frame, row)
+        row += 2
 
         self._starting_at_variable = self._tk.BooleanVar(value=state.is_starting_at)
         self._ttk.Checkbutton(
@@ -2652,6 +2655,45 @@ class ProposalDesktopApp:
             "Terms and Conditions",
             state.terms_and_conditions,
         )
+
+    def _build_destination_guidance(self, frame: object, row: int) -> None:
+        self._ttk.Label(
+            frame,
+            text=(
+                "Proposal Save Location is the permitted output area. Choose the current "
+                "proposal folder within it, then specify both file paths in that folder. "
+                "The DOCX is the customer-facing document; JSON is supporting data. "
+                "Keep full paths in the editable fields above. This summary does not "
+                "choose paths or validate them."
+            ),
+            wraplength=650,
+        ).grid(row=row, column=1, columnspan=2, sticky="w", pady=3)
+        self._destination_summary_variable = self._tk.StringVar(value="")
+        self._ttk.Label(
+            frame, textvariable=self._destination_summary_variable, wraplength=650,
+        ).grid(row=row + 1, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        self._refresh_destination_summary()
+
+    def _refresh_destination_summary(self) -> None:
+        if not hasattr(self, "_destination_summary_variable"):
+            return
+
+        def display_name(value: str) -> str:
+            # Lexical display only: never resolve, inspect, validate, or derive paths.
+            name = value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+            name = " ".join(name.split())
+            return name[:93] + "..." if len(name) > 96 else name or "Not specified"
+
+        state = self.controller.state
+        self._destination_summary_variable.set("\n".join(
+            f"{label}: {display_name(getattr(state, field))}"
+            for label, field in (
+                ("Save location", "output_root"),
+                ("Current folder", "output_folder"),
+                ("Primary DOCX filename", "proposal_docx_output_path"),
+                ("Companion JSON filename", "proposal_input_json_output_path"),
+            )
+        ))
 
     def _multiline_field(
         self,
@@ -3461,8 +3503,7 @@ class ProposalDesktopApp:
         try:
             result = self.controller.generate_draft()
             self._status_variable.set(
-                "Generated local artifacts:\n"
-                f"{result.proposal_input_json_path}\n{result.proposal_docx_path}"
+                "Proposal generated successfully. Review the Generated Proposal panel below."
             )
             self._record_recent_work("proposal_json", result.proposal_input_json_path)
             self._record_recent_work("proposal_docx", result.proposal_docx_path)
@@ -3635,10 +3676,27 @@ class ProposalDesktopApp:
         self._summary_text.configure(state="disabled")
 
     def _show_error(self, error: Exception) -> None:
-        self._messagebox.showerror("Phoenix Office", str(error), parent=self._root)
+        message = str(error)
+        output_labels = {
+            "Output Root": "Proposal Save Location",
+            "Output Folder": "Current Proposal Folder",
+            "Proposal DOCX": "Proposal Document (DOCX)",
+            "Proposal Input JSON": "Companion Data (JSON)",
+        }
+        if isinstance(error, DesktopFormError):
+            for label, display in output_labels.items():
+                if message == f"{label} must be outside every Git worktree.":
+                    message = (
+                        f"{display}: choose a normal local work/output folder outside "
+                        "the Phoenix application and all source-code workspaces "
+                        "(Git worktrees). The selected location was refused."
+                    )
+                    break
+        self._messagebox.showerror("Phoenix Office", message, parent=self._root)
         self._refresh_action_states()
 
     def _refresh_action_states(self) -> None:
+        self._refresh_destination_summary()
         self._refresh_guided_progress()
         self._refresh_generated_panel()
         self._generate_button.configure(
