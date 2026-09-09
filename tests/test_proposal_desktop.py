@@ -233,6 +233,80 @@ def test_startup_reads_once_without_record_or_proposal_operations(
     assert not controller.open_actions_enabled and not controller.generation_enabled
 
 
+def test_persistent_guidance_and_navigation_use_existing_state_only() -> None:
+    widgets = []
+
+    class Widget:
+        def __init__(self, parent=None, **options):
+            self.parent = parent
+            self.options = options
+            self.position = 0
+            widgets.append(self)
+
+        def grid(self, **options):
+            self.position = options.get("row", 0) * 100
+
+        def pack(self, **options):
+            self.pack_options = options
+
+        def columnconfigure(self, *args, **options):
+            pass
+
+        def winfo_y(self):
+            return self.position
+
+        def winfo_height(self):
+            return 1000
+
+    controller = proposal_desktop.ProposalDesktopController()
+    app = _headless_app(controller).app
+    app._root = Widget()
+    app._form = Widget()
+    app._ttk = SimpleNamespace(LabelFrame=Widget, Frame=Widget, Label=Widget, Button=Widget)
+    app._stage_variables = {
+        key: FakeVariable() for key in ("workspace", "customer", "job", "proposal", "review")
+    }
+    app._next_action_variable = FakeVariable()
+    app._stage_sections = {}
+    app._refresh_guided_progress()
+    app._build_guided_header()
+    header = next(widget for widget in widgets
+                  if widget.options.get("text") == "Guided Proposal Workspace")
+    assert header.parent is app._root
+    assert header.parent is not app._form
+    variables = [widget.options.get("textvariable") for widget in widgets]
+    assert app._status_variable in variables
+    assert app._next_action_variable in variables
+    assert all(variable in variables for variable in app._stage_variables.values())
+    buttons = [widget for widget in widgets if "command" in widget.options]
+    assert [button.options["text"] for button in buttons] == [
+        "1. Workspace", "2. Customer", "3. Job", "4. Proposal", "5. Review & Generate",
+    ]
+    rows = (1, 2, 4, 7, 8)
+    for row in rows:
+        app._section("Existing section", row)
+    # Secondary create/edit sections must not replace the primary stage target.
+    for row in (3, 5, 6):
+        app._section("Secondary section", row)
+    movements = []
+    app._form_canvas = SimpleNamespace(yview_moveto=movements.append)
+    before = repr(vars(controller))
+    statuses = {key: variable.get() for key, variable in app._stage_variables.items()}
+    guidance = app._next_action_variable.get()
+
+    class NoWorkflowAccess:
+        def __getattribute__(self, name):
+            raise AssertionError(f"Navigation accessed controller: {name}")
+
+    app.controller = NoWorkflowAccess()
+    for button, row in zip(buttons, rows, strict=True):
+        button.options["command"]()
+        assert movements[-1] == row / 10
+        assert {key: variable.get() for key, variable in app._stage_variables.items()} == statuses
+        assert app._next_action_variable.get() == guidance
+    assert repr(vars(controller)) == before
+
+
 def test_guided_workspace_has_five_stages_and_derives_next_action_from_state() -> None:
     source = inspect.getsource(proposal_desktop.ProposalDesktopApp)
     for label in (
