@@ -749,6 +749,13 @@ class FakeCombo:
         self.current_index = self.values.index(value) if value in self.values else -1
 
 
+class StrictFakeCombo(FakeCombo):
+    def current(self, index: int | None = None) -> int:
+        if index is not None and not 0 <= index < len(self.values):
+            raise IndexError(f"combobox index {index} out of range")
+        return super().current(index)
+
+
 class FakeText:
     def __init__(self, content: str = "") -> None:
         self.content = content
@@ -1744,6 +1751,125 @@ def test_job_selection_failure_synchronizes_canonical_and_visible_state(
     assert app_harness.messagebox.errors == [
         ("Phoenix Office", "simulated job selection failure", app_harness.app._root)
     ]
+
+
+def test_customer_search_recovers_after_failed_job_load_without_reload(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path,
+        customers=customers,
+        jobs=jobs,
+    ).controller
+    app_harness, generated_variables, generated_buttons = (
+        _headless_app_with_current_generated_build(controller)
+    )
+    strict_customer_combo = StrictFakeCombo(
+        values=controller.customer_display_labels,
+        current=0,
+    )
+    app_harness.app._customer_combo = strict_customer_combo
+    app_harness.customer_combo = strict_customer_combo
+    app_harness.app._stage_variables = {
+        name: FakeVariable()
+        for name in ("workspace", "customer", "job", "proposal", "review")
+    }
+    app_harness.app._next_action_variable = FakeVariable()
+    app_harness.app._refresh_action_states()
+    original_job_repository_factory = controller._job_repository_factory
+
+    class FailingJobRepository:
+        def list_jobs_for_customer(self, _customer_id: str) -> list[JobRecord]:
+            raise OSError("simulated read-only job load failure")
+
+    monkeypatch.setattr(
+        controller,
+        "_job_repository_factory",
+        lambda *_args, **_kwargs: FailingJobRepository(),
+    )
+    app_harness.customer_search_variable.set("53704")
+    app_harness.app._on_customer_search_changed()
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == "job-synthetic-001"
+    app_harness.customer_search_combo.current(0)
+    app_harness.app._activate_customer_search_result()
+
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_variable.get() == ""
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.get() == "Draft changed; validation required."
+    assert generated_variables[0].get() == "No generated proposal yet."
+    assert all(variable.get() == "" for variable in generated_variables[1:])
+    assert all(button.state == "disabled" for button in generated_buttons)
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert tuple(
+        result.record_id for result in app_harness.app._customer_search_results
+    ) == ("customer-synthetic-002",)
+    first_failure_count = len(app_harness.messagebox.errors)
+    assert first_failure_count == 1
+
+    monkeypatch.setattr(
+        controller,
+        "_job_repository_factory",
+        original_job_repository_factory,
+    )
+    app_harness.customer_search_combo.current(0)
+    assert controller.state.selected_customer_id == ""
+    app_harness.app._activate_customer_search_result()
+
+    assert len(app_harness.messagebox.errors) == first_failure_count
+    assert controller.state.selected_customer_id == "customer-synthetic-002"
+    assert app_harness.customer_combo.current() == 1
+    assert app_harness.customer_variable.get() == (
+        "Acme Storage [customer-synthetic-002]"
+    )
+    assert app_harness.app._customer_edit_variables["customer_id"].get() == (
+        "customer-synthetic-002"
+    )
+    assert app_harness.app._customer_edit_variables["billing_city_state_zip"].get() == (
+        "Madison, WI 53704"
+    )
+    assert tuple(job.job_id for job in controller.jobs) == ("job-synthetic-003",)
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.get() == "Draft changed; validation required."
+    assert app_harness.app._stage_variables["customer"].get() == "Complete"
+    assert app_harness.app._stage_variables["job"].get() == "Needs attention"
+    assert app_harness.app._stage_variables["proposal"].get() == "Needs attention"
+    assert app_harness.app._stage_variables["review"].get() == "Needs attention"
+    assert app_harness.app._next_action_variable.get() == (
+        "Next action: load and explicitly select a job, or create one."
+    )
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+
+    app_harness.job_search_variable.set("900 Other")
+    app_harness.app._on_job_search_changed()
+    app_harness.job_search_combo.current(0)
+    assert controller.state.selected_job_id == ""
+    app_harness.app._activate_job_search_result()
+
+    assert controller.state.selected_job_id == "job-synthetic-003"
+    assert app_harness.job_combo.current() == 0
+    assert app_harness.job_variable.get() == (
+        "South Tank Removal [job-synthetic-003]"
+    )
+    assert app_harness.app._stage_variables["customer"].get() == "Complete"
+    assert app_harness.app._stage_variables["job"].get() == "Complete"
+    assert app_harness.app._next_action_variable.get() == (
+        "Next action: validate the proposal."
+    )
+    assert controller.validated_request is None
+    assert controller.build_result is None
 
 
 def test_search_typing_highlighting_clear_and_no_results_are_inert(
