@@ -7,6 +7,7 @@ filesystem, database, process, or window side effects.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -61,6 +62,43 @@ RecordsDatabaseInitializer = Callable[[Path], None]
 RecordsDatabaseValidator = Callable[[Path], None]
 
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+_SEARCH_RESULT_LIMIT = 25
+_SEARCH_LABEL_MAX_CHARACTERS = 120
+
+
+def _normalized_search_terms(query: str) -> tuple[str, ...]:
+    return tuple(part.casefold() for part in query.split())
+
+
+def _matches_search(query: str, values: tuple[object, ...]) -> bool:
+    terms = _normalized_search_terms(query)
+    if not terms:
+        return False
+    searchable = " ".join(
+        " ".join(str(value).split()).casefold()
+        for value in values
+        if value is not None
+    )
+    return all(term in searchable for term in terms)
+
+
+def _bounded_search_label(identity: str, primary: str, *context: str) -> str:
+    def compact(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        leading = (limit - 1) // 2
+        return f"{value[:leading]}…{value[-(limit - leading - 1):]}"
+
+    prefix = f"{compact(primary, 52)} [{compact(identity, 40)}]"
+    suffix = " — ".join(value for value in context if value)
+    separator = " — "
+    label = f"{prefix}{separator}{suffix}" if suffix else prefix
+    if len(label) <= _SEARCH_LABEL_MAX_CHARACTERS:
+        return label
+    available = _SEARCH_LABEL_MAX_CHARACTERS - len(prefix) - len(separator)
+    if available <= 0:
+        return prefix[: _SEARCH_LABEL_MAX_CHARACTERS - 1] + "…"
+    return f"{prefix}{separator}{suffix[: available - 1]}…"
 
 
 def _recent_work_label(entry: dict[str, str]) -> str:
@@ -166,6 +204,50 @@ class NoCustomerChangesError(DesktopFormError):
 
 class NoJobChangesError(DesktopFormError):
     """A job save was requested without any persisted field changes."""
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    """Bounded display label mapped to one immutable loaded record ID."""
+
+    record_id: str
+    label: str
+
+
+def _distinguish_search_result_labels(
+    results: tuple[SearchResult, ...],
+) -> tuple[SearchResult, ...]:
+    """Keep colliding bounded labels distinct within one displayed result set."""
+
+    label_counts: dict[str, int] = {}
+    for result in results:
+        label_counts[result.label] = label_counts.get(result.label, 0) + 1
+
+    distinguished: list[SearchResult] = []
+    used_labels: set[str] = set()
+    for position, result in enumerate(results, start=1):
+        label = result.label
+        if label_counts[label] > 1 or label in used_labels:
+            digest = hashlib.sha256(result.record_id.encode("utf-8")).hexdigest()[:8]
+            attempt = 0
+            while True:
+                marker = (
+                    f" [id:{digest}]"
+                    if attempt == 0
+                    else f" [id:{digest}:{position}.{attempt}]"
+                )
+                available = _SEARCH_LABEL_MAX_CHARACTERS - len(marker)
+                base = label
+                if len(base) > available:
+                    base = base[: available - 1] + "…"
+                candidate = f"{base}{marker}"
+                if candidate not in used_labels:
+                    label = candidate
+                    break
+                attempt += 1
+        used_labels.add(label)
+        distinguished.append(SearchResult(record_id=result.record_id, label=label))
+    return tuple(distinguished)
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,6 +880,68 @@ class ProposalDesktopController:
     @property
     def job_display_labels(self) -> tuple[str, ...]:
         return tuple(f"{job.job_name} [{job.job_id}]" for job in self._jobs)
+
+    def search_customers(self, query: str) -> tuple[SearchResult, ...]:
+        results = (
+            SearchResult(
+                record_id=customer.customer_id,
+                label=_bounded_search_label(
+                    customer.customer_id,
+                    customer.display_name,
+                    customer.billing_city_state_zip or "Location unavailable",
+                    customer.phone or "Phone unavailable",
+                ),
+            )
+            for customer in self._customers
+            if _matches_search(
+                query,
+                (
+                    customer.customer_id,
+                    customer.display_name,
+                    customer.phone,
+                    customer.email,
+                    customer.billing_street_address,
+                    customer.billing_city_state_zip,
+                ),
+            )
+        )
+        bounded_results = tuple(
+            result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results)
+        )
+        return _distinguish_search_result_labels(bounded_results)
+
+    def search_jobs(self, query: str) -> tuple[SearchResult, ...]:
+        selected_customer_id = self.state.selected_customer_id
+        results = (
+            SearchResult(
+                record_id=job.job_id,
+                label=_bounded_search_label(
+                    job.job_id,
+                    job.job_name,
+                    job.site_city_state_zip,
+                    job.status.value,
+                ),
+            )
+            for job in self._jobs
+            if job.customer_id == selected_customer_id
+            and _matches_search(
+                query,
+                (
+                    job.job_id,
+                    job.job_name,
+                    job.site_street_address,
+                    job.site_city_state_zip,
+                    job.status.value,
+                    job.tank_location_type.value,
+                    job.tank_size_gallons,
+                    job.tank_contents,
+                ),
+            )
+        )
+        bounded_results = tuple(
+            result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results)
+        )
+        return _distinguish_search_result_labels(bounded_results)
 
     @property
     def validation_summary_lines(self) -> tuple[str, ...]:
@@ -1911,6 +2055,8 @@ class ProposalDesktopApp:
         self._customer_edit_variables: dict[str, Any] = {}
         self._job_creation_variables: dict[str, Any] = {}
         self._job_edit_variables: dict[str, Any] = {}
+        self._customer_search_results: tuple[SearchResult, ...] = ()
+        self._job_search_results: tuple[SearchResult, ...] = ()
         self._build_widgets()
         self._bind_state_changes()
         self._refresh_scope_list(0)
@@ -2193,8 +2339,46 @@ class ProposalDesktopApp:
             text="Load Customers",
             command=self._load_customers,
         ).grid(row=3, column=2, padx=(8, 0), pady=3)
+        self._ttk.Label(frame, text="Find Customer").grid(
+            row=4, column=0, sticky="w", padx=(0, 8), pady=3
+        )
+        self._customer_search_variable = self._tk.StringVar(value="")
+        self._ttk.Entry(
+            frame,
+            textvariable=self._customer_search_variable,
+        ).grid(row=4, column=1, sticky="ew", pady=3)
+        self._ttk.Button(
+            frame,
+            text="Clear Search",
+            command=self._clear_customer_search,
+        ).grid(row=4, column=2, padx=(8, 0), pady=3)
+        self._ttk.Label(frame, text="Customer Search Results").grid(
+            row=5, column=0, sticky="w", padx=(0, 8), pady=3
+        )
+        self._customer_search_result_variable = self._tk.StringVar(value="")
+        self._customer_search_result_combo = self._ttk.Combobox(
+            frame,
+            textvariable=self._customer_search_result_variable,
+            state="readonly",
+        )
+        self._customer_search_result_combo.grid(
+            row=5, column=1, sticky="ew", pady=3
+        )
+        self._ttk.Button(
+            frame,
+            text="Select Customer",
+            command=self._activate_customer_search_result,
+        ).grid(row=5, column=2, padx=(8, 0), pady=3)
+        self._customer_search_status_variable = self._tk.StringVar(
+            value="Type to find a loaded customer."
+        )
+        self._ttk.Label(
+            frame,
+            textvariable=self._customer_search_status_variable,
+            wraplength=760,
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(3, 0))
         draft_buttons = self._ttk.Frame(frame)
-        draft_buttons.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
+        draft_buttons.grid(row=7, column=1, columnspan=3, sticky="w", pady=3)
         for column, (label, action) in enumerate((
             ("Save Proposal Draft", self._save_proposal_draft),
             ("Open Proposal Draft", self._open_proposal_draft),
@@ -2374,6 +2558,42 @@ class ProposalDesktopApp:
         )
         self._job_combo.grid(row=0, column=1, sticky="ew", pady=3)
         self._job_combo.bind("<<ComboboxSelected>>", self._on_job_selected)
+        self._ttk.Label(frame, text="Find Job for Selected Customer").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=3
+        )
+        self._job_search_variable = self._tk.StringVar(value="")
+        self._ttk.Entry(
+            frame,
+            textvariable=self._job_search_variable,
+        ).grid(row=1, column=1, sticky="ew", pady=3)
+        self._ttk.Button(
+            frame,
+            text="Clear Search",
+            command=self._clear_job_search,
+        ).grid(row=1, column=2, padx=(8, 0), pady=3)
+        self._ttk.Label(frame, text="Job Search Results").grid(
+            row=2, column=0, sticky="w", padx=(0, 8), pady=3
+        )
+        self._job_search_result_variable = self._tk.StringVar(value="")
+        self._job_search_result_combo = self._ttk.Combobox(
+            frame,
+            textvariable=self._job_search_result_variable,
+            state="readonly",
+        )
+        self._job_search_result_combo.grid(row=2, column=1, sticky="ew", pady=3)
+        self._ttk.Button(
+            frame,
+            text="Select Job",
+            command=self._activate_job_search_result,
+        ).grid(row=2, column=2, padx=(8, 0), pady=3)
+        self._job_search_status_variable = self._tk.StringVar(
+            value="Select a customer, then type to find one of its jobs."
+        )
+        self._ttk.Label(
+            frame,
+            textvariable=self._job_search_status_variable,
+            wraplength=760,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(3, 0))
 
     def _build_job_creation_section(self) -> None:
         state = self.controller.job_creation_state
@@ -2826,6 +3046,12 @@ class ProposalDesktopApp:
         )
 
     def _bind_state_changes(self) -> None:
+        self._customer_search_variable.trace_add(
+            "write", lambda *_args: self._on_customer_search_changed()
+        )
+        self._job_search_variable.trace_add(
+            "write", lambda *_args: self._on_job_search_changed()
+        )
         for name, variable in self._variables.items():
             variable.trace_add(
                 "write",
@@ -3306,6 +3532,148 @@ class ProposalDesktopApp:
             self._refresh_action_states()
             self._show_error(exc)
 
+    def _on_customer_search_changed(self) -> None:
+        self._customer_search_results = self.controller.search_customers(
+            self._customer_search_variable.get()
+        )
+        self._customer_search_result_combo.configure(
+            values=tuple(result.label for result in self._customer_search_results)
+        )
+        _clear_combobox_selection(
+            self._customer_search_result_combo,
+            self._customer_search_result_variable,
+        )
+        if not _normalized_search_terms(self._customer_search_variable.get()):
+            message = "Type to find a loaded customer."
+        elif self._customer_search_results:
+            message = f"{len(self._customer_search_results)} matching customer(s)."
+        else:
+            message = "No matching customers."
+        self._customer_search_status_variable.set(message)
+
+    def _on_job_search_changed(self) -> None:
+        self._job_search_results = self.controller.search_jobs(
+            self._job_search_variable.get()
+        )
+        self._job_search_result_combo.configure(
+            values=tuple(result.label for result in self._job_search_results)
+        )
+        _clear_combobox_selection(
+            self._job_search_result_combo,
+            self._job_search_result_variable,
+        )
+        if not self.controller.state.selected_customer_id:
+            message = "Select a customer, then type to find one of its jobs."
+        elif not _normalized_search_terms(self._job_search_variable.get()):
+            message = "Type to find a job for the selected customer."
+        elif self._job_search_results:
+            message = f"{len(self._job_search_results)} matching job(s)."
+        else:
+            message = "No matching jobs for the selected customer."
+        self._job_search_status_variable.set(message)
+
+    def _clear_customer_search(self) -> None:
+        self._customer_search_variable.set("")
+        self._on_customer_search_changed()
+
+    def _clear_job_search(self) -> None:
+        self._job_search_variable.set("")
+        self._on_job_search_changed()
+
+    def _select_customer_id(self, customer_id: str) -> None:
+        self.controller.select_customer(customer_id)
+        selected_index = next(
+            index
+            for index, customer in enumerate(self.controller.customers)
+            if customer.customer_id == customer_id
+        )
+        self._customer_combo.current(selected_index)
+        self._customer_variable.set(
+            self.controller.customer_display_labels[selected_index]
+        )
+        self._job_combo.configure(values=self.controller.job_display_labels)
+        _clear_combobox_selection(self._job_combo, self._job_variable)
+        self._refresh_customer_edit_widgets()
+        self._clear_job_edit_widgets()
+        self._on_job_search_changed()
+        self._show_invalidated_state()
+
+    def _select_job_id(self, job_id: str) -> None:
+        self.controller.select_job(job_id)
+        selected_index = next(
+            index
+            for index, job in enumerate(self.controller.jobs)
+            if job.job_id == job_id
+        )
+        self._job_combo.current(selected_index)
+        self._job_variable.set(self.controller.job_display_labels[selected_index])
+        self._refresh_job_edit_widgets()
+        self._show_invalidated_state()
+
+    def _activate_customer_search_result(self) -> None:
+        index = self._customer_search_result_combo.current()
+        if not 0 <= index < len(self._customer_search_results):
+            self._customer_search_status_variable.set(
+                "Choose a visible customer result, then select it."
+            )
+            return
+        result = self._customer_search_results[index]
+        if not any(
+            customer.customer_id == result.record_id
+            for customer in self.controller.customers
+        ):
+            self._customer_search_status_variable.set(
+                "That customer result is stale; search again."
+            )
+            return
+        try:
+            self._select_customer_id(result.record_id)
+            self._customer_search_status_variable.set(
+                f"Selected customer {result.record_id}."
+            )
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._synchronize_customer_selection_failure()
+            self._customer_search_status_variable.set(
+                "Customer selection failed; reload customers before retrying."
+            )
+            self._show_error(exc)
+
+    def _activate_job_search_result(self) -> None:
+        index = self._job_search_result_combo.current()
+        if not 0 <= index < len(self._job_search_results):
+            self._job_search_status_variable.set(
+                "Choose a visible job result, then select it."
+            )
+            return
+        result = self._job_search_results[index]
+        if not any(
+            job.job_id == result.record_id
+            and job.customer_id == self.controller.state.selected_customer_id
+            for job in self.controller.jobs
+        ):
+            self._job_search_status_variable.set(
+                "That job result is stale; search again."
+            )
+            return
+        try:
+            self._select_job_id(result.record_id)
+            self._job_search_status_variable.set(f"Selected job {result.record_id}.")
+        except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._synchronize_job_selection_failure()
+            self._job_search_status_variable.set(
+                "Job selection failed; reload jobs before retrying."
+            )
+            self._show_error(exc)
+
+    def _synchronize_customer_selection_failure(self) -> None:
+        self._clear_customer_and_job_widgets()
+        self._show_invalidated_state()
+
+    def _synchronize_job_selection_failure(self) -> None:
+        _clear_combobox_selection(self._job_combo, self._job_variable)
+        self._clear_job_edit_widgets()
+        self._show_invalidated_state()
+
     def _load_customers(self) -> None:
         try:
             self.controller.load_customers()
@@ -3320,11 +3688,11 @@ class ProposalDesktopApp:
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._clear_customer_edit_widgets()
             self._clear_job_edit_widgets()
-            self._clear_job_edit_widgets()
+            self._on_customer_search_changed()
+            self._on_job_search_changed()
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            self._clear_customer_and_job_widgets()
-            self._show_invalidated_state()
+            self._synchronize_customer_selection_failure()
             self._show_error(exc)
 
     def _create_customer(self) -> None:
@@ -3341,6 +3709,8 @@ class ProposalDesktopApp:
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._clear_customer_edit_widgets()
             self._clear_job_edit_widgets()
+            self._on_customer_search_changed()
+            self._on_job_search_changed()
             self._show_invalidated_state()
             self._customer_creation_status_variable.set(
                 f"Customer {created.customer_id} created; customers reloaded."
@@ -3382,6 +3752,8 @@ class ProposalDesktopApp:
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._refresh_customer_edit_widgets()
             self._clear_job_edit_widgets()
+            self._on_customer_search_changed()
+            self._on_job_search_changed()
             self._show_invalidated_state()
             self._customer_edit_status_variable.set(
                 "Customer updated; customers and selected-customer jobs reloaded."
@@ -3410,6 +3782,7 @@ class ProposalDesktopApp:
             self._job_combo.configure(values=self.controller.job_display_labels)
             _clear_combobox_selection(self._job_combo, self._job_variable)
             self._clear_job_edit_widgets()
+            self._on_job_search_changed()
             self._show_invalidated_state()
             self._job_creation_status_variable.set(
                 f"Job {created.job_id} created; selected-customer jobs reloaded."
@@ -3444,6 +3817,7 @@ class ProposalDesktopApp:
             self._job_combo.current(selected_index)
             self._job_variable.set(self.controller.job_display_labels[selected_index])
             self._refresh_job_edit_widgets()
+            self._on_job_search_changed()
             self._show_invalidated_state()
             self._job_edit_status_variable.set(
                 "Job updated; selected-customer jobs reloaded."
@@ -3476,12 +3850,16 @@ class ProposalDesktopApp:
                 raise DesktopFormError("Select an existing loaded customer.")
             else:
                 customer_id = self.controller.customers[index].customer_id
-            self.controller.select_customer(customer_id)
-            self._job_combo.configure(values=self.controller.job_display_labels)
-            _clear_combobox_selection(self._job_combo, self._job_variable)
-            self._refresh_customer_edit_widgets()
-            self._clear_job_edit_widgets()
-            self._show_invalidated_state()
+            if customer_id:
+                self._select_customer_id(customer_id)
+            else:
+                self.controller.select_customer("")
+                self._job_combo.configure(values=())
+                _clear_combobox_selection(self._job_combo, self._job_variable)
+                self._clear_customer_edit_widgets()
+                self._clear_job_edit_widgets()
+                self._on_job_search_changed()
+                self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
             self._clear_customer_and_job_widgets()
             self._show_invalidated_state()
@@ -3497,13 +3875,14 @@ class ProposalDesktopApp:
                 raise DesktopFormError("Select an existing loaded job.")
             else:
                 job_id = self.controller.jobs[index].job_id
-            self.controller.select_job(job_id)
-            self._refresh_job_edit_widgets()
-            self._show_invalidated_state()
+            if job_id:
+                self._select_job_id(job_id)
+            else:
+                self.controller.select_job("")
+                self._clear_job_edit_widgets()
+                self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            _clear_combobox_selection(self._job_combo, self._job_variable)
-            self._clear_job_edit_widgets()
-            self._show_invalidated_state()
+            self._synchronize_job_selection_failure()
             self._show_error(exc)
 
     def _validate(self) -> None:
@@ -3614,6 +3993,8 @@ class ProposalDesktopApp:
         _clear_combobox_selection(self._job_combo, self._job_variable)
         self._clear_customer_edit_widgets()
         self._clear_job_edit_widgets()
+        self._on_customer_search_changed()
+        self._on_job_search_changed()
 
     def _clear_customer_edit_widgets(self) -> None:
         self._updating_widgets = True
