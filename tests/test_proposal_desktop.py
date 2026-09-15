@@ -989,6 +989,45 @@ def _headless_app(
     )
 
 
+def _headless_app_with_current_generated_build(
+    controller: proposal_desktop.ProposalDesktopController,
+) -> tuple[
+    AppHarness,
+    tuple[FakeVariable, FakeVariable, FakeVariable, FakeVariable],
+    tuple[FakeButton, FakeButton],
+]:
+    selected_customer_id = controller.state.selected_customer_id
+    selected_job_id = controller.state.selected_job_id
+    harness = _headless_app(controller)
+    harness.app._select_customer_id(selected_customer_id)
+    harness.app._select_job_id(selected_job_id)
+    controller.validate_draft()
+    controller.generate_draft()
+    harness.app._set_summary(controller.validation_summary_lines)
+    harness.status_variable.set(
+        "Proposal generated successfully. Review the Generated Proposal panel below."
+    )
+    generated_variables = (
+        FakeVariable(),
+        FakeVariable(),
+        FakeVariable(),
+        FakeVariable(),
+    )
+    generated_buttons = (FakeButton(), FakeButton())
+    (
+        harness.app._generated_status_variable,
+        harness.app._generated_docx_variable,
+        harness.app._generated_json_variable,
+        harness.app._generated_folder_variable,
+    ) = generated_variables
+    (
+        harness.app._generated_docx_button,
+        harness.app._generated_folder_button,
+    ) = generated_buttons
+    harness.app._refresh_action_states()
+    return harness, generated_variables, generated_buttons
+
+
 def _configured_controller(
     tmp_path: Path,
     *,
@@ -1447,6 +1486,264 @@ def test_search_results_and_labels_are_bounded_and_distinguish_similar_records(
         and len(result.label) <= proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
         for result in results
     )
+
+
+@pytest.mark.parametrize("context_delta", (-1, 0, 1, 200))
+def test_search_label_respects_bound_around_truncation_boundary(
+    context_delta: int,
+) -> None:
+    identity = "customer-synthetic-boundary"
+    primary = "Boundary Customer"
+    prefix = proposal_desktop._bounded_search_label(identity, primary)
+    context_limit = (
+        proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+        - len(prefix)
+        - len(" — ")
+    )
+    context = "x" * (context_limit + context_delta)
+
+    label = proposal_desktop._bounded_search_label(identity, primary, context)
+
+    assert len(label) <= proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+    if context_delta <= 0:
+        assert label.endswith(context)
+    else:
+        assert len(label) == proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+        assert label.endswith("…")
+
+
+def test_long_colliding_customer_and_job_labels_remain_distinct_and_mapped(
+    tmp_path: Path,
+) -> None:
+    first_id = "a" * 19 + "XX" + "z" * 20
+    second_id = "a" * 19 + "YY" + "z" * 20
+    customer_name = "Shared Customer " + "N" * 100
+    customer_city = "Shared City, WI " + "5" * 100
+    job_name = "Shared Job " + "J" * 100
+    job_city = "Shared Job City, WI " + "6" * 100
+    customers = (
+        _customer(),
+        CustomerRecord(
+            customer_id=first_id,
+            display_name=customer_name,
+            phone="(608) 555-0100",
+            billing_city_state_zip=customer_city,
+        ),
+        CustomerRecord(
+            customer_id=second_id,
+            display_name=customer_name,
+            phone="(608) 555-0100",
+            billing_city_state_zip=customer_city,
+        ),
+    )
+    jobs = (
+        _job(),
+        JobRecord(
+            job_id=first_id,
+            customer_id=second_id,
+            job_name=job_name,
+            site_street_address="100 Shared Job Avenue",
+            site_city_state_zip=job_city,
+        ),
+        JobRecord(
+            job_id=second_id,
+            customer_id=second_id,
+            job_name=job_name,
+            site_street_address="100 Shared Job Avenue",
+            site_city_state_zip=job_city,
+        ),
+    )
+    controller = _configured_controller(
+        tmp_path,
+        customers=customers,
+        jobs=jobs,
+    ).controller
+    assert proposal_desktop._bounded_search_label(
+        first_id,
+        customer_name,
+        customer_city,
+        "(608) 555-0100",
+    ) == proposal_desktop._bounded_search_label(
+        second_id,
+        customer_name,
+        customer_city,
+        "(608) 555-0100",
+    )
+
+    customer_results = controller.search_customers("shared customer")
+
+    assert tuple(result.record_id for result in customer_results) == (
+        first_id,
+        second_id,
+    )
+    assert len({result.label for result in customer_results}) == 2
+    assert all(
+        len(result.label) <= proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+        for result in customer_results
+    )
+    app_harness = _headless_app(controller)
+    app_harness.customer_search_variable.set("shared customer")
+    app_harness.app._on_customer_search_changed()
+    assert app_harness.customer_search_combo.values == tuple(
+        result.label for result in customer_results
+    )
+    app_harness.customer_search_combo.current(1)
+    app_harness.app._activate_customer_search_result()
+    assert controller.state.selected_customer_id == second_id
+    assert tuple(customer.customer_id for customer in controller.customers) == (
+        "customer-synthetic-001",
+        first_id,
+        second_id,
+    )
+
+    job_results = controller.search_jobs("shared job")
+
+    assert tuple(result.record_id for result in job_results) == (first_id, second_id)
+    assert len({result.label for result in job_results}) == 2
+    assert all(
+        len(result.label) <= proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+        for result in job_results
+    )
+    app_harness.job_search_variable.set("shared job")
+    app_harness.app._on_job_search_changed()
+    assert app_harness.job_search_combo.values == tuple(
+        result.label for result in job_results
+    )
+    app_harness.job_search_combo.current(0)
+    app_harness.app._activate_job_search_result()
+    assert controller.state.selected_job_id == first_id
+    assert tuple(job.job_id for job in controller.jobs) == (first_id, second_id)
+
+
+@pytest.mark.parametrize("activation", ("search", "ordinary"))
+def test_customer_selection_failure_synchronizes_canonical_and_visible_state(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    activation: str,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path,
+        customers=customers,
+        jobs=jobs,
+    ).controller
+    app_harness, generated_variables, generated_buttons = (
+        _headless_app_with_current_generated_build(controller)
+    )
+
+    class FailingJobRepository:
+        def list_jobs_for_customer(self, _customer_id: str) -> list[JobRecord]:
+            raise OSError("simulated read-only job load failure")
+
+    monkeypatch.setattr(
+        controller,
+        "_job_repository_factory",
+        lambda *_args, **_kwargs: FailingJobRepository(),
+    )
+    if activation == "search":
+        app_harness.customer_search_variable.set("53704")
+        app_harness.app._on_customer_search_changed()
+        app_harness.customer_search_combo.current(0)
+        app_harness.app._activate_customer_search_result()
+        assert app_harness.app._customer_search_status_variable.get() == (
+            "Customer selection failed; reload customers before retrying."
+        )
+    else:
+        app_harness.customer_combo.current(1)
+        app_harness.app._on_customer_selected()
+
+    assert controller.state.selected_customer_id == ""
+    assert controller.state.selected_job_id == ""
+    assert controller.jobs == ()
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert app_harness.customer_combo.values == ()
+    assert app_harness.customer_variable.get() == ""
+    assert app_harness.job_combo.values == ()
+    assert app_harness.job_variable.get() == ""
+    assert all(
+        variable.get() == ""
+        for variable in app_harness.app._customer_edit_variables.values()
+    )
+    assert all(
+        variable.get() == ""
+        for variable in app_harness.app._job_edit_variables.values()
+    )
+    assert app_harness.app._customer_edit_notes_text.content == ""
+    assert app_harness.app._job_edit_scope_notes_text.content == ""
+    assert app_harness.app._job_edit_internal_notes_text.content == ""
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.get() == "Draft changed; validation required."
+    assert app_harness.generate_button.state == "disabled"
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert generated_variables[0].get() == "No generated proposal yet."
+    assert all(variable.get() == "" for variable in generated_variables[1:])
+    assert all(button.state == "disabled" for button in generated_buttons)
+    assert app_harness.messagebox.errors == [
+        ("Phoenix Office", "simulated read-only job load failure", app_harness.app._root)
+    ]
+
+
+@pytest.mark.parametrize("activation", ("search", "ordinary"))
+def test_job_selection_failure_synchronizes_canonical_and_visible_state(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+    activation: str,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path,
+        customers=customers,
+        jobs=jobs,
+    ).controller
+    app_harness, generated_variables, generated_buttons = (
+        _headless_app_with_current_generated_build(controller)
+    )
+    real_select_job = controller.select_job
+
+    def failing_select_job(_job_id: str) -> None:
+        real_select_job("")
+        raise OSError("simulated job selection failure")
+
+    monkeypatch.setattr(controller, "select_job", failing_select_job)
+    if activation == "search":
+        app_harness.job_search_variable.set("inspection")
+        app_harness.app._on_job_search_changed()
+        app_harness.job_search_combo.current(0)
+        app_harness.app._activate_job_search_result()
+        assert app_harness.app._job_search_status_variable.get() == (
+            "Job selection failed; reload jobs before retrying."
+        )
+    else:
+        app_harness.job_combo.current(1)
+        app_harness.app._on_job_selected()
+
+    assert controller.state.selected_customer_id == "customer-synthetic-001"
+    assert controller.state.selected_job_id == ""
+    assert controller.validated_request is None
+    assert controller.build_result is None
+    assert app_harness.customer_variable.get() == (
+        "Acme Storage [customer-synthetic-001]"
+    )
+    assert app_harness.job_variable.get() == ""
+    assert all(
+        variable.get() == ""
+        for variable in app_harness.app._job_edit_variables.values()
+    )
+    assert app_harness.app._job_edit_scope_notes_text.content == ""
+    assert app_harness.app._job_edit_internal_notes_text.content == ""
+    assert app_harness.summary_text.content == ""
+    assert app_harness.status_variable.get() == "Draft changed; validation required."
+    assert app_harness.generate_button.state == "disabled"
+    assert all(button.state == "disabled" for button in app_harness.open_buttons)
+    assert generated_variables[0].get() == "No generated proposal yet."
+    assert all(variable.get() == "" for variable in generated_variables[1:])
+    assert all(button.state == "disabled" for button in generated_buttons)
+    assert app_harness.messagebox.errors == [
+        ("Phoenix Office", "simulated job selection failure", app_harness.app._root)
+    ]
 
 
 def test_search_typing_highlighting_clear_and_no_results_are_inert(

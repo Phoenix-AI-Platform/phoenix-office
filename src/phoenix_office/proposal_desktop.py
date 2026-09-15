@@ -7,6 +7,7 @@ filesystem, database, process, or window side effects.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -90,13 +91,14 @@ def _bounded_search_label(identity: str, primary: str, *context: str) -> str:
 
     prefix = f"{compact(primary, 52)} [{compact(identity, 40)}]"
     suffix = " — ".join(value for value in context if value)
-    label = f"{prefix} — {suffix}" if suffix else prefix
+    separator = " — "
+    label = f"{prefix}{separator}{suffix}" if suffix else prefix
     if len(label) <= _SEARCH_LABEL_MAX_CHARACTERS:
         return label
-    available = _SEARCH_LABEL_MAX_CHARACTERS - len(prefix) - 2
+    available = _SEARCH_LABEL_MAX_CHARACTERS - len(prefix) - len(separator)
     if available <= 0:
         return prefix[: _SEARCH_LABEL_MAX_CHARACTERS - 1] + "…"
-    return f"{prefix} — {suffix[: available - 1]}…"
+    return f"{prefix}{separator}{suffix[: available - 1]}…"
 
 
 def _recent_work_label(entry: dict[str, str]) -> str:
@@ -210,6 +212,42 @@ class SearchResult:
 
     record_id: str
     label: str
+
+
+def _distinguish_search_result_labels(
+    results: tuple[SearchResult, ...],
+) -> tuple[SearchResult, ...]:
+    """Keep colliding bounded labels distinct within one displayed result set."""
+
+    label_counts: dict[str, int] = {}
+    for result in results:
+        label_counts[result.label] = label_counts.get(result.label, 0) + 1
+
+    distinguished: list[SearchResult] = []
+    used_labels: set[str] = set()
+    for position, result in enumerate(results, start=1):
+        label = result.label
+        if label_counts[label] > 1 or label in used_labels:
+            digest = hashlib.sha256(result.record_id.encode("utf-8")).hexdigest()[:8]
+            attempt = 0
+            while True:
+                marker = (
+                    f" [id:{digest}]"
+                    if attempt == 0
+                    else f" [id:{digest}:{position}.{attempt}]"
+                )
+                available = _SEARCH_LABEL_MAX_CHARACTERS - len(marker)
+                base = label
+                if len(base) > available:
+                    base = base[: available - 1] + "…"
+                candidate = f"{base}{marker}"
+                if candidate not in used_labels:
+                    label = candidate
+                    break
+                attempt += 1
+        used_labels.add(label)
+        distinguished.append(SearchResult(record_id=result.record_id, label=label))
+    return tuple(distinguished)
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,7 +905,10 @@ class ProposalDesktopController:
                 ),
             )
         )
-        return tuple(result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results))
+        bounded_results = tuple(
+            result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results)
+        )
+        return _distinguish_search_result_labels(bounded_results)
 
     def search_jobs(self, query: str) -> tuple[SearchResult, ...]:
         selected_customer_id = self.state.selected_customer_id
@@ -897,7 +938,10 @@ class ProposalDesktopController:
                 ),
             )
         )
-        return tuple(result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results))
+        bounded_results = tuple(
+            result for _, result in zip(range(_SEARCH_RESULT_LIMIT), results)
+        )
+        return _distinguish_search_result_labels(bounded_results)
 
     @property
     def validation_summary_lines(self) -> tuple[str, ...]:
@@ -3588,6 +3632,7 @@ class ProposalDesktopApp:
                 f"Selected customer {result.record_id}."
             )
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._synchronize_customer_selection_failure()
             self._customer_search_status_variable.set(
                 "Customer selection failed; reload customers before retrying."
             )
@@ -3614,10 +3659,20 @@ class ProposalDesktopApp:
             self._select_job_id(result.record_id)
             self._job_search_status_variable.set(f"Selected job {result.record_id}.")
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
+            self._synchronize_job_selection_failure()
             self._job_search_status_variable.set(
                 "Job selection failed; reload jobs before retrying."
             )
             self._show_error(exc)
+
+    def _synchronize_customer_selection_failure(self) -> None:
+        self._clear_customer_and_job_widgets()
+        self._show_invalidated_state()
+
+    def _synchronize_job_selection_failure(self) -> None:
+        _clear_combobox_selection(self._job_combo, self._job_variable)
+        self._clear_job_edit_widgets()
+        self._show_invalidated_state()
 
     def _load_customers(self) -> None:
         try:
@@ -3637,8 +3692,7 @@ class ProposalDesktopApp:
             self._on_job_search_changed()
             self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            self._clear_customer_and_job_widgets()
-            self._show_invalidated_state()
+            self._synchronize_customer_selection_failure()
             self._show_error(exc)
 
     def _create_customer(self) -> None:
@@ -3828,9 +3882,7 @@ class ProposalDesktopApp:
                 self._clear_job_edit_widgets()
                 self._show_invalidated_state()
         except Exception as exc:  # noqa: BLE001 - final local GUI boundary.
-            _clear_combobox_selection(self._job_combo, self._job_variable)
-            self._clear_job_edit_widgets()
-            self._show_invalidated_state()
+            self._synchronize_job_selection_failure()
             self._show_error(exc)
 
     def _validate(self) -> None:
