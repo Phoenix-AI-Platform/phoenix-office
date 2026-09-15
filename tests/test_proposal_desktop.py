@@ -806,8 +806,12 @@ class AppHarness:
     app: proposal_desktop.ProposalDesktopApp
     customer_combo: FakeCombo
     job_combo: FakeCombo
+    customer_search_combo: FakeCombo
+    job_search_combo: FakeCombo
     customer_variable: FakeVariable
     job_variable: FakeVariable
+    customer_search_variable: FakeVariable
+    job_search_variable: FakeVariable
     summary_text: FakeText
     status_variable: FakeVariable
     generate_button: FakeButton
@@ -826,8 +830,12 @@ def _headless_app(
     app = object.__new__(proposal_desktop.ProposalDesktopApp)
     customer_combo = FakeCombo(values=controller.customer_display_labels)
     job_combo = FakeCombo(values=controller.job_display_labels)
+    customer_search_combo = FakeCombo()
+    job_search_combo = FakeCombo()
     customer_variable = FakeVariable()
     job_variable = FakeVariable()
+    customer_search_variable = FakeVariable()
+    job_search_variable = FakeVariable()
     summary_text = FakeText("\n".join(controller.validation_summary_lines))
     status_variable = FakeVariable("Previous successful state")
     generate_button = FakeButton()
@@ -937,6 +945,20 @@ def _headless_app(
     app._job_combo = job_combo
     app._customer_variable = customer_variable
     app._job_variable = job_variable
+    app._customer_search_variable = customer_search_variable
+    app._job_search_variable = job_search_variable
+    app._customer_search_result_variable = FakeVariable()
+    app._job_search_result_variable = FakeVariable()
+    app._customer_search_result_combo = customer_search_combo
+    app._job_search_result_combo = job_search_combo
+    app._customer_search_status_variable = FakeVariable(
+        "Type to find a loaded customer."
+    )
+    app._job_search_status_variable = FakeVariable(
+        "Select a customer, then type to find one of its jobs."
+    )
+    app._customer_search_results = ()
+    app._job_search_results = ()
     app._summary_text = summary_text
     app._status_variable = status_variable
     app._generate_button = generate_button
@@ -948,8 +970,12 @@ def _headless_app(
         app=app,
         customer_combo=customer_combo,
         job_combo=job_combo,
+        customer_search_combo=customer_search_combo,
+        job_search_combo=job_search_combo,
         customer_variable=customer_variable,
         job_variable=job_variable,
+        customer_search_variable=customer_search_variable,
+        job_search_variable=job_search_variable,
         summary_text=summary_text,
         status_variable=status_variable,
         generate_button=generate_button,
@@ -1278,6 +1304,321 @@ def test_module_import_is_headless_safe_and_does_not_import_tkinter() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.fixture
+def searchable_records() -> tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]]:
+    customers = (
+        CustomerRecord(
+            customer_id="customer-synthetic-001",
+            display_name="Acme Storage",
+            phone="(608) 555-0199",
+            email="office@acme.example",
+            billing_street_address="41 Harvest Lane",
+            billing_city_state_zip="Madison, WI 53703",
+        ),
+        CustomerRecord(
+            customer_id="customer-synthetic-002",
+            display_name="Acme Storage",
+            phone="(608) 555-0200",
+            email="north@acme.example",
+            billing_street_address="89 North Road",
+            billing_city_state_zip="Madison, WI 53704",
+        ),
+        CustomerRecord(
+            customer_id="customer-synthetic-003",
+            display_name="Unrelated Fabrication",
+            phone="(920) 555-0111",
+            email="shop@unrelated.example",
+            billing_street_address="700 Industrial Drive",
+            billing_city_state_zip="Green Bay, WI 54301",
+        ),
+    )
+    jobs = (
+        JobRecord(
+            job_id="job-synthetic-001",
+            customer_id="customer-synthetic-001",
+            job_name="South Tank Removal",
+            site_street_address="212 Orchard Street",
+            site_city_state_zip="Fitchburg, WI 53711",
+            status=JobStatus.scheduled,
+            tank_location_type=TankLocationType.basement,
+            tank_size_gallons=500,
+            tank_contents="heating oil",
+            contents_known=True,
+        ),
+        JobRecord(
+            job_id="job-synthetic-002",
+            customer_id="customer-synthetic-001",
+            job_name="North Tank Inspection",
+            site_street_address="501 Orchard Street",
+            site_city_state_zip="Verona, WI 53593",
+            status=JobStatus.draft,
+        ),
+        JobRecord(
+            job_id="job-synthetic-003",
+            customer_id="customer-synthetic-002",
+            job_name="South Tank Removal",
+            site_street_address="900 Other Avenue",
+            site_city_state_zip="Madison, WI 53704",
+            status=JobStatus.scheduled,
+        ),
+    )
+    return customers, jobs
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_id"),
+    (
+        ("CUSTOMER-SYNTHETIC-001", "customer-synthetic-001"),
+        ("acme storage 53703", "customer-synthetic-001"),
+        ("555-0199", "customer-synthetic-001"),
+        ("OFFICE@ACME.EXAMPLE", "customer-synthetic-001"),
+        ("HARVEST lane", "customer-synthetic-001"),
+        ("  Madison,   WI   53704  ", "customer-synthetic-002"),
+    ),
+)
+def test_customer_search_is_case_insensitive_whitespace_tolerant_across_fields(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    query: str,
+    expected_id: str,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path, customers=customers, jobs=jobs
+    ).controller
+
+    assert [result.record_id for result in controller.search_customers(query)] == [
+        expected_id
+    ]
+    assert controller.search_customers("customer that is not present") == ()
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "JOB-SYNTHETIC-001",
+        "south removal",
+        "500 ORCHARD",
+        "FITCHBURG 53711",
+        "scheduled",
+        "BASEMENT",
+        "500",
+        "heating OIL",
+    ),
+)
+def test_job_search_is_scoped_and_matches_allowed_fields(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    query: str,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path, customers=customers, jobs=jobs
+    ).controller
+
+    assert [result.record_id for result in controller.search_jobs(query)] == [
+        "job-synthetic-001"
+    ]
+    assert controller.search_jobs("900 Other Avenue") == ()
+
+
+def test_search_results_and_labels_are_bounded_and_distinguish_similar_records(
+    tmp_path: Path,
+) -> None:
+    customers = tuple(
+        CustomerRecord(
+            customer_id=f"customer-synthetic-{index:03}",
+            display_name="Same Customer Name",
+            phone=f"(608) 555-{index:04}",
+            billing_city_state_zip=f"Madison, WI {53700 + index}",
+        )
+        for index in range(1, 31)
+    )
+    controller = _configured_controller(tmp_path, customers=customers).controller
+
+    results = controller.search_customers("same customer")
+
+    assert len(results) == proposal_desktop._SEARCH_RESULT_LIMIT
+    assert len({result.label for result in results}) == len(results)
+    assert all(
+        result.record_id in result.label
+        and len(result.label) <= proposal_desktop._SEARCH_LABEL_MAX_CHARACTERS
+        for result in results
+    )
+
+
+def test_search_typing_highlighting_clear_and_no_results_are_inert(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+) -> None:
+    customers, jobs = searchable_records
+    controller_harness = _configured_controller(
+        tmp_path, customers=customers, jobs=jobs
+    )
+    controller = controller_harness.controller
+    controller.validate_draft()
+    controller.generate_draft()
+    app_harness = _headless_app(controller)
+    selected_before = (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    )
+    authority_before = (controller.validated_request, controller.build_result)
+
+    app_harness.customer_search_variable.set("53704")
+    app_harness.app._on_customer_search_changed()
+    app_harness.customer_search_combo.current(0)
+    app_harness.job_search_variable.set("inspection")
+    app_harness.app._on_job_search_changed()
+    app_harness.job_search_combo.current(0)
+
+    assert (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    ) == selected_before
+    assert (controller.validated_request, controller.build_result) == authority_before
+
+    app_harness.customer_search_variable.set("no customer matches")
+    app_harness.app._on_customer_search_changed()
+    app_harness.job_search_variable.set("no job matches")
+    app_harness.app._on_job_search_changed()
+    assert app_harness.customer_search_combo.values == ()
+    assert app_harness.job_search_combo.values == ()
+
+    app_harness.app._clear_customer_search()
+    app_harness.app._clear_job_search()
+    assert (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    ) == selected_before
+    assert (controller.validated_request, controller.build_result) == authority_before
+    assert controller_harness.customer_factory_calls
+    assert len(controller_harness.job_list_calls) == 1
+
+
+def test_visible_search_activation_reuses_canonical_selection_and_invalidates_authority(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path, customers=customers, jobs=jobs
+    ).controller
+    controller.validate_draft()
+    controller.generate_draft()
+    app_harness = _headless_app(controller)
+    selected_customers: list[str] = []
+    selected_jobs: list[str] = []
+    select_customer = controller.select_customer
+    select_job = controller.select_job
+
+    def customer_spy(customer_id: str) -> tuple[JobRecord, ...]:
+        selected_customers.append(customer_id)
+        return select_customer(customer_id)
+
+    def job_spy(job_id: str) -> None:
+        selected_jobs.append(job_id)
+        select_job(job_id)
+
+    monkeypatch.setattr(controller, "select_customer", customer_spy)
+    monkeypatch.setattr(controller, "select_job", job_spy)
+    app_harness.customer_search_variable.set("53704")
+    app_harness.app._on_customer_search_changed()
+    app_harness.customer_search_combo.current(0)
+    app_harness.app._activate_customer_search_result()
+
+    assert selected_customers == ["customer-synthetic-002"]
+    assert controller.state.selected_customer_id == "customer-synthetic-002"
+    assert controller.state.selected_job_id == ""
+    assert [job.job_id for job in controller.jobs] == ["job-synthetic-003"]
+    assert controller.validated_request is None and controller.build_result is None
+
+    app_harness.job_search_variable.set("900 OTHER")
+    app_harness.app._on_job_search_changed()
+    app_harness.job_search_combo.current(0)
+    app_harness.app._activate_job_search_result()
+
+    assert selected_jobs == ["job-synthetic-003"]
+    assert controller.state.selected_job_id == "job-synthetic-003"
+
+
+def test_stale_or_missing_search_result_activation_fails_without_selection_change(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+) -> None:
+    customers, jobs = searchable_records
+    controller = _configured_controller(
+        tmp_path, customers=customers, jobs=jobs
+    ).controller
+    app_harness = _headless_app(controller)
+    selected_before = (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    )
+
+    app_harness.app._activate_customer_search_result()
+    app_harness.customer_search_variable.set("53704")
+    app_harness.app._on_customer_search_changed()
+    app_harness.customer_search_combo.current(0)
+    controller._customers = tuple(
+        customer
+        for customer in controller.customers
+        if customer.customer_id != "customer-synthetic-002"
+    )
+    app_harness.app._activate_customer_search_result()
+    assert (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    ) == selected_before
+
+    app_harness.job_search_variable.set("inspection")
+    app_harness.app._on_job_search_changed()
+    app_harness.job_search_combo.current(0)
+    controller._jobs = tuple(
+        job for job in controller.jobs if job.job_id != "job-synthetic-002"
+    )
+    app_harness.app._activate_job_search_result()
+    assert (
+        controller.state.selected_customer_id,
+        controller.state.selected_job_id,
+    ) == selected_before
+
+
+def test_search_has_no_repository_persistence_schema_or_background_behavior(
+    tmp_path: Path,
+    searchable_records: tuple[tuple[CustomerRecord, ...], tuple[JobRecord, ...]],
+) -> None:
+    customers, jobs = searchable_records
+    harness = _configured_controller(tmp_path, customers=customers, jobs=jobs)
+    before = (
+        len(harness.customer_factory_calls),
+        len(harness.job_factory_calls),
+        len(harness.customer_create_calls),
+        len(harness.customer_update_calls),
+        len(harness.job_create_calls),
+        len(harness.job_update_calls),
+    )
+
+    harness.controller.search_customers("acme")
+    harness.controller.search_jobs("tank")
+
+    assert (
+        len(harness.customer_factory_calls),
+        len(harness.job_factory_calls),
+        len(harness.customer_create_calls),
+        len(harness.customer_update_calls),
+        len(harness.job_create_calls),
+        len(harness.job_update_calls),
+    ) == before
+    source = inspect.getsource(proposal_desktop.ProposalDesktopController.search_customers)
+    source += inspect.getsource(proposal_desktop.ProposalDesktopController.search_jobs)
+    assert all(
+        forbidden not in source
+        for forbidden in ("repository", "sqlite", "thread", "timer", "after(", "async")
+    )
 
 
 def test_proposal_draft_round_trip_and_authority(tmp_path: Path) -> None:
