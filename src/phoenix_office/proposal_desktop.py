@@ -3587,6 +3587,7 @@ class ProposalDesktopApp:
             for index, customer in enumerate(self.controller.customers)
             if customer.customer_id == customer_id
         )
+        self._customer_combo.configure(values=self.controller.customer_display_labels)
         self._customer_combo.current(selected_index)
         self._customer_variable.set(
             self.controller.customer_display_labels[selected_index]
