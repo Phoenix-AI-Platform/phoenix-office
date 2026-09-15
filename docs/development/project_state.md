@@ -66,6 +66,12 @@ For focused repair prompts after CI fails, see [failed CI repair prompt guide](f
 
 For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem-informed PRD](../prd/ecosystem-informed-prd.md).
 
+## Accepted V1 State — Through TASK-100
+
+Operator Workspace V1 is code-complete. Phoenix Office is operationally usable on Windows for the accepted, explicit proposal workflow. The accepted code baseline is PR #439 / TASK-100, commit `f09152917753522f8cfad7012271b71dc130feb8`.
+
+Merged code and operational evidence are distinct: [issue #440](https://github.com/Phoenix-AI-Platform/phoenix-office/issues/440) records successful manual Windows operational acceptance on 2026-09-15, including the installed GUI launcher and an operator-created Desktop shortcut named **Phoenix Office**. This handoff records that acceptance; it does not perform installation or launch checks again.
+
 ## Current Verified Spine
 
 ```text
@@ -200,6 +206,40 @@ For the ecosystem-informed Phoenix AI Platform product direction, see [ecosystem
 #354 feat: implement TASK-055 insert-only desktop job creation for the selected customer
 #356 feat: implement TASK-056 guarded desktop customer editing with immutable identity and stale-data protection
 #358 feat: implement TASK-057 guarded desktop job editing with immutable identity, fixed customer association, and stale-data protection
+#360 docs: synchronize the earlier desktop state through PR #358
+#362 feat: durable local supervised Codex claim store
+#364 feat: supervised Codex execution-to-PR pipeline
+#366 fix: safe deterministic native Windows supervised launch
+#368 fix: restore authenticated Codex transport context
+#372 feat: isolated WSL2 Codex worker adapter with validated patch transfer
+#377 feat: bounded Codex usage telemetry
+#379 feat: bounded supervised worker context
+#381 fix: bind pilot validation to the canonical virtual environment
+#385 docs: record the supervised Codex autonomy milestone
+#387 feat: build supervised Codex run packages
+#389 feat: execute externally reviewed Codex task specs
+#391 feat: propose a bounded next Codex task without approving it
+#393 feat: compile externally approved Codex successor task specs
+#396 fix: align successor objective validation
+#397 docs: record the bounded successor-driven supervised pilot
+#399 feat: execute an externally approved successor in one command
+#401 feat: bounded Python successor class
+#404 fix: bind WSL transfer to the reviewed execution class
+#406 fix: pin bounded Python reasoning effort
+#409 fix: compact the bounded Python worker prompt
+#410 fix: capture Codex usage component telemetry
+#417 feat: TASK-089 explicit private records workspace creation
+#419 feat: TASK-090 save and reopen private proposal drafts without restoring stale authority
+#421 feat: TASK-091 record externally supplied PR disposition as evidence only
+#423 feat: TASK-092 emit reviewed cycle advancement evidence without selecting or executing a successor
+#425 feat: TASK-093 persist private workspace preferences
+#427 feat: TASK-094 guided five-stage proposal workspace
+#429 feat: TASK-095 private Recent Work browser with explicit draft/file opening
+#431 feat: TASK-096 Generated Proposal panel bound to the current build result
+#433 feat: TASK-097 persistent guidance and scroll-only stage navigation
+#435 feat: TASK-098 clearer proposal output destinations and bounded readable summaries
+#437 feat: TASK-099 clearer Recent Work identity and newest-first presentation
+#439 packaging: TASK-100 installed GUI entry point targeting the existing desktop main
 ```
 
 ## Current Manual A-1 Proposal Workflow
@@ -220,62 +260,90 @@ This workflow is accepted for internal manual v0.1 use, subject to human review.
 
 ## Current Local Desktop Proposal Workflow
 
-Verified progress through PR #358 adds a local standard-library desktop workflow at:
+The accepted Operator Workspace V1 extends the PR #347–#358 desktop/customer/job foundation with these merged capabilities:
+
+| Merged PR / task | Accepted capability and boundary |
+|---|---|
+| #347, #349, #350 / TASK-052–053 | Explicit customer/job selection and deterministic DOCX + companion JSON generation; real-Tk combobox correction |
+| #352, #354, #356, #358 / TASK-054–057 | Insert-only customer/job creation and guarded editing; immutable identities, fixed job/customer association, stale-data protection |
+| #417 / TASK-089 | Explicit creation of a new private records database through the existing initializer; no overwrite, migration, or automatic record creation |
+| #419 / TASK-090 | Save and reopen private proposal drafts; reopen reconciles records read-only and clears stale validation, build, artifact-open, and edit authority |
+| #425 / TASK-093 | Private preferences persist database, template, and output-root locations; remembered paths grant no proposal authority |
+| #427 / TASK-094 | Guided stages: Workspace, Customer, Job, Proposal, Review & Generate; readiness derives from existing controller/form state |
+| #429 / TASK-095 | Recent Work for successful drafts and generated artifacts; bounded private history, inert selection, deliberate opening |
+| #431 / TASK-096 | Generated Proposal handoff panel uses only the current controller build result for status, filenames, and explicit actions |
+| #433 / TASK-097 | Persistent status and next-action guidance outside the scrolling form; stage navigation moves only the viewport |
+| #435 / TASK-098 | Clearer Proposal Save Location, Current Proposal Folder, Proposal Document (DOCX), and Companion Data (JSON) terminology and summaries; path rules unchanged |
+| #437 / TASK-099 | Friendly Recent Work kind labels, bounded filename/parent-folder identity, and newest-first presentation; stored paths/order and opening authority unchanged |
+| #439 / TASK-100 | Installed GUI command `phoenix-office-desktop` targets `phoenix_office.proposal_desktop:main`; existing CLI and source modules unchanged |
+
+Current deliberate operator flow:
+
+```text
+select or explicitly create a private records workspace
+  -> select/create/guardedly edit customer and job
+  -> enter explicit proposal details through the guided stages
+  -> explicitly save or reopen a draft when needed
+  -> explicitly validate the current proposal
+  -> explicitly generate DOCX + companion JSON
+  -> review the current Generated Proposal panel
+  -> explicitly open an artifact when desired
+```
+
+The desktop reuses the established record models, validation/build services, DOCX renderer, and template behavior. Proposal-affecting edits invalidate stale validation/build authority and current-build artifact actions; a fresh explicit validation/build is required. Reopening a draft does not restore old validation or generation authority.
+
+Recent Work is historical/convenience metadata only. It can deliberately reopen a saved draft through the shared draft path or open a historical generated file, but never makes that artifact the current build, validates it, approves it, or grants delivery authority. The Generated Proposal panel remains tied to the explicit current build result.
+
+### Supported launch paths and Windows acceptance
+
+Source/developer:
 
 ```bash
 python -m phoenix_office.proposal_desktop
 ```
 
-The completed desktop capability cluster is:
-
-- PR #347 / TASK-052 — read-only local desktop proposal-form foundation for explicit existing-customer and existing-job selection.
-- PR #349 plus corrective PR #350 / TASK-053 — deliberate DOCX and companion JSON generation through the existing deterministic validation/build path, including the real-Tk combobox clearing correction.
-- PR #352 / TASK-054 — insert-only customer creation with duplicate protection.
-- PR #354 / TASK-055 — insert-only job creation bound only to the deliberately selected existing customer.
-- PR #356 / TASK-056 — guarded customer editing with immutable `customer_id` and optimistic stale-data protection.
-- PR #358 / TASK-057 — guarded job editing with immutable `job_id` and `customer_id`, no customer reassignment, and optimistic stale-data protection.
-
-Current deliberate operator flow:
+Installed GUI:
 
 ```text
-create customer
-  -> edit customer safely
-  -> create job for the selected customer
-  -> edit job safely without changing its identity or customer
-  -> select customer and job
-  -> enter explicit proposal details
-  -> validate through the existing deterministic pipeline
-  -> generate DOCX + companion JSON
+phoenix-office-desktop
 ```
 
-The desktop adapter reuses the established record models, validation/build services, DOCX renderer, and template behavior. It does not replace or alter the existing CLI proposal workflow above.
+Windows: an operator-created Desktop shortcut targeting the installed GUI launcher. The operator-created shortcut named **Phoenix Office** successfully launched the app during the manual Windows acceptance recorded in issue #440 on 2026-09-15.
 
-Current desktop authority is intentionally narrow:
+PR #439's original Windows metadata refresh was blocked by `BackendUnavailable: Cannot import 'setuptools.build_meta'`; launcher resolution/demo were then NOT_RUN. The later operator acceptance in issue #440 records the packaging-backend repair, runtime dependency installation from the canonical local checkout, and successful real GUI and shortcut launches. That later operational acceptance closes the launch gap; it does not retroactively turn earlier unrun visual checks into passes. **TASK-099 native visual evidence remains NOT_RUN.**
+
+Phoenix Office is **not** a standalone portable/frozen EXE, a packaged Windows installer, or an auto-updating application. Installation does not automatically create the Desktop shortcut. Launching grants no business-action authority.
+
+### Desktop authority and safety boundaries
 
 ```text
+LOCAL_FIRST=YES
 CUSTOMER_CREATE=YES
 CUSTOMER_EDIT=YES
 CUSTOMER_DELETE=NO
 CUSTOMER_ID_RENAME=NO
-
 JOB_CREATE=YES
 JOB_EDIT=YES
 JOB_DELETE=NO
 JOB_ID_RENAME=NO
 JOB_CUSTOMER_REASSIGNMENT=NO
-
-DATABASE_INITIALIZATION_FROM_DESKTOP=NO
+DATABASE_INITIALIZATION_FROM_DESKTOP=EXPLICIT_NEW_PRIVATE_WORKSPACE_ONLY
 DATABASE_MIGRATION=NO
 SCHEMA_CHANGE=NO
-NETWORK_ACCESS=NO
-BACKGROUND_WORK=NO
+DRAFT_SAVE_REOPEN=EXPLICIT_ONLY
+AUTOMATIC_VALIDATION=NO
+AUTOMATIC_GENERATION=NO
+AUTOMATIC_ARTIFACT_OPENING=NO
 AUTOMATIC_EMAIL_OR_DELIVERY=NO
+NETWORK_API_MCP_AUTHORITY=NO
+BACKGROUND_WORK=NO
+AUTONOMOUS_BUSINESS_ACTIONS=NO
 INFERRED_PRICING=NO
 INFERRED_SCOPE=NO
 INFERRED_NOTES=NO
 ```
 
-Desktop writes are limited to explicit insert-only customer/job creation and optimistic guarded updates of existing customer/job rows. The desktop does not delete records, initialize or migrate databases, change schemas, infer proposal content, send proposals, or run background/network work. Proposal reopening or revision persistence is not implemented.
+Private records, draft files, preferences, and Recent Work remain local and outside Git. Explicit new-workspace initialization, draft save/reopen, and private convenience persistence are implemented; they do not authorize database migration, historical revision management, automatic restore/validation/generation/opening, sending, or background execution. Existing CLI proposal behavior is unchanged.
 
 ## Current Orchestration State
 
@@ -313,6 +381,10 @@ python -m phoenix_office.cli orchestration review inspect examples/orchestration
 This command parses an existing `WorkflowPlanReview` JSON file and prints a human-readable summary. It is read-only and non-executing. It does not approve, reject, or mutate reviews, and it does not execute, persist, enqueue, schedule, retry, or generate artifacts.
 
 ## Current Development-Process State
+
+The separate supervised development path has merged durable claim/control state and an execution-to-PR foundation (#362, #364), qualified WSL2 worker isolation (#372), bounded run packages/reviewed execution (#387, #389), successor proposal/compilation (#391, #393), and explicitly approved successor execution with a bounded Python class (#399, #401). PR #397 records the bounded TASK-077 pilot. These are supervised engineering capabilities, not desktop business automation or orchestration-plan execution.
+
+PR #421 records supplied external PR dispositions; PR #423 classifies reviewed cycle advancement and successor eligibility as evidence only. Neither operation performs GitHub/network/filesystem actions, grants approval or merge authority, chooses a successor, or runs a continuous loop. Worker approval/merge authority, autonomous business actions, background resume, and automatic retries remain unavailable.
 
 Phoenix Office now has repo-native process documentation for keeping future work narrow and project-state-aware:
 
@@ -373,8 +445,10 @@ The current product direction is deterministic-core-first: Phoenix should not be
 
 ## Explicit Non-Capabilities
 
+The execution/enforcement exclusions below refer to business orchestration plans; they do not negate the separately reviewed, bounded supervised development path.
+
 - No orchestration execution exists.
-- No CLI workflow execution command exists.
+- No business-orchestration CLI workflow execution command exists.
 - No CLI approval command exists.
 - No natural-language intake exists.
 - No audit persistence exists.
@@ -390,7 +464,7 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No private-data or secrets enforcement exists.
 - No permission or capability enforcement exists.
 - No idempotency or replay behavior exists.
-- No worker execution exists.
+- No autonomous business worker execution exists; supervised development workers remain bounded by external review.
 - No plugin runtime execution exists.
 - No scheduler or retry system exists.
 - No automatic DOCX generation from orchestration exists.
@@ -399,13 +473,19 @@ The current product direction is deterministic-core-first: Phoenix should not be
 - No desktop customer or job deletion exists.
 - No desktop customer-ID or job-ID rename exists.
 - No desktop job customer reassignment exists.
-- No desktop database initialization, migration, or schema change exists.
+- No desktop database migration or schema change exists; new private workspace initialization requires explicit action.
 - No desktop network access, background work, or automatic email/delivery exists.
-- No proposal reopening or revision persistence exists.
+- No automatic proposal reopening or historical revision-management system exists; explicit draft save/reopen is complete.
 
 ## Completed Items Not To Duplicate
 
 Do not recreate these as new work:
+
+- installed GUI launch path from PR #439 / TASK-100 and the separately recorded Windows shortcut acceptance
+- Recent Work identity/recency and output destination clarity from PRs #437 and #435
+- persistent guidance/stage navigation and current-build Generated Proposal panel from PRs #433 and #431
+- Recent Work, guided workspace, and private preferences from PRs #429, #427, and #425
+- explicit proposal draft save/reopen and new private workspace creation from PRs #419 and #417
 
 - guarded desktop job editing from PR #358
 - guarded desktop customer editing from PR #356
@@ -458,12 +538,12 @@ Execution remains out of scope until explicitly approved in a later task.
 ## Guardrails
 
 - No execution without human approval.
-- No CLI execution command yet.
+- No business-orchestration CLI execution command yet.
 - No customer data in repo.
 - No generated output artifacts committed.
 - No pricing, scope, or notes inference.
 - No desktop record deletion, identity rename, or job customer reassignment.
-- No desktop database initialization, migration, networking, background work, or automatic delivery.
-- No proposal reopening or revision persistence claim.
+- New private database initialization is explicit only; no migration, networking/API/MCP authority, background work, or automatic delivery.
+- Draft save/reopen is explicit only; no automatic validation, generation, artifact opening, or autonomous business actions.
 - No DOCX renderer/template changes without a dedicated PR.
 - One branch, one PR, one narrow scope.
